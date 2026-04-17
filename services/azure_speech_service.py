@@ -75,8 +75,8 @@ def assess_pronunciation(
     import io
     import azure.cognitiveservices.speech as speechsdk
 
-    # Convert AAC → WAV PCM 16kHz mono
-    wav_bytes = _aac_to_wav_pcm(audio_bytes)
+    # Auto-detect audio format (browser records WebM/Opus, not AAC)
+    wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
 
     speech_config = speechsdk.SpeechConfig(
         subscription=AZURE_SPEECH_KEY,
