@@ -97,3 +97,59 @@ def to_pte_score(weighted_pct: float) -> int:
 | listening_hiw | `HIWScorer` | Yes |
 | summarize_written_text, write_essay | `AIScorer` | Yes |
 | listening_sst | `AIScorer` | Yes |
+
+## Router Structure Guardrail (MANDATORY)
+
+All per-type routers live in `routers/`. One file per question type. Mirror this structure exactly.
+
+```
+routers/
+  speaking/
+    read_aloud.py                 → /api/v1/questions/speaking/read-aloud
+    repeat_sentence.py            → /api/v1/questions/speaking/repeat-sentence
+    describe_image.py             → /api/v1/questions/speaking/describe-image
+    retell_lecture.py             → /api/v1/questions/speaking/retell-lecture
+    summarize_group_discussion.py → /api/v1/questions/speaking/summarize-group-discussion
+    respond_to_situation.py       → /api/v1/questions/speaking/respond-to-situation
+    answer_short_question.py      → /api/v1/questions/speaking/answer-short-question
+  writing/
+    summarize_written_text.py     → /api/v1/questions/writing/summarize-written-text
+    write_essay.py                → /api/v1/questions/writing/write-essay
+  reading/
+    mcs.py                        → /api/v1/questions/reading/mcs
+    mcm.py                        → /api/v1/questions/reading/mcm
+    fill_in_blanks.py             → /api/v1/questions/reading/fib
+    fib_drag_drop.py              → /api/v1/questions/reading/fib-drag-drop
+    reorder_paragraphs.py         → /api/v1/questions/reading/reorder-paragraphs
+  listening/
+    mcs.py                        → /api/v1/questions/listening/mcs
+    mcm.py                        → /api/v1/questions/listening/mcm
+    fib.py                        → /api/v1/questions/listening/fib
+    hcs.py                        → /api/v1/questions/listening/hcs
+    smw.py                        → /api/v1/questions/listening/smw
+    hiw.py                        → /api/v1/questions/listening/hiw
+    wfd.py                        → /api/v1/questions/listening/wfd
+    sst.py                        → /api/v1/questions/listening/sst
+  sectional/
+    speaking.py                   → /api/v1/questions/sectional/speaking
+    writing.py                    → /api/v1/questions/sectional/writing
+    reading.py                    → /api/v1/questions/sectional/reading
+    listening.py                  → /api/v1/questions/sectional/listening
+```
+
+### Standard endpoint pattern per router
+
+| Endpoint | All types | Speaking only |
+|---|---|---|
+| `POST /start` | ✓ | ✓ |
+| `POST /submit` | ✓ | ✓ |
+| `GET /score/{question_id}` | — | ✓ poll Azure score |
+| `GET /audio-url` | — | ✓ presigned playback URL |
+| `GET /upload-url` | — | ✓ presigned S3 upload URL |
+
+### Rules
+- Every `POST /submit` MUST call `get_scorer(question_type).score(...)` — never write inline scoring in a router
+- To add a new question type: create a new file, add its scorer to `services/scoring/registry.py`, mount in `main.py`
+- Never change endpoint paths without verifying the iOS client (`englishfirm-app-flutter`) still works
+- Session state lives in `services/session_service.py` — never import `ACTIVE_SESSIONS` or `_SCORE_STORE` directly from any other module
+- Sectional routers at `routers/sectional/` own exam-level flows (finish + aggregate) — per-question scoring still delegates to `get_scorer()`
