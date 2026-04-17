@@ -9,6 +9,7 @@ from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, get_score_from_store, store_score
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url, generate_presigned_upload_url
+import core.config as config
 
 router = APIRouter(prefix="/speaking/read-aloud", tags=["Speaking - Read Aloud"])
 
@@ -19,10 +20,9 @@ def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: i
         try:
             from services.scoring.azure_scorer import _compute_question_score
             import requests
-            import os
 
-            azure_key = os.getenv("AZURE_SPEECH_KEY", "")
-            azure_region = os.getenv("AZURE_SPEECH_REGION", "eastus")
+            azure_key = config.AZURE_SPEECH_KEY
+            azure_region = config.AZURE_SPEECH_REGION
 
             # Real Azure integration would go here.
             # For now, store a placeholder pending result — tests mock this entirely.

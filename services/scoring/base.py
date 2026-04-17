@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import core.config as config
+
 
 @dataclass
 class ScoringResult:
@@ -14,7 +16,7 @@ class ScoringResult:
 
 def to_pte_score(weighted_pct: float) -> int:
     """PTE formula — floor 10, ceiling 90, scale 80. NEVER inline this."""
-    return max(10, min(90, round(10 + weighted_pct * 80)))
+    return max(config.PTE_FLOOR, min(config.PTE_CEILING, round(config.PTE_BASE + weighted_pct * config.PTE_SCALE)))
 
 
 class ScoringStrategy(ABC):

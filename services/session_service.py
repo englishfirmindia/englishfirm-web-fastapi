@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, joinedload
 from fastapi import HTTPException, status
 
 from db.models import QuestionFromApeuni
+import core.config as config
 
 ACTIVE_SESSIONS: Dict[str, dict] = {}
 _SCORE_STORE: Dict[tuple, dict] = {}  # keyed by (user_id, question_id)
@@ -24,7 +25,7 @@ def start_session(
     module: str,
     question_type: str,
     difficulty_level: Optional[int] = None,
-    limit: int = 20,
+    limit: int = config.SESSION_QUESTION_LIMIT,
 ) -> dict:
     """
     Load questions from DB, create in-memory session.
