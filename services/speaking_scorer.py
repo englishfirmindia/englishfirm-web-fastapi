@@ -6,7 +6,7 @@ import threading
 import requests as _requests
 
 from services.s3_service import generate_presigned_url
-from services.session_service import store_score
+from services.session_service import store_score, update_speaking_score_in_db
 
 _WORD_COUNT_TARGET = {
     "describe_image": 40,
@@ -34,6 +34,16 @@ def _run_scoring(user_id: int, question_id: int, question_type: str, audio_url: 
                 "total":         raw["total"],
                 "word_scores":   raw.get("word_scores", []),
             })
+            update_speaking_score_in_db(
+                user_id=user_id,
+                question_id=question_id,
+                content=raw.get("content", 0),
+                pronunciation=raw.get("pronunciation", 0),
+                fluency=raw.get("fluency", 0),
+                total=raw.get("total", 0),
+                transcript=raw.get("transcript", ""),
+                word_scores=raw.get("word_scores", []),
+            )
         elif question_type == "answer_short_question":
             raw = transcribe_and_score_free(audio_bytes)
             store_score(user_id, question_id, {
@@ -43,6 +53,16 @@ def _run_scoring(user_id: int, question_id: int, question_type: str, audio_url: 
                 "fluency":       raw.get("fluency", 0),
                 "pronunciation": raw.get("pronunciation", 0),
             })
+            update_speaking_score_in_db(
+                user_id=user_id,
+                question_id=question_id,
+                content=0.0,
+                pronunciation=raw.get("pronunciation", 0),
+                fluency=raw.get("fluency", 0),
+                total=0.0,
+                transcript=raw.get("transcript", ""),
+                word_scores=[],
+            )
         else:
             # DI, RL, RTS, SGD — fluency + pronunciation from Azure, word-count proxy for content
             raw = transcribe_and_score_free(audio_bytes)
@@ -57,6 +77,16 @@ def _run_scoring(user_id: int, question_id: int, question_type: str, audio_url: 
                 "pronunciation": raw.get("pronunciation", 0),
                 "word_scores":   raw.get("word_scores", []),
             })
+            update_speaking_score_in_db(
+                user_id=user_id,
+                question_id=question_id,
+                content=round(content, 1),
+                pronunciation=raw.get("pronunciation", 0),
+                fluency=raw.get("fluency", 0),
+                total=raw.get("total", 0),
+                transcript=transcript,
+                word_scores=raw.get("word_scores", []),
+            )
 
     except Exception as e:
         store_score(user_id, question_id, {"scoring": "error", "error": str(e)})

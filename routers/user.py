@@ -80,3 +80,47 @@ def get_last_answer(
         "user_answer_json": answer.user_answer_json,
         "result_json": answer.result_json,
     }
+
+
+@router.get("/attempts/history")
+def get_attempts_history(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    attempts = (
+        db.query(PracticeAttempt)
+        .filter(PracticeAttempt.user_id == current_user.id)
+        .order_by(PracticeAttempt.started_at.desc())
+        .limit(50)
+        .all()
+    )
+    return [
+        {
+            "id": a.id,
+            "session_id": a.session_id,
+            "module": a.module,
+            "question_type": a.question_type,
+            "filter_type": a.filter_type,
+            "total_questions": a.total_questions,
+            "questions_answered": a.questions_answered,
+            "total_score": a.total_score,
+            "status": a.status,
+            "scoring_status": a.scoring_status,
+            "started_at": a.started_at.isoformat() if a.started_at else None,
+            "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+        }
+        for a in attempts
+    ]
+
+
+@router.get("/attempts/evaluation/{question_id}")
+def get_evaluation(
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from db.models import QuestionEvaluationApeuni
+    ev = db.query(QuestionEvaluationApeuni).filter_by(question_id=question_id).first()
+    if not ev:
+        return None
+    return {"evaluation_json": ev.evaluation_json}
