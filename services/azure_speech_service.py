@@ -1,0 +1,330 @@
+"""
+Azure Cognitive Services — Pronunciation Assessment + STT
+Used for Read Aloud, Repeat Sentence, and other speaking tasks.
+
+Score scale: all values returned by this module are 0-100 (raw Azure scale).
+speaking_scoring_service divides by 100.0 to normalise.
+"""
+
+import os
+import re
+import json
+import time
+import hmac
+import base64
+import hashlib
+import logging
+import threading
+import requests
+import urllib.parse
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+AZURE_SPEECH_KEY    = os.getenv("AZURE_SPEECH_KEY", "")
+AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "australiaeast")
+
+
+def _get_stt_token() -> str:
+    """Exchange subscription key for a short-lived bearer token."""
+    url = f"https://{AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken"
+    r = requests.post(url, headers={"Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY}, timeout=10)
+    r.raise_for_status()
+    return r.text
+
+
+def _aac_to_wav_pcm(aac_bytes: bytes) -> bytes:
+    """Convert AAC bytes to 16kHz mono WAV/PCM using pydub + ffmpeg."""
+    import io
+    from pydub import AudioSegment
+    audio = AudioSegment.from_file(io.BytesIO(aac_bytes), format="aac")
+    audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+    buf = io.BytesIO()
+    audio.export(buf, format="wav")
+    return buf.getvalue()
+
+
+def _any_audio_to_wav_pcm(audio_bytes: bytes) -> bytes:
+    """Convert any audio format (MP3, AAC, M4A, WAV…) to 16kHz mono WAV/PCM.
+    Used for stimulus transcription where files may be MP3 (RL/SGD) or AAC (RS).
+    """
+    import io
+    from pydub import AudioSegment
+    # Let pydub/ffmpeg auto-detect the format
+    audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+    buf = io.BytesIO()
+    audio.export(buf, format="wav")
+    return buf.getvalue()
+
+
+def assess_pronunciation(
+    audio_bytes: bytes,
+    reference_text: str,
+    language: str = "en-US",
+    granularity: str = "Word",
+    enable_miscue: bool = True,
+) -> dict:
+    """
+    Use Azure Speech SDK for pronunciation assessment.
+    Returns a normalised dict with AccuracyScore, FluencyScore, and word-level results.
+    """
+    if not AZURE_SPEECH_KEY:
+        raise RuntimeError("AZURE_SPEECH_KEY not configured")
+
+    import io
+    import azure.cognitiveservices.speech as speechsdk
+
+    # Convert AAC → WAV PCM 16kHz mono
+    wav_bytes = _aac_to_wav_pcm(audio_bytes)
+
+    speech_config = speechsdk.SpeechConfig(
+        subscription=AZURE_SPEECH_KEY,
+        region=AZURE_SPEECH_REGION,
+    )
+    speech_config.speech_recognition_language = language
+
+    pronunciation_config = speechsdk.PronunciationAssessmentConfig(
+        reference_text=reference_text,
+        grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
+        granularity=speechsdk.PronunciationAssessmentGranularity.Word,
+        enable_miscue=enable_miscue,
+    )
+
+    audio_stream = speechsdk.audio.PushAudioInputStream()
+    audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
+    recognizer    = speechsdk.SpeechRecognizer(
+        speech_config=speech_config,
+        audio_config=audio_config,
+    )
+    pronunciation_config.apply_to(recognizer)
+
+    audio_stream.write(wav_bytes)
+    audio_stream.close()
+
+    result = recognizer.recognize_once()
+
+    if result.reason == speechsdk.ResultReason.NoMatch:
+        raise RuntimeError("Azure: no speech recognised")
+    if result.reason == speechsdk.ResultReason.Canceled:
+        raise RuntimeError(f"Azure cancelled: {result.cancellation_details.reason}")
+
+    pa_result = speechsdk.PronunciationAssessmentResult(result)
+
+    words = []
+    for w in pa_result.words:
+        words.append({
+            "Word":        w.word,
+            "AccuracyScore": w.accuracy_score,
+            "ErrorType":   w.error_type,
+        })
+
+    return {
+        "AccuracyScore": pa_result.accuracy_score,
+        "FluencyScore":  pa_result.fluency_score,
+        "recognized_text": result.text,
+        "Words": words,
+    }
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, strip punctuation for word matching."""
+    return re.sub(r"[^a-z0-9\s']", "", text.lower()).strip()
+
+
+def calculate_content_score(reference_text: str, recognized_text: str) -> float:
+    """
+    Content = (matching_words / total_reference_words) * 100
+    Uses simple word-overlap (same as PTE scoring).
+    Returns 0-100.
+    """
+    ref_words  = _normalize(reference_text).split()
+    rec_words  = _normalize(recognized_text).split()
+    if not ref_words:
+        return 0.0
+
+    # Count how many reference words appear in recognised text (order-aware greedy match)
+    rec_copy = rec_words[:]
+    matched  = 0
+    for w in ref_words:
+        if w in rec_copy:
+            matched += 1
+            rec_copy.remove(w)
+
+    return round(min((matched / len(ref_words)) * 100, 100), 1)
+
+
+def transcribe_and_score_free(audio_bytes: bytes) -> dict:
+    """
+    Free-form STT + fluency/pronunciation scoring (no reference text).
+    Used for Describe Image, Retell Lecture, Respond to Situation.
+    Returns:
+        {
+            "transcript":    str,
+            "fluency":       float (0-100),
+            "pronunciation": float (0-100),
+            "word_scores":   list,
+        }
+    """
+    try:
+        azure_result = assess_pronunciation(
+            audio_bytes=audio_bytes,
+            reference_text="",
+            enable_miscue=False,
+        )
+        accuracy_score = azure_result.get("AccuracyScore", 0)
+        fluency_score  = azure_result.get("FluencyScore", 0)
+        transcript     = azure_result.get("recognized_text", "")
+
+        word_scores = []
+        for w in azure_result.get("Words", []):
+            word_scores.append({
+                "word":       w.get("Word", ""),
+                "error_type": w.get("ErrorType", "None"),
+                "accuracy":   w.get("AccuracyScore", 0),
+            })
+
+        return {
+            "transcript":    transcript,
+            "fluency":       round(float(fluency_score), 1),
+            "pronunciation": round(float(accuracy_score), 1),
+            "word_scores":   word_scores,
+        }
+    except Exception as e:
+        logger.error("transcribe_and_score_free failed: %s", e)
+        return {
+            "transcript":    "",
+            "fluency":       0.0,
+            "pronunciation": 0.0,
+            "word_scores":   [],
+        }
+
+
+def score_read_aloud(audio_bytes: bytes, reference_text: str) -> dict:
+    """
+    Full Read Aloud / Repeat Sentence scoring pipeline.
+    Returns all scores on 0-100 scale (raw Azure values, no scaling).
+        {
+            "content":       0-100,
+            "pronunciation": 0-100,
+            "fluency":       0-100,
+            "total":         0-100,   # average of three
+            "recognized_text": str,
+            "word_scores":   [...],
+        }
+    """
+    try:
+        azure_result = assess_pronunciation(
+            audio_bytes=audio_bytes,
+            reference_text=reference_text,
+            granularity="Word",
+            enable_miscue=True,
+        )
+    except Exception as e:
+        logger.error("Azure assessment failed: %s", e)
+        return {
+            "content": 0, "pronunciation": 0, "fluency": 0, "total": 0,
+            "recognized_text": "", "word_scores": [],
+            "error": str(e),
+        }
+
+    accuracy_score = azure_result.get("AccuracyScore", 0)
+    fluency_score  = azure_result.get("FluencyScore",  0)
+    recognized     = azure_result.get("recognized_text", "")
+
+    print(f"[AZURE] AccuracyScore={accuracy_score} FluencyScore={fluency_score} text='{recognized[:60]}'", flush=True)
+
+    pronunciation = round(float(accuracy_score), 1)
+    fluency       = round(float(fluency_score), 1)
+    content       = calculate_content_score(reference_text, recognized)
+    total         = round((content + pronunciation + fluency) / 3, 1)
+
+    word_scores = []
+    for w in azure_result.get("Words", []):
+        word_scores.append({
+            "word":       w.get("Word", ""),
+            "error_type": w.get("ErrorType", "None"),
+            "accuracy":   w.get("AccuracyScore", 0),
+        })
+
+    return {
+        "content":         content,
+        "pronunciation":   pronunciation,
+        "fluency":         fluency,
+        "total":           total,
+        "recognized_text": recognized,
+        "word_scores":     word_scores,
+    }
+
+
+def transcribe_audio_short(audio_bytes: bytes) -> str:
+    """
+    Pure STT for short audio (< 30s, e.g. Repeat Sentence stimulus).
+    Uses recognize_once() — stops on first silence.
+    Returns transcript string.
+    """
+    if not AZURE_SPEECH_KEY:
+        return ""
+    try:
+        import azure.cognitiveservices.speech as speechsdk
+        wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
+
+        speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+        audio_stream  = speechsdk.audio.PushAudioInputStream()
+        audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
+        recognizer    = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+
+        audio_stream.write(wav_bytes)
+        audio_stream.close()
+
+        result = recognizer.recognize_once()
+        if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+            return result.text
+        return ""
+    except Exception as e:
+        logger.error("transcribe_audio_short failed: %s", e)
+        return ""
+
+
+def transcribe_audio_full(audio_bytes: bytes) -> str:
+    """
+    Pure STT for long audio (e.g. Retell Lecture ~90s, SGD ~180s).
+    Uses continuous recognition so the full audio is transcribed.
+    Returns full transcript string.
+    """
+    if not AZURE_SPEECH_KEY:
+        return ""
+    try:
+        import azure.cognitiveservices.speech as speechsdk
+        wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
+
+        speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+        audio_stream  = speechsdk.audio.PushAudioInputStream()
+        audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
+        recognizer    = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+
+        all_text  = []
+        done_evt  = threading.Event()
+
+        def _recognized(evt):
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                all_text.append(evt.result.text)
+
+        def _stop(evt):
+            done_evt.set()
+
+        recognizer.recognized.connect(_recognized)
+        recognizer.session_stopped.connect(_stop)
+        recognizer.canceled.connect(_stop)
+
+        audio_stream.write(wav_bytes)
+        audio_stream.close()
+
+        recognizer.start_continuous_recognition()
+        done_evt.wait(timeout=180)
+        recognizer.stop_continuous_recognition()
+
+        return " ".join(all_text)
+    except Exception as e:
+        logger.error("transcribe_audio_full failed: %s", e)
+        return ""

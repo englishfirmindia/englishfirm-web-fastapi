@@ -1,4 +1,3 @@
-import threading
 import uuid
 from fastapi import APIRouter, Depends, Body
 from sqlalchemy.orm import Session
@@ -13,21 +12,10 @@ from services.s3_service import generate_presigned_url, generate_presigned_uploa
 router = APIRouter(prefix="/speaking/answer-short-question", tags=["Speaking - Answer Short Question"])
 
 
-def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int) -> None:
-    def _run():
-        try:
-            store_score(user_id, question_id, {
-                "scoring": "complete",
-                "pte_score": 0,
-                "content": 0,
-                "fluency": 0,
-                "pronunciation": 0,
-            })
-        except Exception as e:
-            store_score(user_id, question_id, {"scoring": "error", "error": str(e)})
+def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int, reference_text: str = "") -> None:
+    from services.speaking_scorer import kick_off_scoring
+    kick_off_scoring(user_id, question_id, task_type, audio_url, reference_text)
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
 
 
 @router.post("/start")

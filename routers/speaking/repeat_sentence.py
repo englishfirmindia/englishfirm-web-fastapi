@@ -1,4 +1,3 @@
-import threading
 import uuid
 from fastapi import APIRouter, Depends, Body
 from sqlalchemy.orm import Session
@@ -13,21 +12,10 @@ from services.s3_service import generate_presigned_url, generate_presigned_uploa
 router = APIRouter(prefix="/speaking/repeat-sentence", tags=["Speaking - Repeat Sentence"])
 
 
-def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int) -> None:
-    def _run():
-        try:
-            store_score(user_id, question_id, {
-                "scoring": "complete",
-                "pte_score": 0,
-                "content": 0,
-                "fluency": 0,
-                "pronunciation": 0,
-            })
-        except Exception as e:
-            store_score(user_id, question_id, {"scoring": "error", "error": str(e)})
+def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int, reference_text: str = "") -> None:
+    from services.speaking_scorer import kick_off_scoring
+    kick_off_scoring(user_id, question_id, task_type, audio_url, reference_text)
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
 
 
 @router.post("/start")
@@ -66,6 +54,8 @@ def submit(
     audio_url = payload["audio_url"]
 
     session = get_session(session_id)
+    q_obj = session["questions"].get(question_id)
+    reference_text = (q_obj.content_json or {}).get("transcript", "") if q_obj else ""
 
     scorer = get_scorer("repeat_sentence")
     scorer.score(
@@ -73,7 +63,7 @@ def submit(
         session_id=session_id,
         answer={
             "audio_url": audio_url,
-            "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id),
+            "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id, reference_text),
         },
     )
     mark_submitted(session_id, question_id, 0)

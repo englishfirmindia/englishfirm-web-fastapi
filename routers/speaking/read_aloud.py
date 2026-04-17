@@ -1,4 +1,3 @@
-import threading
 import uuid
 from fastapi import APIRouter, Depends, Body
 from sqlalchemy.orm import Session
@@ -6,27 +5,16 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import User
 from core.dependencies import get_current_user
-from services.session_service import start_session, get_session, mark_submitted, get_score_from_store, store_score
+from services.session_service import start_session, get_session, mark_submitted, get_score_from_store
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url, generate_presigned_upload_url
-import core.config as config
+from services.speaking_scorer import kick_off_scoring
 
 router = APIRouter(prefix="/speaking/read-aloud", tags=["Speaking - Read Aloud"])
 
 
-def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int) -> None:
-    """Fire-and-forget Azure scoring thread. Stores result in _SCORE_STORE."""
-    def _run():
-        store_score(user_id, question_id, {
-            "scoring": "complete",
-            "pte_score": 0,
-            "content": 0,
-            "fluency": 0,
-            "pronunciation": 0,
-        })
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
+def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int, reference_text: str = "") -> None:
+    kick_off_scoring(user_id, question_id, task_type, audio_url, reference_text)
 
 
 @router.post("/start")
@@ -65,6 +53,8 @@ def submit(
     audio_url = payload["audio_url"]
 
     session = get_session(session_id)
+    q_obj = session["questions"].get(question_id)
+    reference_text = (q_obj.content_json or {}).get("passage", "") if q_obj else ""
 
     scorer = get_scorer("read_aloud")
     scorer.score(
@@ -72,7 +62,7 @@ def submit(
         session_id=session_id,
         answer={
             "audio_url": audio_url,
-            "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id),
+            "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id, reference_text),
         },
     )
     mark_submitted(session_id, question_id, 0)
