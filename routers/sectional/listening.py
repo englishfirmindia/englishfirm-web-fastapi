@@ -48,19 +48,27 @@ from services.listening_sectional_service import (
 router = APIRouter(prefix="/sectional/listening", tags=["Sectional - Listening"])
 
 
+_SCORER_ALIAS = {
+    "summarize_spoken_text":   "listening_sst",
+    "listening_mcq_single":    "listening_mcs",
+    "listening_mcq_multiple":  "listening_mcm",
+    "highlight_incorrect_words": "listening_hiw",
+}
+
+
 def _build_answer(question_type: str, payload: dict) -> dict:
     """Build the answer dict expected by each scorer."""
     if question_type == "listening_wfd":
         return {"user_text": payload.get("user_text", "")}
     if question_type == "listening_fib":
         return {"user_answers": payload.get("user_answers", {})}
-    if question_type in ("listening_mcs", "listening_hcs", "listening_smw"):
+    if question_type in ("listening_mcq_single", "listening_mcs", "listening_hcs", "listening_smw"):
         return {"selected_option": payload.get("selected_option", "")}
-    if question_type == "listening_mcm":
+    if question_type in ("listening_mcq_multiple", "listening_mcm"):
         return {"selected_options": payload.get("selected_options", [])}
-    if question_type == "listening_hiw":
+    if question_type in ("highlight_incorrect_words", "listening_hiw"):
         return {"highlighted_words": payload.get("highlighted_words", [])}
-    if question_type == "listening_sst":
+    if question_type in ("summarize_spoken_text", "listening_sst"):
         return {"text": payload.get("user_answer", ""), "prompt": ""}
     return {}
 
@@ -105,13 +113,13 @@ def submit_answer(
     answer = _build_answer(question.question_type, payload)
 
     # SST uses AI scorer — needs no evaluation_json; others need it
-    if question.question_type != "listening_sst":
+    if question.question_type not in ("listening_sst", "summarize_spoken_text"):
         if not question.evaluation:
             raise HTTPException(status_code=422, detail="Question has no evaluation data")
         answer["evaluation_json"] = question.evaluation.evaluation_json
 
     try:
-        scorer = get_scorer(question.question_type)
+        scorer = get_scorer(_SCORER_ALIAS.get(question.question_type, question.question_type))
         result = scorer.score(
             question_id=question_id,
             session_id=session_id,

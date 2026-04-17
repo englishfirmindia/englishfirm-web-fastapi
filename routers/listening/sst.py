@@ -21,7 +21,7 @@ def start(
         db=db,
         user_id=current_user.id,
         module="listening",
-        question_type="listening_sst",
+        question_type="summarize_spoken_text",
         difficulty_level=payload.get("difficulty_level"),
     )
 
@@ -34,7 +34,7 @@ def submit(
 ):
     session_id = payload["session_id"]
     question_id = int(payload["question_id"])
-    user_answer = payload["user_answer"]
+    user_answer = payload.get("user_answer") or payload.get("text", "")
 
     session = get_session(session_id)
     question = session["questions"].get(question_id)

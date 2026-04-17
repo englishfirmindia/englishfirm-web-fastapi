@@ -33,7 +33,7 @@ def submit(
 ):
     session_id = payload["session_id"]
     question_id = int(payload["question_id"])
-    user_sequence = payload["user_sequence"]
+    user_sequence = payload.get("user_sequence") or payload.get("paragraphs", [])
 
     session = get_session(session_id)
     question = session["questions"].get(question_id)

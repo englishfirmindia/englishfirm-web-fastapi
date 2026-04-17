@@ -41,48 +41,48 @@ import core.config as config
 
 # ─── Sectional structure ──────────────────────────────────────────────────────
 LISTENING_STRUCTURE = [
-    {"task": "listening_sst", "count": 2, "module": "listening"},
-    {"task": "listening_mcm", "count": 2, "module": "listening"},
-    {"task": "listening_fib", "count": 3, "module": "listening"},
-    {"task": "listening_hcs", "count": 2, "module": "listening"},
-    {"task": "listening_smw", "count": 2, "module": "listening"},
-    {"task": "listening_hiw", "count": 2, "module": "listening"},
-    {"task": "listening_mcs", "count": 2, "module": "listening"},
-    {"task": "listening_wfd", "count": 3, "module": "listening"},
+    {"task": "summarize_spoken_text",  "count": 2, "module": "listening"},
+    {"task": "listening_mcq_multiple", "count": 2, "module": "listening"},
+    {"task": "listening_fib",          "count": 3, "module": "listening"},
+    {"task": "listening_hcs",          "count": 2, "module": "listening"},
+    {"task": "listening_smw",          "count": 2, "module": "listening"},
+    {"task": "highlight_incorrect_words", "count": 2, "module": "listening"},
+    {"task": "listening_mcq_single",   "count": 2, "module": "listening"},
+    {"task": "listening_wfd",          "count": 3, "module": "listening"},
 ]
 
 _LISTENING_WEIGHTS = {
-    "listening_sst": 10,
-    "listening_wfd": 13,
-    "listening_fib":  8,
-    "listening_hiw":  8,
-    "listening_hcs":  2,
-    "listening_mcm":  3,
-    "listening_mcs":  2,
-    "listening_smw":  1,
+    "summarize_spoken_text":  10,
+    "listening_wfd":          13,
+    "listening_fib":           8,
+    "highlight_incorrect_words": 8,
+    "listening_hcs":           2,
+    "listening_mcq_multiple":  3,
+    "listening_mcq_single":    2,
+    "listening_smw":           1,
 }
 
 # Max raw score fallbacks per question type
 _MAX_FALLBACK = {
-    "listening_sst": 10,
-    "listening_wfd":  7,
-    "listening_fib":  4,
-    "listening_hiw":  3,
-    "listening_hcs":  1,
-    "listening_mcm":  2,
-    "listening_mcs":  1,
-    "listening_smw":  1,
+    "summarize_spoken_text":   10,
+    "listening_wfd":            7,
+    "listening_fib":            4,
+    "highlight_incorrect_words": 3,
+    "listening_hcs":            1,
+    "listening_mcq_multiple":   2,
+    "listening_mcq_single":     1,
+    "listening_smw":            1,
 }
 
 _DISPLAY_NAMES = {
-    "listening_sst": "Summarize Spoken Text",
-    "listening_wfd": "Write from Dictation",
-    "listening_fib": "Fill in the Blanks",
-    "listening_hiw": "Highlight Incorrect Words",
-    "listening_hcs": "Highlight Correct Summary",
-    "listening_mcm": "MCQ – Multiple Answers",
-    "listening_mcs": "MCQ – Single Answer",
-    "listening_smw": "Select Missing Word",
+    "summarize_spoken_text":   "Summarize Spoken Text",
+    "listening_wfd":           "Write from Dictation",
+    "listening_fib":           "Fill in the Blanks",
+    "highlight_incorrect_words": "Highlight Incorrect Words",
+    "listening_hcs":           "Highlight Correct Summary",
+    "listening_mcq_multiple":  "MCQ – Multiple Answers",
+    "listening_mcq_single":    "MCQ – Single Answer",
+    "listening_smw":           "Select Missing Word",
 }
 
 
@@ -102,14 +102,14 @@ def _question_max(q) -> int:
             blanks = ans.get("blanks", [])
             return len(blanks) * rules.get("marksPerCorrect", 1)
 
-        if qt == "listening_hiw":
+        if qt == "highlight_incorrect_words":
             incorrect_words = ans.get("incorrectWords", [])
             return len(incorrect_words) * rules.get("correctClick", 1)
 
-        if qt in ("listening_hcs", "listening_smw", "listening_mcs"):
+        if qt in ("listening_hcs", "listening_smw", "listening_mcq_single"):
             return rules.get("marksPerCorrect", 1)
 
-        if qt == "listening_mcm":
+        if qt == "listening_mcq_multiple":
             return len(ans.get("correctOptions", [])) * rules.get("marksPerCorrect", 1)
 
         if qt == "listening_wfd":

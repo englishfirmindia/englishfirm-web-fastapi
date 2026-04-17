@@ -21,7 +21,7 @@ def start(
         db=db,
         user_id=current_user.id,
         module="listening",
-        question_type="listening_hiw",
+        question_type="highlight_incorrect_words",
         difficulty_level=payload.get("difficulty_level"),
     )
 
@@ -34,12 +34,18 @@ def submit(
 ):
     session_id = payload["session_id"]
     question_id = int(payload["question_id"])
-    highlighted_words = payload["highlighted_words"]
-
     session = get_session(session_id)
     question = session["questions"].get(question_id)
     if not question or not question.evaluation:
         raise HTTPException(status_code=404, detail="Question not found")
+
+    # Accept word strings or convert from 0-based word indices
+    highlighted_words = payload.get("highlighted_words")
+    if highlighted_words is None:
+        indices = payload.get("highlighted_indices", [])
+        content = question.content_json or {}
+        words = content.get("words") or content.get("transcript", "").split()
+        highlighted_words = [words[i] for i in indices if isinstance(i, int) and i < len(words)]
 
     scorer = get_scorer("listening_hiw")
     result = scorer.score(

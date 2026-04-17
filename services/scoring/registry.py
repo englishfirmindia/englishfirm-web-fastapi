@@ -21,8 +21,9 @@ _REGISTRY: Dict[str, ScoringStrategy] = {
     'describe_image':             AzureSpeakingScorer('describe_image'),
     'retell_lecture':             AzureSpeakingScorer('retell_lecture'),
     'summarize_group_discussion': AzureSpeakingScorer('summarize_group_discussion'),
-    'respond_to_situation':       AzureSpeakingScorer('respond_to_situation'),
-    'answer_short_question':      AzureSpeakingScorer('answer_short_question'),
+    'respond_to_situation':        AzureSpeakingScorer('respond_to_situation'),
+    'ptea_respond_situation':      AzureSpeakingScorer('respond_to_situation'),
+    'answer_short_question':       AzureSpeakingScorer('answer_short_question'),
 
     # ── Reading — rule-based sync ──────────────────────────────────────────
     'reading_mcs':           MCQScorer(single=True),

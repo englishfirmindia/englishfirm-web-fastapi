@@ -21,7 +21,7 @@ def start(
         db=db,
         user_id=current_user.id,
         module="listening",
-        question_type="listening_mcm",
+        question_type="listening_mcq_multiple",
         difficulty_level=payload.get("difficulty_level"),
     )
 
@@ -34,7 +34,7 @@ def submit(
 ):
     session_id = payload["session_id"]
     question_id = int(payload["question_id"])
-    selected_options = payload["selected_options"]
+    selected_options = payload.get("selected_options") or payload.get("selected_option_ids", [])
 
     session = get_session(session_id)
     question = session["questions"].get(question_id)

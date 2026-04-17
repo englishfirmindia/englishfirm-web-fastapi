@@ -35,7 +35,7 @@ SPEAKING_STRUCTURE = [
     {"task": "describe_image",             "count": 3,  "prep_seconds": 25, "rec_seconds": 40},
     {"task": "retell_lecture",             "count": 3,  "prep_seconds": 10, "rec_seconds": 40},
     {"task": "answer_short_question",      "count": 5,  "prep_seconds": 0,  "rec_seconds": 10},
-    {"task": "respond_to_situation",       "count": 3,  "prep_seconds": 0,  "rec_seconds": 40},
+    {"task": "ptea_respond_situation",      "count": 3,  "prep_seconds": 0,  "rec_seconds": 40},
     {"task": "summarize_group_discussion", "count": 2,  "prep_seconds": 10, "rec_seconds": 60},
 ]
 
@@ -46,7 +46,7 @@ _SPEAKING_WEIGHTS = {
     "describe_image":             15,
     "retell_lecture":             13,
     "answer_short_question":       4,
-    "respond_to_situation":       15,
+    "ptea_respond_situation":      15,
     "summarize_group_discussion": 16,
 }
 
@@ -56,7 +56,7 @@ _DISPLAY_NAMES = {
     "describe_image":             "Describe Image",
     "retell_lecture":             "Re-tell Lecture",
     "answer_short_question":      "Answer Short Question",
-    "respond_to_situation":       "Respond to a Situation",
+    "ptea_respond_situation":      "Respond to a Situation",
     "summarize_group_discussion": "Summarize Group Discussion",
 }
 

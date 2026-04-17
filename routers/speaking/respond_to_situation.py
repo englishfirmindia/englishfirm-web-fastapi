@@ -28,7 +28,7 @@ def start(
         db=db,
         user_id=current_user.id,
         module="speaking",
-        question_type="respond_to_situation",
+        question_type="ptea_respond_situation",
         difficulty_level=payload.get("difficulty_level"),
     )
 

@@ -33,7 +33,11 @@ def submit(
 ):
     session_id = payload["session_id"]
     question_id = int(payload["question_id"])
-    user_answers = payload["user_answers"]
+    raw = payload.get("user_answers") or payload.get("answers", {})
+    if isinstance(raw, list):
+        user_answers = {str(i + 1): v for i, v in enumerate(raw)}
+    else:
+        user_answers = raw
 
     session = get_session(session_id)
     question = session["questions"].get(question_id)

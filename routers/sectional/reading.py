@@ -42,13 +42,19 @@ from services.reading_sectional_service import (
 router = APIRouter(prefix="/sectional/reading", tags=["Sectional - Reading"])
 
 
+_SCORER_ALIAS = {
+    "mcq_single":   "reading_mcs",
+    "mcq_multiple": "reading_mcm",
+}
+
+
 def _build_answer(question_type: str, payload: dict) -> dict:
     """Build the answer dict expected by each scorer, given the raw request payload."""
-    if question_type in ("reading_fib", "reading_fib_drop_down"):
+    if question_type == "reading_fib_drop_down":
         return {"user_answers": payload.get("user_answers", {})}
-    if question_type == "reading_mcs":
+    if question_type == "mcq_single":
         return {"selected_option": payload.get("selected_option", "")}
-    if question_type == "reading_mcm":
+    if question_type == "mcq_multiple":
         return {"selected_options": payload.get("selected_options", [])}
     if question_type == "reorder_paragraphs":
         return {"user_sequence": payload.get("user_sequence", [])}
@@ -97,7 +103,7 @@ def submit_answer(
     answer = _build_answer(question.question_type, payload)
     answer["evaluation_json"] = question.evaluation.evaluation_json
 
-    scorer = get_scorer(question.question_type)
+    scorer = get_scorer(_SCORER_ALIAS.get(question.question_type, question.question_type))
     result = scorer.score(
         question_id=question_id,
         session_id=session_id,

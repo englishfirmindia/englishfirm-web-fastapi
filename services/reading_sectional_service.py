@@ -37,27 +37,24 @@ import core.config as config
 
 # ─── Sectional structure ──────────────────────────────────────────────────────
 READING_STRUCTURE = [
-    {"task": "reading_fib",          "count": 5, "module": "reading"},
-    {"task": "reading_mcs",          "count": 2, "module": "reading"},
-    {"task": "reading_mcm",          "count": 2, "module": "reading"},
-    {"task": "reorder_paragraphs",   "count": 2, "module": "reading"},
-    {"task": "reading_fib_drop_down","count": 4, "module": "reading"},
+    {"task": "reading_fib_drop_down", "count": 9, "module": "reading"},
+    {"task": "mcq_single",            "count": 2, "module": "reading"},
+    {"task": "mcq_multiple",          "count": 2, "module": "reading"},
+    {"task": "reorder_paragraphs",    "count": 2, "module": "reading"},
 ]
 
 _READING_WEIGHTS = {
-    "reading_fib":           25,
-    "reading_fib_drop_down": 20,
+    "reading_fib_drop_down": 45,
     "reorder_paragraphs":     9,
-    "reading_mcm":            5,
-    "reading_mcs":            3,
+    "mcq_multiple":           5,
+    "mcq_single":             3,
 }
 
 _DISPLAY_NAMES = {
-    "reading_fib":           "Reading & Writing: Fill in the Blanks",
-    "reading_mcs":           "Multiple Choice (Single)",
-    "reading_mcm":           "Multiple Choice (Multiple)",
+    "reading_fib_drop_down": "Fill in the Blanks",
+    "mcq_single":            "Multiple Choice (Single)",
+    "mcq_multiple":          "Multiple Choice (Multiple)",
     "reorder_paragraphs":    "Re-order Paragraphs",
-    "reading_fib_drop_down": "Reading: Fill in the Blanks",
 }
 
 _SWT_MAX = 10
@@ -75,13 +72,13 @@ def _question_max(q) -> int:
         rules = ev.get("scoringRules", {})
         ans   = ev.get("correctAnswers", {})
 
-        if qt in ("reading_fib", "reading_fib_drop_down"):
+        if qt == "reading_fib_drop_down":
             return len(ans) * rules.get("marksPerBlank", 1)
 
-        if qt == "reading_mcm":
+        if qt == "mcq_multiple":
             return len(ans.get("correctOptions", [])) * rules.get("marksPerCorrect", 1)
 
-        if qt == "reading_mcs":
+        if qt == "mcq_single":
             return rules.get("marksPerCorrect", 1)
 
         if qt == "reorder_paragraphs":
@@ -92,10 +89,9 @@ def _question_max(q) -> int:
         pass
 
     return {
-        "reading_fib":           4,
         "reading_fib_drop_down": 4,
-        "reading_mcm":           2,
-        "reading_mcs":           1,
+        "mcq_multiple":          2,
+        "mcq_single":            1,
         "reorder_paragraphs":    3,
     }.get(qt, 1)
 
