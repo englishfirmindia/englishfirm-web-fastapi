@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -44,7 +45,7 @@ def get_dashboard(
 
 @router.get("/answered-questions")
 def get_answered_questions(
-    question_type: str | None = None,
+    question_type: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

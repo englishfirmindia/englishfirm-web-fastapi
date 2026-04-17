@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -19,9 +20,9 @@ class SignupRequest(BaseModel):
     username: str
     email: str
     password: str
-    phone: str | None = None
-    score_requirement: int | None = None
-    exam_date: str | None = None
+    phone: Optional[str] = None
+    score_requirement: Optional[int] = None
+    exam_date: Optional[str] = None
 
 
 def _make_token(user_id: int) -> str:
