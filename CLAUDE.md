@@ -153,3 +153,31 @@ routers/
 - Never change endpoint paths without verifying the iOS client (`englishfirm-app-flutter`) still works
 - Session state lives in `services/session_service.py` — never import `ACTIVE_SESSIONS` or `_SCORE_STORE` directly from any other module
 - Sectional routers at `routers/sectional/` own exam-level flows (finish + aggregate) — per-question scoring still delegates to `get_scorer()`
+
+## Config & Code Hygiene Guardrail (MANDATORY)
+
+All non-secret constants live in `core/config.py`. Never write magic strings or numbers anywhere else.
+
+### What lives in `core/config.py`
+| Constant | Example |
+|---|---|
+| S3 bucket names | `S3_RECORDINGS_BUCKET`, `S3_QUESTIONS_BUCKET` |
+| AWS region | `AWS_REGION` |
+| Azure region | `AZURE_SPEECH_REGION` |
+| Presigned URL expiry times | `PRESIGNED_READ_EXPIRY_SECONDS`, `PRESIGNED_UPLOAD_EXPIRY_SECONDS` |
+| DB pool settings | `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` |
+| JWT algorithm | `JWT_ALGORITHM` |
+| Session question limit | `SESSION_QUESTION_LIMIT` |
+| PTE score formula constants | `PTE_FLOOR`, `PTE_CEILING`, `PTE_BASE`, `PTE_SCALE` |
+
+### What lives in `.env` (secrets — never in `core/config.py`)
+`DATABASE_URL`, `JWT_SECRET_KEY`, `AZURE_SPEECH_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+`core/config.py` reads these via `os.getenv()` but never defines their values.
+
+### DB table/column names
+Must only appear in `db/models.py`. Never reference a table or column name string outside a model definition.
+
+### Rules
+- Before writing any string literal or number in a router or service — check if it belongs in `core/config.py`
+- Never import `os.getenv(...)` directly in a router or service — always import from `core/config`
+- `_RUBRIC` and `_SPEAKING_WEIGHTS` stay in `services/scoring/azure_scorer.py` — they are domain logic, not config
