@@ -19,6 +19,7 @@ DB_MAX_OVERFLOW = 10
 # ── Auth (JWT) ────────────────────────────────────────────────────────────────
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRY_DAYS = 30
 
 # ── Session defaults ──────────────────────────────────────────────────────────
 SESSION_QUESTION_LIMIT = 20
