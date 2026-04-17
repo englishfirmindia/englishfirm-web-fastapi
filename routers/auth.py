@@ -1,16 +1,18 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from jose import jwt
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+import requests as _requests
 
 import core.config as config
 from db.database import get_db
 from db.models import User
+from services.zapier import send_signup_webhook
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -25,6 +27,10 @@ class SignupRequest(BaseModel):
     exam_date: Optional[str] = None
 
 
+class GoogleAuthRequest(BaseModel):
+    id_token: str
+
+
 def _make_token(user_id: int) -> str:
     payload = {
         "sub": str(user_id),
@@ -33,19 +39,38 @@ def _make_token(user_id: int) -> str:
     return jwt.encode(payload, config.JWT_SECRET_KEY, algorithm=config.JWT_ALGORITHM)
 
 
+def _parse_exam_date(exam_date_str: Optional[str]) -> Optional[date]:
+    if not exam_date_str:
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(exam_date_str, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 @router.post("/signup", status_code=201)
-def signup(req: SignupRequest, db: Session = Depends(get_db)):
+def signup(req: SignupRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == req.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
+    parsed_exam_date = _parse_exam_date(req.exam_date)
     user = User(
         username=req.username,
         email=req.email,
         hashed_password=_pwd.hash(req.password),
         phone=req.phone,
         score_requirement=req.score_requirement,
+        exam_date=parsed_exam_date,
     )
     db.add(user)
     db.commit()
+    background_tasks.add_task(
+        send_signup_webhook,
+        student_name=req.username,
+        phone_number=req.phone,
+        exam_date=parsed_exam_date,
+    )
     return {"message": "Account created"}
 
 
@@ -57,4 +82,42 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
+    return {"access_token": _make_token(user.id), "token_type": "bearer"}
+
+
+@router.post("/google")
+def google_auth(req: GoogleAuthRequest, db: Session = Depends(get_db)):
+    """Verify a Google id_token and return a JWT. Creates the user if they don't exist."""
+    try:
+        resp = _requests.get(
+            f"https://oauth2.googleapis.com/tokeninfo?id_token={req.id_token}",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        token_info = resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Google token verification failed: {exc}")
+
+    if "error" in token_info:
+        raise HTTPException(status_code=401, detail=token_info.get("error_description", "Invalid Google token"))
+
+    email = token_info.get("email")
+    if not email:
+        raise HTTPException(status_code=401, detail="Google token missing email")
+
+    if not token_info.get("email_verified", False):
+        raise HTTPException(status_code=401, detail="Google email not verified")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        name = token_info.get("name") or token_info.get("given_name") or email.split("@")[0]
+        user = User(
+            username=name,
+            email=email,
+            hashed_password=_pwd.hash(token_info.get("sub", "")),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
     return {"access_token": _make_token(user.id), "token_type": "bearer"}

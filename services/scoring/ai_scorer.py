@@ -6,11 +6,30 @@ Covers:
   write_essay (we)
   listening_sst (sst)
 
-_score_with_ai raises NotImplementedError — real implementation
-will call Claude API when credentials are configured. Tests mock it.
+Uses the Anthropic Claude API (claude-haiku-4-5-20251001) to evaluate responses
+on a 0-100 scale, then converts to PTE scale via to_pte_score.
 """
 
+import os
+import anthropic
+
 from .base import ScoringResult, ScoringStrategy, to_pte_score
+
+_TASK_INSTRUCTIONS = {
+    "swt": (
+        "Summarize Written Text — one sentence summary of a passage. "
+        "Score on: (1) content accuracy 0-40, (2) grammar/structure 0-30, (3) conciseness 0-30."
+    ),
+    "we": (
+        "Write Essay — argumentative essay on a topic. "
+        "Score on: (1) content/argument 0-35, (2) structure/cohesion 0-25, "
+        "(3) grammar 0-20, (4) vocabulary 0-20."
+    ),
+    "sst": (
+        "Summarize Spoken Text — written summary of audio content. "
+        "Score on: (1) content accuracy 0-40, (2) grammar 0-30, (3) coherence 0-30."
+    ),
+}
 
 
 class AIScorer(ScoringStrategy):
@@ -37,8 +56,6 @@ class AIScorer(ScoringStrategy):
         prompt = answer.get('prompt', '')
         try:
             raw = self._score_with_ai(text, prompt)
-        except NotImplementedError:
-            raise
         except Exception as e:
             return ScoringResult(
                 pte_score=to_pte_score(0.0),
@@ -58,10 +75,33 @@ class AIScorer(ScoringStrategy):
 
     def _score_with_ai(self, text: str, prompt: str) -> float:
         """
-        Returns 0-100. Override in tests. Real impl calls Claude API.
-        Raises NotImplementedError until configured.
+        Returns 0-100. Calls Claude Haiku via the Anthropic API.
+        Falls back to 0.0 if the API key is not configured.
         """
-        raise NotImplementedError(
-            f"AIScorer._score_with_ai not implemented for task_type='{self.task_type}'. "
-            "Configure the Claude API key and implement this method."
+        if not text or not text.strip():
+            return 0.0
+
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set — cannot score with AI")
+
+        instruction = _TASK_INSTRUCTIONS.get(self.task_type, _TASK_INSTRUCTIONS["we"])
+
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=100,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"You are a PTE Academic examiner. Score this student response.\n\n"
+                    f"Task type: {instruction}\n"
+                    f"Original prompt/passage: {prompt[:500] if prompt else 'N/A'}\n"
+                    f"Student response: {text[:1000]}\n\n"
+                    "Reply with ONLY a number between 0 and 100 representing the score. "
+                    "Nothing else."
+                ),
+            }],
         )
+        score_text = message.content[0].text.strip()
+        return float(score_text.split()[0])
