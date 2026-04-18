@@ -4,7 +4,13 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import User
 from core.dependencies import get_current_user
-from services.session_service import start_session, get_session, mark_submitted
+from services.session_service import (
+    start_session,
+    get_session,
+    mark_submitted,
+    store_score,
+    get_score_from_store,
+)
 from services.scoring import get_scorer
 
 router = APIRouter(prefix="/writing/summarize-written-text", tags=["Writing - Summarize Written Text"])
@@ -45,20 +51,52 @@ def submit(
     prompt = content_json.get("passage", content_json.get("text", ""))
 
     scorer = get_scorer("summarize_written_text")
-    result = scorer.score(
-        question_id=question_id,
-        session_id=session_id,
-        answer={
-            "text": user_answer,
-            "prompt": prompt,
-        },
-    )
-    mark_submitted(session_id, question_id, result.pte_score)
+    try:
+        result = scorer.score(
+            question_id=question_id,
+            session_id=session_id,
+            answer={
+                "text": user_answer,
+                "prompt": prompt,
+            },
+        )
+        mark_submitted(session_id, question_id, result.pte_score)
+        status_str = "failed" if result.error else "complete"
+        store_score(current_user.id, question_id, {
+            "status": status_str,
+            "scoring": status_str,
+            "pte_score": result.pte_score,
+            "scoreForQuestion": result.pte_score,
+            "breakdown": result.breakdown,
+            "subScores": result.breakdown,
+            "error": result.error,
+        })
+        return {
+            "pte_score": result.pte_score,
+            "is_async": result.is_async,
+            "breakdown": result.breakdown,
+            "totalScore": session.get("score", 0),
+            "error": result.error,
+        }
+    except Exception as e:
+        store_score(current_user.id, question_id, {
+            "status": "failed",
+            "scoring": "error",
+            "pte_score": 10,
+            "scoreForQuestion": 10,
+            "breakdown": {},
+            "subScores": {},
+            "error": str(e),
+        })
+        raise
 
-    return {
-        "pte_score": result.pte_score,
-        "is_async": result.is_async,
-        "breakdown": result.breakdown,
-        "totalScore": session.get("score", 0),
-        "error": result.error,
-    }
+
+@router.get("/score/{question_id}")
+def poll_score(
+    question_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    result = get_score_from_store(current_user.id, question_id)
+    if not result:
+        return {"status": "pending", "scoring": "pending"}
+    return result
