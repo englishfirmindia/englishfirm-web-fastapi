@@ -53,11 +53,28 @@ def submit(
     )
     mark_submitted(session_id, question_id, result.pte_score)
 
+    breakdown = result.breakdown or {}
+    correct_option = breakdown.get("correct_option")
+    is_correct = bool(breakdown.get("is_correct", False))
+    correct_option_ids = [correct_option] if correct_option is not None else []
+    total_score = session.get("score", 0)
+
     return {
         "pte_score": result.pte_score,
         "is_async": result.is_async,
-        "breakdown": result.breakdown,
-        "totalScore": session.get("score", 0),
+        "breakdown": breakdown,
+        "totalScore": total_score,
+        # snake_case
+        "correct_option_ids": correct_option_ids,
+        "correct_option": correct_option,
+        "selected_option": selected_option,
+        "is_correct": is_correct,
+        "score_for_question": result.pte_score,
+        # camelCase aliases for mobile parity
+        "correctOption": correct_option,
+        "selectedOption": selected_option,
+        "isCorrect": is_correct,
+        "scoreForQuestion": result.pte_score,
     }
 
 

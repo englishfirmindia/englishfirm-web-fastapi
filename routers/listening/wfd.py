@@ -52,11 +52,35 @@ def submit(
     )
     mark_submitted(session_id, question_id, result.pte_score)
 
+    eval_json = question.evaluation.evaluation_json or {}
+    correct_answers = eval_json.get("correctAnswers", {}) or {}
+    transcript = correct_answers.get("transcript", "") or ""
+
+    breakdown = result.breakdown or {}
+    word_results = breakdown.get("word_results", {}) or {}
+    hits = int(breakdown.get("hits", 0) or 0)
+    total_words = int(breakdown.get("total", 0) or 0)
+    is_correct = total_words > 0 and hits == total_words
+    total_score = session.get("score", 0)
+
     return {
         "pte_score": result.pte_score,
         "is_async": result.is_async,
-        "breakdown": result.breakdown,
-        "totalScore": session.get("score", 0),
+        "breakdown": breakdown,
+        "totalScore": total_score,
+        # snake_case
+        "transcript": transcript,
+        "user_text": user_text,
+        "word_results": word_results,
+        "hits": hits,
+        "total_words": total_words,
+        "is_correct": is_correct,
+        "score_for_question": result.pte_score,
+        # camelCase aliases for mobile parity
+        "wordResults": word_results,
+        "totalWords": total_words,
+        "isCorrect": is_correct,
+        "scoreForQuestion": result.pte_score,
     }
 
 

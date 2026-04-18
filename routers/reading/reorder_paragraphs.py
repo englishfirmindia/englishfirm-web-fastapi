@@ -51,9 +51,29 @@ def submit(
     )
     mark_submitted(session_id, question_id, result.pte_score)
 
+    eval_json = question.evaluation.evaluation_json or {}
+    correct_answers = eval_json.get("correctAnswers", {}) or {}
+    correct_sequence = list(correct_answers.get("correctSequence", []) or [])
+
+    breakdown = result.breakdown or {}
+    pair_results = list(breakdown.get("pair_results", []) or [])
+    is_correct = bool(pair_results) and all(pair_results)
+    total_score = session.get("score", 0)
+
     return {
         "pte_score": result.pte_score,
         "is_async": result.is_async,
-        "breakdown": result.breakdown,
-        "totalScore": session.get("score", 0),
+        "breakdown": breakdown,
+        "totalScore": total_score,
+        # snake_case
+        "correct_sequence": correct_sequence,
+        "user_sequence": list(user_sequence or []),
+        "pair_results": pair_results,
+        "is_correct": is_correct,
+        "score_for_question": result.pte_score,
+        # camelCase aliases for mobile parity
+        "correctSequence": correct_sequence,
+        "pairResults": pair_results,
+        "isCorrect": is_correct,
+        "scoreForQuestion": result.pte_score,
     }

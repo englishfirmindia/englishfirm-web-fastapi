@@ -58,11 +58,37 @@ def submit(
     )
     mark_submitted(session_id, question_id, result.pte_score)
 
+    eval_json = question.evaluation.evaluation_json or {}
+    correct_answers = eval_json.get("correctAnswers", {}) or {}
+    incorrect_words = list(correct_answers.get("incorrectWords", []) or [])
+
+    breakdown = result.breakdown or {}
+    correct_clicks = list(breakdown.get("correct_clicks", []) or [])
+    incorrect_clicks = list(breakdown.get("incorrect_clicks", []) or [])
+    missed_words = list(breakdown.get("missed_words", []) or [])
+    is_correct = len(incorrect_clicks) == 0 and len(missed_words) == 0
+    total_score = session.get("score", 0)
+
     return {
         "pte_score": result.pte_score,
         "is_async": result.is_async,
-        "breakdown": result.breakdown,
-        "totalScore": session.get("score", 0),
+        "breakdown": breakdown,
+        "totalScore": total_score,
+        # snake_case
+        "incorrect_words": incorrect_words,
+        "highlighted_words": highlighted_words,
+        "correct_clicks": correct_clicks,
+        "incorrect_clicks": incorrect_clicks,
+        "missed_words": missed_words,
+        "is_correct": is_correct,
+        "score_for_question": result.pte_score,
+        # camelCase aliases for mobile parity
+        "incorrectWords": incorrect_words,
+        "correctClicks": correct_clicks,
+        "incorrectClicks": incorrect_clicks,
+        "missedWords": missed_words,
+        "isCorrect": is_correct,
+        "scoreForQuestion": result.pte_score,
     }
 
 
