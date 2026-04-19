@@ -84,3 +84,28 @@ def get_results(
     current_user: User = Depends(get_current_user),
 ):
     return get_speaking_sectional_results(session_id=session_id, user_id=current_user.id, db=db)
+
+
+@router.get("/latest")
+def latest(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Most recent speaking sectional attempt for this user.
+    Ported from app-fastapi/routers/questions.py::get_latest_speaking_sectional."""
+    from db.models import PracticeAttempt
+    attempt = (
+        db.query(PracticeAttempt)
+        .filter_by(user_id=current_user.id, module="speaking", question_type="sectional")
+        .order_by(PracticeAttempt.id.desc())
+        .first()
+    )
+    if not attempt:
+        return {"found": False}
+    return {
+        "found": True,
+        "session_id": attempt.session_id,
+        "attempt_id": attempt.id,
+        "scoring_status": attempt.scoring_status or "pending",
+        "speaking_score": attempt.total_score,
+    }
