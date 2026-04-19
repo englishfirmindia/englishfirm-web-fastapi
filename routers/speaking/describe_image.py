@@ -95,14 +95,23 @@ def image_url_by_id(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from fastapi import HTTPException
     from services.s3_service import generate_presigned_url
-    from db.models import Question
-    q = db.query(Question).filter(Question.id == question_id).first()
+    from db.models import QuestionFromApeuni
+
+    q = (
+        db.query(QuestionFromApeuni)
+        .filter(QuestionFromApeuni.question_id == question_id)
+        .first()
+    )
     if not q:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Question not found")
-    s3_url = (q.content_json or {}).get("image_url", "")
+    content = q.content_json or {}
+    # Content shape may store the image path under "image_url" or "s3_url"
+    s3_url = content.get("image_url") or content.get("s3_url") or ""
     if not s3_url:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="No image URL for this question")
+        raise HTTPException(
+            status_code=404,
+            detail="No image URL on this question",
+        )
     return {"presigned_url": generate_presigned_url(s3_url)}
