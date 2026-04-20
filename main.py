@@ -42,6 +42,8 @@ from routers.sectional import speaking as sectional_speaking
 from routers.sectional import writing as sectional_writing
 from routers.sectional import reading as sectional_reading
 from routers.sectional import listening as sectional_listening
+# Mock (full PTE exam)
+from routers.mock import router as mock_router
 
 PREFIX = "/api/v1/questions"
 
@@ -56,5 +58,6 @@ for r in [
     listening_mcm.router, hcs.router, smw.router, hiw.router,
     sectional_speaking.router, sectional_writing.router,
     sectional_reading.router, sectional_listening.router,
+    mock_router,
 ]:
     app.include_router(r, prefix=PREFIX)
