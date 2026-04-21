@@ -366,10 +366,13 @@ def get_mock_part(db: Session, session_id: str, part: int) -> dict:
         if q.module in ("speaking", "listening") or canonical_type in ("summarize_spoken_text", "listening_wfd"):
             raw_audio = (q.content_json or {}).get("audio_url") or (q.content_json or {}).get("s3_key")
             if raw_audio:
-                try:
-                    presigned_url = generate_presigned_url(raw_audio)
-                except Exception:
-                    presigned_url = None
+                if raw_audio.startswith("http"):
+                    presigned_url = raw_audio  # already a direct URL, no presigning needed
+                else:
+                    try:
+                        presigned_url = generate_presigned_url(raw_audio)
+                    except Exception:
+                        presigned_url = None
 
         # Pre-sign image URL for describe_image (ported from speaking_sectional_service.py:183-190)
         presigned_image_url: Optional[str] = None

@@ -1,6 +1,9 @@
 import uuid
+import logging
 from fastapi import APIRouter, Depends, Body
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from db.database import get_db
 from db.models import User
@@ -49,24 +52,37 @@ def submit(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    session_id = payload["session_id"]
-    question_id = int(payload["question_id"])
-    audio_url = payload["audio_url"]
+    logger.info("[RS submit] payload keys=%s session_id=%s question_id=%s",
+                list(payload.keys()), payload.get("session_id"), payload.get("question_id"))
+    try:
+        session_id = payload["session_id"]
+        question_id = int(payload["question_id"])
+        audio_url = payload["audio_url"]
+    except Exception as e:
+        logger.error("[RS submit] payload parse error: %s", e)
+        raise
 
-    session = get_session(session_id)
-    q_obj = session["questions"].get(question_id)
-    reference_text = (q_obj.content_json or {}).get("transcript", "") if q_obj else ""
-
-    scorer = get_scorer("repeat_sentence")
-    scorer.score(
-        question_id=question_id,
-        session_id=session_id,
-        answer={
-            "audio_url": audio_url,
-            "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id, reference_text),
-        },
-    )
-    mark_submitted(session_id, question_id, 0)
+    try:
+        session = get_session(session_id)
+    except Exception as e:
+        logger.error("[RS submit] get_session failed: %s", e)
+        raise
+    try:
+        q_obj = session["questions"].get(question_id)
+        reference_text = (q_obj.content_json or {}).get("transcript", "") if q_obj else ""
+        scorer = get_scorer("repeat_sentence")
+        scorer.score(
+            question_id=question_id,
+            session_id=session_id,
+            answer={
+                "audio_url": audio_url,
+                "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id, reference_text),
+            },
+        )
+        mark_submitted(session_id, question_id, 0)
+    except Exception as e:
+        logger.error("[RS submit] scoring/mark error: %s", e, exc_info=True)
+        raise
 
     return {"message": "submitted", "scoring_status": "pending"}
 

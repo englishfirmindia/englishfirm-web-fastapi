@@ -175,10 +175,13 @@ def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -
             or q.content_json.get("audio_s3_key")
         )
         if raw_audio:
-            try:
-                presigned_url = generate_presigned_url(raw_audio)
-            except Exception:
-                presigned_url = None
+            if raw_audio.startswith("http"):
+                presigned_url = raw_audio  # already a direct URL, no presigning needed
+            else:
+                try:
+                    presigned_url = generate_presigned_url(raw_audio)
+                except Exception:
+                    presigned_url = None
 
         presigned_image_url: Optional[str] = None
         raw_image = q.content_json.get("image_url") or q.content_json.get("image_s3_key")
