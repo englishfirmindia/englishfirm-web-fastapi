@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import User
 from core.dependencies import get_current_user
-from services.session_service import start_session, get_session, mark_submitted, get_score_from_store
+from services.session_service import start_session, get_session, mark_submitted, get_score_from_store, persist_speaking_answer_pending
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url, generate_presigned_upload_url
 from services.speaking_scorer import kick_off_scoring
@@ -66,6 +66,7 @@ def submit(
         },
     )
     mark_submitted(session_id, question_id, 0)
+    persist_speaking_answer_pending(session, question_id, "read_aloud", audio_url)
 
     return {"message": "submitted", "scoring_status": "pending"}
 

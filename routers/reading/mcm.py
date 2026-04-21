@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import User
 from core.dependencies import get_current_user
-from services.session_service import start_session, get_session, mark_submitted
+from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
 from services.scoring import get_scorer
 
 router = APIRouter(prefix="/reading/mcm", tags=["Reading - MCM"])
@@ -50,6 +50,11 @@ def submit(
         },
     )
     mark_submitted(session_id, question_id, result.pte_score)
+    persist_answer_to_db(
+        session=session, question_id=question_id, question_type="reading_mcm",
+        user_answer_json={"selected_options": list(selected_options or [])},
+        correct_answer_json={}, result_json=result.breakdown or {}, score=result.pte_score,
+    )
 
     eval_json = question.evaluation.evaluation_json or {}
     correct_answers = eval_json.get("correctAnswers", {}) or {}

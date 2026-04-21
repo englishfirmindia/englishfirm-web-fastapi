@@ -10,6 +10,7 @@ from services.session_service import (
     mark_submitted,
     store_score,
     get_score_from_store,
+    persist_answer_to_db,
 )
 from services.scoring import get_scorer
 
@@ -62,6 +63,13 @@ def submit(
         )
         mark_submitted(session_id, question_id, result.pte_score)
         status_str = "failed" if result.error else "complete"
+        persist_answer_to_db(
+            session=session, question_id=question_id, question_type="summarize_written_text",
+            user_answer_json={"text": user_answer},
+            correct_answer_json={},
+            result_json={"pte_score": result.pte_score, "breakdown": result.breakdown, "error": result.error},
+            score=result.pte_score,
+        )
         store_score(current_user.id, question_id, {
             "status": status_str,
             "scoring": status_str,

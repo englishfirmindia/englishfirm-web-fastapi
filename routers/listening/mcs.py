@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import User
 from core.dependencies import get_current_user
-from services.session_service import start_session, get_session, mark_submitted
+from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url
 
@@ -52,6 +52,11 @@ def submit(
         },
     )
     mark_submitted(session_id, question_id, result.pte_score)
+    persist_answer_to_db(
+        session=session, question_id=question_id, question_type="listening_mcs",
+        user_answer_json={"selected_option": selected_option},
+        correct_answer_json={}, result_json=result.breakdown or {}, score=result.pte_score,
+    )
 
     breakdown = result.breakdown or {}
     correct_option = breakdown.get("correct_option")
