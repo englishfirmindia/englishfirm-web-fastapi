@@ -26,6 +26,7 @@ from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt
 from services.session_service import ACTIVE_SESSIONS, _SCORE_STORE
 from services.s3_service import generate_presigned_url
 from services.speaking_scorer import kick_off_scoring
+from services.scoring.azure_scorer import _compute_question_score
 import core.config as config
 
 # ─── Sectional structure ──────────────────────────────────────────────────────
@@ -351,20 +352,25 @@ def get_speaking_sectional_results(session_id: str, user_id: int, db: Session) -
             "speaking_score": 0,
         }
 
-    # Check which questions have scores
-    question_scores = {}  # {qid: float 0-1}
-    pending_count   = 0
+    # Check which questions have scores — use rubric-based scoring (matches mock/practice)
+    question_scores  = {}   # {qid: float 0-1 from rubric}
+    question_details = {}   # {qid: {task_type, content, fluency, pronunciation}}
+    pending_count    = 0
+    session_questions = (session_data or {}).get("questions", {})
 
     for qid in submitted_audio:
         result = _SCORE_STORE.get((user_id, qid))
         if result and result.get("scoring") == "complete":
-            # Combine content + fluency + pronunciation into a 0-1 pct
-            content       = result.get("content", 0) or 0
-            fluency       = result.get("fluency", 0) or 0
-            pronunciation = result.get("pronunciation", 0) or 0
-            # Scores are already 0-100 range from azure_speech_service
-            raw_avg = (content + fluency + pronunciation) / 3.0
-            question_scores[qid] = min(1.0, max(0.0, raw_avg / 100.0))
+            q         = session_questions.get(qid)
+            task_type = q.question_type if q else "read_aloud"
+            computed  = _compute_question_score(task_type, result)
+            question_scores[qid] = computed["pct"]
+            question_details[qid] = {
+                "task_type":     task_type,
+                "content":       float(result.get("content", 0) or 0),
+                "fluency":       float(result.get("fluency", 0) or 0),
+                "pronunciation": float(result.get("pronunciation", 0) or 0),
+            }
         else:
             pending_count += 1
 
@@ -378,36 +384,47 @@ def get_speaking_sectional_results(session_id: str, user_id: int, db: Session) -
         }
 
     # All scores are in — compute final PTE score
-    session_questions = (session_data or {}).get("questions", {})
     task_buckets: dict = {}
 
     for qid, pct in question_scores.items():
-        q = session_questions.get(qid)
-        task_type = q.question_type if q else "unknown"
+        det       = question_details.get(qid, {})
+        task_type = det.get("task_type", "unknown")
         if task_type not in task_buckets:
-            task_buckets[task_type] = {"earned": 0.0, "count": 0}
-        task_buckets[task_type]["earned"] += pct
-        task_buckets[task_type]["count"]  += 1
+            task_buckets[task_type] = {
+                "earned": 0.0, "count": 0,
+                "content_sum": 0.0, "fluency_sum": 0.0, "pronunciation_sum": 0.0,
+            }
+        task_buckets[task_type]["earned"]           += pct
+        task_buckets[task_type]["count"]            += 1
+        task_buckets[task_type]["content_sum"]      += det.get("content", 0)
+        task_buckets[task_type]["fluency_sum"]      += det.get("fluency", 0)
+        task_buckets[task_type]["pronunciation_sum"] += det.get("pronunciation", 0)
 
     weighted_sum   = 0.0
     present_weight = 0
     task_breakdown: dict = {}
 
     for task_type, bucket in task_buckets.items():
-        weight     = _SPEAKING_WEIGHTS.get(task_type, 0)
-        avg_pct    = bucket["earned"] / bucket["count"] if bucket["count"] > 0 else 0.0
+        weight       = _SPEAKING_WEIGHTS.get(task_type, 0)
+        n            = bucket["count"]
+        avg_pct      = bucket["earned"] / n if n > 0 else 0.0
         contribution = avg_pct * weight
 
         weighted_sum   += contribution
         present_weight += weight
 
-        task_breakdown[task_type] = {
+        entry = {
             "display_name":  _display_name(task_type),
-            "count":         bucket["count"],
+            "count":         n,
             "avg_pct":       round(avg_pct * 100, 1),
             "weight":        weight,
             "contribution":  round(contribution, 2),
         }
+        if n > 0:
+            entry["content_avg"]       = round(bucket["content_sum"]       / n, 1)
+            entry["fluency_avg"]       = round(bucket["fluency_sum"]       / n, 1)
+            entry["pronunciation_avg"] = round(bucket["pronunciation_sum"] / n, 1)
+        task_breakdown[task_type] = entry
 
     normalised_pct = (weighted_sum / present_weight) if present_weight > 0 else 0.0
     scaled = max(config.PTE_FLOOR, min(config.PTE_CEILING, round(config.PTE_BASE + normalised_pct * config.PTE_SCALE)))
