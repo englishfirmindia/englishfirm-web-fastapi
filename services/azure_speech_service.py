@@ -68,63 +68,81 @@ def assess_pronunciation(
     """
     Use Azure Speech SDK for pronunciation assessment.
     Returns a normalised dict with AccuracyScore, FluencyScore, and word-level results.
+    Retries up to 3 times on any exception; re-raises after all attempts fail.
     """
     if not AZURE_SPEECH_KEY:
         raise RuntimeError("AZURE_SPEECH_KEY not configured")
 
-    import io
     import azure.cognitiveservices.speech as speechsdk
 
-    # Auto-detect audio format (browser records WebM/Opus, not AAC)
-    wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
+    last_exc: Exception = RuntimeError("assess_pronunciation: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
 
-    speech_config = speechsdk.SpeechConfig(
-        subscription=AZURE_SPEECH_KEY,
-        region=AZURE_SPEECH_REGION,
+            speech_config = speechsdk.SpeechConfig(
+                subscription=AZURE_SPEECH_KEY,
+                region=AZURE_SPEECH_REGION,
+            )
+            speech_config.speech_recognition_language = language
+
+            pronunciation_config = speechsdk.PronunciationAssessmentConfig(
+                reference_text=reference_text,
+                grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
+                granularity=speechsdk.PronunciationAssessmentGranularity.Word,
+                enable_miscue=enable_miscue,
+            )
+
+            audio_stream = speechsdk.audio.PushAudioInputStream()
+            audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
+            recognizer    = speechsdk.SpeechRecognizer(
+                speech_config=speech_config,
+                audio_config=audio_config,
+            )
+            pronunciation_config.apply_to(recognizer)
+
+            audio_stream.write(wav_bytes)
+            audio_stream.close()
+
+            result = recognizer.recognize_once()
+
+            if result.reason == speechsdk.ResultReason.NoMatch:
+                raise RuntimeError("Azure: no speech recognised")
+            if result.reason == speechsdk.ResultReason.Canceled:
+                raise RuntimeError(f"Azure cancelled: {result.cancellation_details.reason}")
+
+            pa_result = speechsdk.PronunciationAssessmentResult(result)
+
+            words = []
+            for w in pa_result.words:
+                words.append({
+                    "Word":          w.word,
+                    "AccuracyScore": w.accuracy_score,
+                    "ErrorType":     w.error_type,
+                })
+
+            return {
+                "AccuracyScore":   pa_result.accuracy_score,
+                "FluencyScore":    pa_result.fluency_score,
+                "recognized_text": result.text,
+                "Words":           words,
+            }
+
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "[AZURE] assess_pronunciation attempt=%d/3 failed — %s: %s",
+                attempt, type(exc).__name__, exc,
+            )
+            if attempt < 3:
+                time.sleep(2)
+
+    logger.error(
+        "[AZURE] assess_pronunciation failed after 3 attempts — "
+        "scoring_status remains pending. exception=%s: %s",
+        type(last_exc).__name__, last_exc,
     )
-    speech_config.speech_recognition_language = language
-
-    pronunciation_config = speechsdk.PronunciationAssessmentConfig(
-        reference_text=reference_text,
-        grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
-        granularity=speechsdk.PronunciationAssessmentGranularity.Word,
-        enable_miscue=enable_miscue,
-    )
-
-    audio_stream = speechsdk.audio.PushAudioInputStream()
-    audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
-    recognizer    = speechsdk.SpeechRecognizer(
-        speech_config=speech_config,
-        audio_config=audio_config,
-    )
-    pronunciation_config.apply_to(recognizer)
-
-    audio_stream.write(wav_bytes)
-    audio_stream.close()
-
-    result = recognizer.recognize_once()
-
-    if result.reason == speechsdk.ResultReason.NoMatch:
-        raise RuntimeError("Azure: no speech recognised")
-    if result.reason == speechsdk.ResultReason.Canceled:
-        raise RuntimeError(f"Azure cancelled: {result.cancellation_details.reason}")
-
-    pa_result = speechsdk.PronunciationAssessmentResult(result)
-
-    words = []
-    for w in pa_result.words:
-        words.append({
-            "Word":        w.word,
-            "AccuracyScore": w.accuracy_score,
-            "ErrorType":   w.error_type,
-        })
-
-    return {
-        "AccuracyScore": pa_result.accuracy_score,
-        "FluencyScore":  pa_result.fluency_score,
-        "recognized_text": result.text,
-        "Words": words,
-    }
+    raise last_exc
 
 
 def _normalize(text: str) -> str:
@@ -165,39 +183,31 @@ def transcribe_and_score_free(audio_bytes: bytes) -> dict:
             "pronunciation": float (0-100),
             "word_scores":   list,
         }
+    Raises on failure — retries are handled inside assess_pronunciation().
     """
-    try:
-        azure_result = assess_pronunciation(
-            audio_bytes=audio_bytes,
-            reference_text="",
-            enable_miscue=False,
-        )
-        accuracy_score = azure_result.get("AccuracyScore", 0)
-        fluency_score  = azure_result.get("FluencyScore", 0)
-        transcript     = azure_result.get("recognized_text", "")
+    azure_result = assess_pronunciation(
+        audio_bytes=audio_bytes,
+        reference_text="",
+        enable_miscue=False,
+    )
+    accuracy_score = azure_result.get("AccuracyScore", 0)
+    fluency_score  = azure_result.get("FluencyScore", 0)
+    transcript     = azure_result.get("recognized_text", "")
 
-        word_scores = []
-        for w in azure_result.get("Words", []):
-            word_scores.append({
-                "word":       w.get("Word", ""),
-                "error_type": w.get("ErrorType", "None"),
-                "accuracy":   w.get("AccuracyScore", 0),
-            })
+    word_scores = []
+    for w in azure_result.get("Words", []):
+        word_scores.append({
+            "word":       w.get("Word", ""),
+            "error_type": w.get("ErrorType", "None"),
+            "accuracy":   w.get("AccuracyScore", 0),
+        })
 
-        return {
-            "transcript":    transcript,
-            "fluency":       round(float(fluency_score), 1),
-            "pronunciation": round(float(accuracy_score), 1),
-            "word_scores":   word_scores,
-        }
-    except Exception as e:
-        logger.error("transcribe_and_score_free failed: %s", e)
-        return {
-            "transcript":    "",
-            "fluency":       0.0,
-            "pronunciation": 0.0,
-            "word_scores":   [],
-        }
+    return {
+        "transcript":    transcript,
+        "fluency":       round(float(fluency_score), 1),
+        "pronunciation": round(float(accuracy_score), 1),
+        "word_scores":   word_scores,
+    }
 
 
 def score_read_aloud(audio_bytes: bytes, reference_text: str) -> dict:
@@ -213,20 +223,12 @@ def score_read_aloud(audio_bytes: bytes, reference_text: str) -> dict:
             "word_scores":   [...],
         }
     """
-    try:
-        azure_result = assess_pronunciation(
-            audio_bytes=audio_bytes,
-            reference_text=reference_text,
-            granularity="Word",
-            enable_miscue=True,
-        )
-    except Exception as e:
-        logger.error("Azure assessment failed: %s", e)
-        return {
-            "content": 0, "pronunciation": 0, "fluency": 0, "total": 0,
-            "recognized_text": "", "word_scores": [],
-            "error": str(e),
-        }
+    azure_result = assess_pronunciation(
+        audio_bytes=audio_bytes,
+        reference_text=reference_text,
+        granularity="Word",
+        enable_miscue=True,
+    )
 
     accuracy_score = azure_result.get("AccuracyScore", 0)
     fluency_score  = azure_result.get("FluencyScore",  0)

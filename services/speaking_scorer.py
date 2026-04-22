@@ -3,10 +3,13 @@ Shared background scoring for all speaking practice types.
 Downloads audio from S3, runs Azure scoring, applies rubric weights + PTE formula.
 Ported from englishfirm-app-fastapi/services/question_service.py _score_free_form_bg.
 """
+import logging
 import threading
 import requests as _requests
 
 import core.config as config
+
+logger = logging.getLogger(__name__)
 from services.s3_service import generate_presigned_url
 from services.session_service import store_score, update_speaking_score_in_db
 from services.scoring.azure_scorer import _compute_question_score
@@ -158,7 +161,11 @@ def _run_scoring(
 
     except Exception as e:
         store_score(user_id, question_id, {"scoring": "error", "error": str(e)})
-        print(f"[SCORER] Error q={question_id} type={question_type}: {e}", flush=True)
+        logger.error(
+            "[SCORER ERROR] user=%s question=%s type=%s exception=%s: %s "
+            "— scoring_status remains pending",
+            user_id, question_id, question_type, type(e).__name__, e,
+        )
 
 
 def kick_off_scoring(

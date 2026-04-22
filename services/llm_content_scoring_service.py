@@ -5,7 +5,9 @@ Ported from englishfirm-app-fastapi. Uses gpt-4o-mini.
 import json
 import logging
 import os
+import time
 
+import openai as _openai_module
 from openai import OpenAI
 
 log = logging.getLogger(__name__)
@@ -15,17 +17,37 @@ _LLM_MODEL = "gpt-4o-mini"
 
 
 def _call_llm(prompt: str, max_tokens: int = 200) -> dict:
-    resp = _openai.chat.completions.create(
-        model=_LLM_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.1,
-        max_tokens=max_tokens,
+    last_exc: Exception = RuntimeError("_call_llm: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            resp = _openai.chat.completions.create(
+                model=_LLM_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=max_tokens,
+            )
+            raw = resp.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                parts = raw.split("```")
+                raw = parts[1].lstrip("json").strip() if len(parts) > 1 else raw
+            return json.loads(raw)
+        except _openai_module.AuthenticationError as exc:
+            log.error("[LLM] AuthenticationError — not retrying: %s", exc)
+            raise
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "[LLM] _call_llm attempt=%d/3 failed — %s: %s",
+                attempt, type(exc).__name__, exc,
+            )
+            if attempt < 3:
+                time.sleep(2)
+
+    log.error(
+        "[LLM] _call_llm failed after 3 attempts — exception=%s: %s",
+        type(last_exc).__name__, last_exc,
     )
-    raw = resp.choices[0].message.content.strip()
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1].lstrip("json").strip() if len(parts) > 1 else raw
-    return json.loads(raw)
+    raise last_exc
 
 
 # ── Stimulus key-point extraction (RL / RTS / SGD) ───────────────────────────
