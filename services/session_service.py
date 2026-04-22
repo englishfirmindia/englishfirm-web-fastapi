@@ -275,6 +275,21 @@ def update_speaking_score_in_db(
                     "word_scores": word_scores or [],
                 }
                 answer.scoring_status = "complete"
+                db.flush()
+                # Recalculate attempt total_score as sum of all scored answers
+                from sqlalchemy import func
+                attempt = db.query(PracticeAttempt).filter_by(id=answer.attempt_id).first()
+                if attempt:
+                    total_score = db.query(func.sum(AttemptAnswer.score)).filter_by(
+                        attempt_id=attempt.id
+                    ).scalar() or 0
+                    attempt.total_score = int(total_score)
+                    # Mark attempt complete once all answers are scored
+                    pending_count = db.query(AttemptAnswer).filter_by(
+                        attempt_id=attempt.id, scoring_status="pending"
+                    ).count()
+                    if pending_count == 0:
+                        attempt.scoring_status = "complete"
                 db.commit()
         except Exception as e:
             print(f"[UPDATE_SCORE] DB error q={question_id}: {e}", flush=True)

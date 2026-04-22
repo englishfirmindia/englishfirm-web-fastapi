@@ -1,48 +1,157 @@
 """
-AI-based scorer for writing/listening tasks that require open-ended evaluation.
+Hybrid AI scorer for writing/listening tasks.
+Covers: summarize_written_text (swt), write_essay (we), listening_sst (sst).
 
-Covers:
-  summarize_written_text (swt)
-  write_essay (we)
-  listening_sst (sst)
-
-Uses the Anthropic Claude API (claude-haiku-4-5-20251001) to evaluate responses
-on a 0-100 scale, then converts to PTE scale via to_pte_score.
+Uses heuristics for form/grammar/vocabulary (same as mobile),
+GPT-4o-mini replaces only the content subscore.
+Falls back to word-count heuristic if LLM call fails.
+Ported from englishfirm-app-fastapi/services/question_service.py.
 """
-
-import os
-import anthropic
+import re
 
 from .base import ScoringResult, ScoringStrategy, to_pte_score
 
-_TASK_INSTRUCTIONS = {
-    "swt": (
-        "Summarize Written Text — one sentence summary of a passage. "
-        "Score on: (1) content accuracy 0-40, (2) grammar/structure 0-30, (3) conciseness 0-30."
-    ),
-    "we": (
-        "Write Essay — argumentative essay on a topic. "
-        "Score on: (1) content/argument 0-35, (2) structure/cohesion 0-25, "
-        "(3) grammar 0-20, (4) vocabulary 0-20."
-    ),
-    "sst": (
-        "Summarize Spoken Text — written summary of audio content. "
-        "Score on: (1) content accuracy 0-40, (2) grammar 0-30, (3) coherence 0-30."
-    ),
-}
 
+# ── SWT heuristic (max 10 pts) ────────────────────────────────────────────────
+
+def _score_swt_heuristic(user_text: str) -> tuple:
+    """Returns (earned, max=10). Matches mobile _score_swt_heuristic."""
+    if not user_text or not user_text.strip():
+        return (0, 10)
+    text = user_text.strip()
+    words = text.split()
+    wc = len(words)
+
+    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+    sentences_score = 1 if len(sentences) == 1 else 0
+    words_score     = 1 if 5 <= wc <= 75 else 0
+
+    if sentences_score == 0 and words_score == 0:
+        return (0, 10)
+
+    content_score = 0
+    if sentences_score == 1 and words_score == 1:
+        content_score = min(4, max(1, wc // 10))
+
+    grammar_score = 0
+    if text[0].isupper():
+        grammar_score += 1
+    if text[-1] in '.!?':
+        grammar_score += 1
+
+    unique_words = len(set(w.lower().strip('.,!?;:()') for w in words if len(w) > 3))
+    vocab_score = min(2, unique_words // 5)
+
+    earned = sentences_score + words_score + content_score + grammar_score + vocab_score
+    return (earned, 10)
+
+
+# ── WE heuristic (max 15 pts) ─────────────────────────────────────────────────
+
+def _score_we_heuristic(user_text: str) -> tuple:
+    """Returns (earned, max=15). Matches mobile _score_we_heuristic."""
+    if not user_text or not user_text.strip():
+        return (0, 15)
+    text = user_text.strip()
+    words = text.split()
+    wc = len(words)
+
+    if 200 <= wc <= 300:
+        form_score = 2
+    elif (120 <= wc <= 199) or (301 <= wc <= 380):
+        form_score = 1
+    else:
+        form_score = 0
+
+    if form_score == 0:
+        return (0, 15)
+
+    content_score = 3 if wc >= 200 else 2 if wc >= 120 else 1 if wc >= 60 else 0
+
+    grammar_score = 0
+    if text[0].isupper():
+        grammar_score += 1
+    if text[-1] in '.!?':
+        grammar_score += 1
+    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+    if len(sentences) >= 4:
+        grammar_score += 1
+
+    unique_words = len(set(w.lower().strip('.,!?;:()"\'- ') for w in words if len(w) > 3))
+    if unique_words >= 60:
+        vocab_score = 3
+    elif unique_words >= 35:
+        vocab_score = 2
+    elif unique_words >= 15:
+        vocab_score = 1
+    else:
+        vocab_score = 0
+
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    if len(paragraphs) >= 4:
+        structure_score = 4
+    elif len(paragraphs) == 3:
+        structure_score = 3
+    elif len(paragraphs) == 2:
+        structure_score = 2
+    elif len(sentences) >= 3:
+        structure_score = 1
+    else:
+        structure_score = 0
+
+    earned = form_score + content_score + grammar_score + vocab_score + structure_score
+    return (earned, 15)
+
+
+# ── SST heuristic (max 10 pts) ────────────────────────────────────────────────
+
+def _score_sst_heuristic(user_text: str) -> tuple:
+    """Returns (earned, max=10)."""
+    if not user_text or not user_text.strip():
+        return (0, 10)
+    text = user_text.strip()
+    words = text.split()
+    wc = len(words)
+
+    # Form: 50-70 words is ideal for SST
+    if 50 <= wc <= 70:
+        form_score = 2
+    elif 30 <= wc <= 49 or 71 <= wc <= 90:
+        form_score = 1
+    else:
+        form_score = 0
+
+    if form_score == 0:
+        return (0, 10)
+
+    content_score = min(4, max(1, wc // 12))
+
+    grammar_score = 0
+    if text[0].isupper():
+        grammar_score += 1
+    if text[-1] in '.!?':
+        grammar_score += 1
+
+    unique_words = len(set(w.lower().strip('.,!?;:()') for w in words if len(w) > 3))
+    vocab_score = min(2, unique_words // 5)
+
+    earned = form_score + content_score + grammar_score + vocab_score
+    return (earned, 10)
+
+
+# ── Scorer class ──────────────────────────────────────────────────────────────
 
 class AIScorer(ScoringStrategy):
     """
-    Sync AI scorer. Calls _score_with_ai(text, prompt) → 0-100 raw score,
-    then converts to PTE scale via to_pte_score.
+    Hybrid scorer: heuristics for form/grammar/vocab,
+    GPT-4o-mini replaces only the content subscore.
 
     answer dict:
-      text: str   (user's written response)
-      prompt: str (original question/passage for context)
+      text:   str  (user's written response)
+      prompt: str  (original passage/question for content scoring)
     """
 
-    is_async = False  # class-level
+    is_async = False
 
     def __init__(self, task_type: str):
         self.task_type = task_type  # 'swt' | 'we' | 'sst'
@@ -52,56 +161,50 @@ class AIScorer(ScoringStrategy):
         return False
 
     def score(self, question_id: int, session_id: str, answer: dict) -> ScoringResult:
-        text = answer.get('text', '')
+        text   = answer.get('text', '')
         prompt = answer.get('prompt', '')
-        try:
-            raw = self._score_with_ai(text, prompt)
-        except Exception as e:
-            return ScoringResult(
-                pte_score=to_pte_score(0.0),
-                raw_score=0.0,
-                is_async=False,
-                breakdown={'ai_raw': 0, 'task_type': self.task_type},
-                error=str(e),
-            )
 
-        pct = raw / 100.0
+        if self.task_type == 'swt':
+            earned, max_pts = _score_swt_heuristic(text)
+            wc = len(text.split())
+            form_ok = (
+                len([s for s in re.split(r'[.!?]+', text.strip()) if s.strip()]) == 1
+                and 5 <= wc <= 75
+            )
+            if form_ok and prompt and text.strip():
+                from services.llm_content_scoring_service import score_swt_content
+                heuristic_content = min(4, max(1, wc // 10))
+                llm_content = score_swt_content(prompt, text)
+                earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
+
+        elif self.task_type == 'we':
+            earned, max_pts = _score_we_heuristic(text)
+            wc = len(text.split())
+            form_ok = 120 <= wc <= 380
+            if form_ok and prompt and text.strip():
+                from services.llm_content_scoring_service import score_we_content
+                heuristic_content = 3 if wc >= 200 else 2 if wc >= 120 else 1 if wc >= 60 else 0
+                llm_content = score_we_content(prompt, text)
+                earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
+
+        else:  # sst
+            earned, max_pts = _score_sst_heuristic(text)
+            wc = len(text.split())
+            form_ok = 30 <= wc <= 90
+            if form_ok and prompt and text.strip():
+                from services.llm_content_scoring_service import score_sst_content
+                heuristic_content = min(4, max(1, wc // 12))
+                llm_content = score_sst_content(prompt, text)
+                earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
+
+        pct = earned / max_pts if max_pts > 0 else 0.0
         return ScoringResult(
             pte_score=to_pte_score(pct),
             raw_score=pct,
             is_async=False,
-            breakdown={'ai_raw': raw, 'task_type': self.task_type},
+            breakdown={
+                'earned': earned,
+                'max_pts': max_pts,
+                'task_type': self.task_type,
+            },
         )
-
-    def _score_with_ai(self, text: str, prompt: str) -> float:
-        """
-        Returns 0-100. Calls Claude Haiku via the Anthropic API.
-        Falls back to 0.0 if the API key is not configured.
-        """
-        if not text or not text.strip():
-            return 0.0
-
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is not set — cannot score with AI")
-
-        instruction = _TASK_INSTRUCTIONS.get(self.task_type, _TASK_INSTRUCTIONS["we"])
-
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=100,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"You are a PTE Academic examiner. Score this student response.\n\n"
-                    f"Task type: {instruction}\n"
-                    f"Original prompt/passage: {prompt[:500] if prompt else 'N/A'}\n"
-                    f"Student response: {text[:1000]}\n\n"
-                    "Reply with ONLY a number between 0 and 100 representing the score. "
-                    "Nothing else."
-                ),
-            }],
-        )
-        score_text = message.content[0].text.strip()
-        return float(score_text.split()[0])

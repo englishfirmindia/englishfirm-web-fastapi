@@ -12,9 +12,11 @@ from services.s3_service import generate_presigned_url, generate_presigned_uploa
 router = APIRouter(prefix="/speaking/retell-lecture", tags=["Speaking - Retell Lecture"])
 
 
-def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int, reference_text: str = "") -> None:
+def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int,
+                    key_points: list = None, stimulus_audio_url: str = "") -> None:
     from services.speaking_scorer import kick_off_scoring
-    kick_off_scoring(user_id, question_id, task_type, audio_url, reference_text)
+    kick_off_scoring(user_id, question_id, task_type, audio_url,
+                     key_points=key_points or [], stimulus_audio_url=stimulus_audio_url)
 
 
 
@@ -54,6 +56,14 @@ def submit(
     audio_url = payload["audio_url"]
 
     session = get_session(session_id)
+    q_obj = session["questions"].get(question_id)
+    key_points = []
+    stimulus_audio_url = ""
+    if q_obj:
+        stimulus_audio_url = (q_obj.content_json or {}).get("audio_url", "")
+        if q_obj.evaluation:
+            ca = (q_obj.evaluation.evaluation_json or {}).get("correctAnswers", {})
+            key_points = ca.get("keyPoints") or []
 
     scorer = get_scorer("retell_lecture")
     scorer.score(
@@ -61,7 +71,8 @@ def submit(
         session_id=session_id,
         answer={
             "audio_url": audio_url,
-            "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id),
+            "kick_off_fn": lambda t, q, u: _kick_off_azure(
+                t, q, u, current_user.id, key_points, stimulus_audio_url),
         },
     )
     mark_submitted(session_id, question_id, 0)

@@ -12,9 +12,9 @@ from services.s3_service import generate_presigned_url, generate_presigned_uploa
 router = APIRouter(prefix="/speaking/answer-short-question", tags=["Speaking - Answer Short Question"])
 
 
-def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int, reference_text: str = "") -> None:
+def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int, expected_answers: list = None) -> None:
     from services.speaking_scorer import kick_off_scoring
-    kick_off_scoring(user_id, question_id, task_type, audio_url, reference_text)
+    kick_off_scoring(user_id, question_id, task_type, audio_url, expected_answers=expected_answers or [])
 
 
 
@@ -54,6 +54,11 @@ def submit(
     audio_url = payload["audio_url"]
 
     session = get_session(session_id)
+    q_obj = session["questions"].get(question_id)
+    expected_answers = []
+    if q_obj and q_obj.evaluation:
+        ca = (q_obj.evaluation.evaluation_json or {}).get("correctAnswers", {})
+        expected_answers = ca.get("acceptedVariants") or ([ca["answer"]] if ca.get("answer") else [])
 
     scorer = get_scorer("answer_short_question")
     scorer.score(
@@ -61,7 +66,7 @@ def submit(
         session_id=session_id,
         answer={
             "audio_url": audio_url,
-            "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id),
+            "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id, expected_answers),
         },
     )
     mark_submitted(session_id, question_id, 0)
