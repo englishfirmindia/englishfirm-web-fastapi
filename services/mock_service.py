@@ -33,8 +33,9 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import set_committed_value
 
 from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt, AttemptAnswer
-from services.session_service import ACTIVE_SESSIONS
+from services.session_service import ACTIVE_SESSIONS, mark_submitted, persist_answer_to_db
 from services.s3_service import generate_presigned_url
+from services.scoring import get_scorer
 
 # ─── Task metadata ────────────────────────────────────────────────────────────
 # Each task tagged with section (for scoring) and part (for runner ordering).
@@ -776,3 +777,98 @@ def resume_mock_test(session_id: str, user_id: int, db: Session) -> dict:
         "total_questions":      len(qid_order),
         "submitted_count":      len(session["submitted_questions"]),
     }
+
+
+# ─── Unified non-speaking submit ──────────────────────────────────────────────
+
+def submit_mock_answer(session_id: str, question_id: int, payload: dict) -> dict:
+    """Score and persist a single non-speaking mock answer."""
+    session = ACTIVE_SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Mock session not found")
+
+    qid = int(question_id)
+    question = session["questions"].get(qid)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found in mock session")
+
+    task_type = _NORMALIZE_TYPE.get(question.question_type, question.question_type)
+    content_json = question.content_json or {}
+    eval_json = (question.evaluation.evaluation_json if question.evaluation else {}) or {}
+
+    scorer_key, answer_dict, persist_type, user_answer_json = _build_mock_score_args(
+        task_type, payload, content_json, eval_json, question
+    )
+
+    scorer = get_scorer(scorer_key)
+    result = scorer.score(question_id=qid, session_id=session_id, answer=answer_dict)
+
+    mark_submitted(session_id, qid, result.pte_score)
+    persist_answer_to_db(
+        session=session,
+        question_id=qid,
+        question_type=persist_type,
+        user_answer_json=user_answer_json,
+        correct_answer_json={},
+        result_json=result.breakdown or {},
+        score=result.pte_score,
+    )
+    return {"pte_score": result.pte_score, "ok": True}
+
+
+def _build_mock_score_args(task_type, payload, content_json, eval_json, question):
+    """Returns (scorer_key, answer_dict, persist_type, user_answer_json)."""
+    if task_type in ("summarize_written_text", "write_essay"):
+        text = payload.get("user_text", "")
+        prompt = content_json.get("passage") or content_json.get("text") or content_json.get("prompt", "")
+        return task_type, {"text": text, "prompt": prompt}, task_type, {"text": text}
+
+    if task_type == "summarize_spoken_text":
+        text = payload.get("user_text", "")
+        prompt = content_json.get("transcript") or content_json.get("audio_url", "")
+        return "listening_sst", {"text": text, "prompt": prompt}, "listening_sst", {"text": text}
+
+    if task_type == "listening_wfd":
+        text = payload.get("user_text", "")
+        return "listening_wfd", {"user_text": text, "evaluation_json": eval_json}, task_type, {"user_text": text}
+
+    if task_type == "reading_fib_drop_down":
+        raw = payload.get("user_answers", {})
+        ua = {str(i + 1): v for i, v in enumerate(raw)} if isinstance(raw, list) else raw
+        return "reading_fib", {"user_answers": ua, "evaluation_json": eval_json}, task_type, {"user_answers": ua}
+
+    if task_type == "reading_drag_and_drop":
+        raw = payload.get("user_answers", {})
+        ua = {str(i + 1): v for i, v in enumerate(raw)} if isinstance(raw, list) else raw
+        return "reading_fib_drop_down", {"user_answers": ua, "evaluation_json": eval_json}, "reading_fib_drop_down", {"user_answers": ua}
+
+    if task_type in ("mcq_single", "listening_mcq_single", "listening_hcs", "listening_smw"):
+        ids = payload.get("selected_option_ids", [])
+        sel = payload.get("selected_option") or (ids[0] if ids else "")
+        scorer_map = {"mcq_single": "reading_mcs", "listening_mcq_single": "listening_mcs",
+                      "listening_hcs": "listening_hcs", "listening_smw": "listening_smw"}
+        return scorer_map[task_type], {"selected_option": sel, "evaluation_json": eval_json}, task_type, {"selected_option": sel}
+
+    if task_type in ("mcq_multiple", "listening_mcq_multiple"):
+        opts = payload.get("selected_options") or payload.get("selected_option_ids", [])
+        scorer_map = {"mcq_multiple": "reading_mcm", "listening_mcq_multiple": "listening_mcm"}
+        return scorer_map[task_type], {"selected_options": opts, "evaluation_json": eval_json}, task_type, {"selected_options": opts}
+
+    if task_type == "reorder_paragraphs":
+        seq = payload.get("user_sequence") or payload.get("paragraphs", [])
+        return "reorder_paragraphs", {"user_sequence": seq, "evaluation_json": eval_json}, task_type, {"user_sequence": seq}
+
+    if task_type == "listening_fib":
+        raw = payload.get("user_answers", {})
+        ua = {str(i + 1): v for i, v in enumerate(raw)} if isinstance(raw, list) else raw
+        return "listening_fib", {"user_answers": ua, "evaluation_json": eval_json}, task_type, {"user_answers": ua}
+
+    if task_type == "highlight_incorrect_words":
+        hw = payload.get("highlighted_words")
+        if hw is None:
+            indices = payload.get("highlighted_indices", [])
+            words = content_json.get("words") or content_json.get("transcript", "").split()
+            hw = [words[i] for i in indices if isinstance(i, int) and i < len(words)]
+        return "listening_hiw", {"highlighted_words": hw, "evaluation_json": eval_json}, task_type, {"highlighted_words": list(hw or [])}
+
+    raise HTTPException(status_code=400, detail=f"Unsupported task_type for mock submit: {task_type}")

@@ -30,6 +30,7 @@ from services.mock_service import (
     get_mock_results,
     get_mock_review,
     resume_mock_test,
+    submit_mock_answer,
 )
 
 router = APIRouter(tags=["Mock Test"])
@@ -114,6 +115,20 @@ def mock_review(
 ):
     """Returns all answers grouped by section for the review screen."""
     return get_mock_review(session_id=session_id, user_id=current_user.id, db=db)
+
+
+@router.post("/mock/submit")
+def mock_submit(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Unified submit for all non-speaking mock question types."""
+    session_id = payload.get("session_id", "")
+    question_id = payload.get("question_id")
+    if not session_id or question_id is None:
+        raise HTTPException(status_code=400, detail="session_id and question_id required")
+    return submit_mock_answer(session_id=session_id, question_id=int(question_id), payload=payload)
 
 
 @router.get("/mock/resume/{session_id}")
