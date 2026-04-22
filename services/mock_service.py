@@ -36,6 +36,7 @@ from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt, 
 from services.session_service import ACTIVE_SESSIONS, mark_submitted, persist_answer_to_db
 from services.s3_service import generate_presigned_url
 from services.scoring import get_scorer
+from services.scoring.base import to_pte_score
 
 # ─── Task metadata ────────────────────────────────────────────────────────────
 # Each task tagged with section (for scoring) and part (for runner ordering).
@@ -803,6 +804,9 @@ def submit_mock_answer(session_id: str, question_id: int, payload: dict) -> dict
     scorer = get_scorer(scorer_key)
     result = scorer.score(question_id=qid, session_id=session_id, answer=answer_dict)
 
+    max_pts = _MAX_FALLBACK.get(persist_type, 1)
+    raw_pts = result.raw_score * max_pts
+
     mark_submitted(session_id, qid, result.pte_score)
     persist_answer_to_db(
         session=session,
@@ -810,10 +814,10 @@ def submit_mock_answer(session_id: str, question_id: int, payload: dict) -> dict
         question_type=persist_type,
         user_answer_json=user_answer_json,
         correct_answer_json={},
-        result_json=result.breakdown or {},
-        score=result.pte_score,
+        result_json={**(result.breakdown or {}), "maxScore": max_pts},
+        score=raw_pts,
     )
-    return {"pte_score": result.pte_score, "ok": True}
+    return {"pte_score": to_pte_score(result.raw_score), "ok": True}
 
 
 def _build_mock_score_args(task_type, payload, content_json, eval_json, question):
