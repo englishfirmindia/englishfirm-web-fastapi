@@ -50,7 +50,7 @@ engine = create_engine(
     pool_pre_ping=True,
     pool_size=config.DB_POOL_SIZE,
     max_overflow=config.DB_MAX_OVERFLOW,
-    connect_args={"options": "-c statement_timeout=10000"},
+    connect_args={"options": "-c statement_timeout=45000"},
 )
 
 # Session factory
