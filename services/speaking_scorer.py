@@ -16,7 +16,7 @@ from services.scoring.azure_scorer import _compute_question_score
 
 
 def _pte_score(pct: float) -> int:
-    return min(config.PTE_CEILING, round(pct * config.PTE_CEILING))
+    return max(config.PTE_FLOOR, min(config.PTE_CEILING, round(config.PTE_BASE + pct * config.PTE_SCALE)))
 
 
 def _get_stimulus_key_points(question_type: str, audio_url: str) -> list:
