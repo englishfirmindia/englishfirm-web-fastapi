@@ -54,7 +54,9 @@ def submit(
     persist_answer_to_db(
         session=session, question_id=question_id, question_type="listening_wfd",
         user_answer_json={"text": user_text},
-        correct_answer_json={}, result_json=result.breakdown or {}, score=result.pte_score,
+        correct_answer_json={},
+        result_json={**(result.breakdown or {}), "pte_score": result.pte_score, "maxScore": (result.breakdown or {}).get("total", 1)},
+        score=(result.breakdown or {}).get("hits", 0),
     )
 
     eval_json = question.evaluation.evaluation_json or {}

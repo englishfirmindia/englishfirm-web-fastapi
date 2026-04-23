@@ -67,8 +67,13 @@ def submit(
             session=session, question_id=question_id, question_type="summarize_written_text",
             user_answer_json={"text": user_answer},
             correct_answer_json={},
-            result_json={"pte_score": result.pte_score, "breakdown": result.breakdown, "error": result.error},
-            score=result.pte_score,
+            result_json={
+                "pte_score": result.pte_score,
+                "breakdown": result.breakdown,
+                "error": result.error,
+                "maxScore": result.breakdown.get("max_pts", 10),
+            },
+            score=result.breakdown.get("earned", 0),
         )
         store_score(current_user.id, question_id, {
             "status": status_str,
