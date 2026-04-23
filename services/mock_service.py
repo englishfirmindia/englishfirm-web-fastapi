@@ -476,14 +476,21 @@ def _compute_section_score(section: str, answers: list, weights: dict, max_pts_m
             "result_detail": a.result_json or {},
         })
 
+    # Full section weight = sum of ALL task weights for this section from RDS,
+    # regardless of whether the user answered them. This prevents an inflated score
+    # when a task type has zero answers (e.g. unanswered HIW, missing drag-drop pool).
+    full_section_weight = sum(
+        v.get(section, 0) for v in weights.values() if (v.get(section, 0) or 0) > 0
+    )
+
     weighted_sum   = 0.0
-    present_weight = 0.0
+    answered_weight = 0.0
     breakdown = {}
     for rds, b in buckets.items():
         task_pct = (b["earned"] / b["max"]) if b["max"] > 0 else 0.0
         contrib  = task_pct * b["weight"]
-        weighted_sum   += contrib
-        present_weight += b["weight"]
+        weighted_sum    += contrib
+        answered_weight += b["weight"]
         breakdown[rds] = {
             "display_name":    b["display"],
             "count":           b["count"],
@@ -496,15 +503,16 @@ def _compute_section_score(section: str, answers: list, weights: dict, max_pts_m
             "task_pte":        max(10, min(90, round(10 + task_pct * 80))),
         }
 
-    normalised_pct = (weighted_sum / present_weight) if present_weight > 0 else 0.0
+    normalised_pct = (weighted_sum / full_section_weight) if full_section_weight > 0 else 0.0
     score = max(10, min(90, round(10 + normalised_pct * 80)))
     return {
-        "score":            score,
-        "weighted_pct":     round(normalised_pct * 100, 1),
-        "weighted_sum":     round(weighted_sum, 2),
-        "present_weight":   round(present_weight, 2),
-        "breakdown":        breakdown,
-        "questions":        questions,
+        "score":              score,
+        "weighted_pct":       round(normalised_pct * 100, 1),
+        "weighted_sum":       round(weighted_sum, 2),
+        "full_section_weight": round(full_section_weight, 2),
+        "answered_weight":    round(answered_weight, 2),
+        "breakdown":          breakdown,
+        "questions":          questions,
     }
 
 
