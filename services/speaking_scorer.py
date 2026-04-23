@@ -161,11 +161,27 @@ def _run_scoring(
 
     except Exception as e:
         store_score(user_id, question_id, {"scoring": "error", "error": str(e)})
-        logger.error(
-            "[SCORER ERROR] user=%s question=%s type=%s exception=%s: %s "
-            "— scoring_status remains pending",
-            user_id, question_id, question_type, type(e).__name__, e,
-        )
+        if "no speech recognised" in str(e).lower():
+            logger.warning(
+                "[SCORER] user=%s question=%s type=%s no speech recognised — marking complete with floor score",
+                user_id, question_id, question_type,
+            )
+            update_speaking_score_in_db(
+                user_id=user_id,
+                question_id=question_id,
+                content=0.0,
+                pronunciation=0.0,
+                fluency=0.0,
+                total=config.PTE_FLOOR,
+                transcript="",
+                word_scores=[],
+            )
+        else:
+            logger.error(
+                "[SCORER ERROR] user=%s question=%s type=%s exception=%s: %s "
+                "— scoring_status remains pending",
+                user_id, question_id, question_type, type(e).__name__, e,
+            )
 
 
 def kick_off_scoring(
