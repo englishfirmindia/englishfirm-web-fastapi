@@ -24,6 +24,7 @@ def start_session(
     question_type: str,
     difficulty_level: Optional[int] = None,
     limit: int = config.SESSION_QUESTION_LIMIT,
+    question_id: Optional[int] = None,
 ) -> dict:
     query = (
         db.query(QuestionFromApeuni)
@@ -33,11 +34,14 @@ def start_session(
             QuestionFromApeuni.question_type == question_type,
         )
     )
-    if difficulty_level is not None:
-        query = query.filter(QuestionFromApeuni.difficulty_level == difficulty_level)
-    query = query.order_by(QuestionFromApeuni.question_id.asc())
-    if limit:
-        query = query.limit(limit)
+    if question_id is not None:
+        query = query.filter(QuestionFromApeuni.question_id == question_id)
+    else:
+        if difficulty_level is not None:
+            query = query.filter(QuestionFromApeuni.difficulty_level == difficulty_level)
+        query = query.order_by(QuestionFromApeuni.question_id.asc())
+        if limit:
+            query = query.limit(limit)
     questions = query.all()
     if not questions:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No questions found")

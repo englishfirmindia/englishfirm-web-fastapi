@@ -1,9 +1,11 @@
+import math
 import uuid
-from fastapi import APIRouter, Depends, Body
+from typing import Optional
+from fastapi import APIRouter, Depends, Body, Query
 from sqlalchemy.orm import Session
 
 from db.database import get_db
-from db.models import User
+from db.models import User, QuestionFromApeuni, UserQuestionAttempt
 from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, get_score_from_store, persist_speaking_answer_pending
 from services.scoring import get_scorer
@@ -17,18 +19,92 @@ def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: i
     kick_off_scoring(user_id, question_id, task_type, audio_url, reference_text)
 
 
+@router.get("/list")
+def list_questions(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    difficulty: Optional[int] = Query(default=None),
+    is_prediction: Optional[bool] = Query(default=None),
+    practiced: Optional[bool] = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    query = db.query(QuestionFromApeuni).filter(
+        QuestionFromApeuni.module == "speaking",
+        QuestionFromApeuni.question_type == "read_aloud",
+    )
+    if difficulty is not None:
+        query = query.filter(QuestionFromApeuni.difficulty_level == difficulty)
+    if is_prediction is not None:
+        query = query.filter(QuestionFromApeuni.is_prediction == is_prediction)
+    if practiced is not None:
+        practiced_subq = (
+            db.query(UserQuestionAttempt.question_id)
+            .filter(UserQuestionAttempt.user_id == current_user.id)
+            .subquery()
+        )
+        if practiced:
+            query = query.filter(QuestionFromApeuni.question_id.in_(practiced_subq))
+        else:
+            query = query.filter(~QuestionFromApeuni.question_id.in_(practiced_subq))
+
+    total = query.count()
+    total_pages = math.ceil(total / limit) if total > 0 else 1
+    questions = (
+        query
+        .order_by(QuestionFromApeuni.question_id.asc())
+        .offset((page - 1) * limit)
+        .limit(limit)
+        .all()
+    )
+
+    page_qids = [q.question_id for q in questions]
+    practiced_ids: set = set()
+    if page_qids:
+        rows = (
+            db.query(UserQuestionAttempt.question_id)
+            .filter(
+                UserQuestionAttempt.user_id == current_user.id,
+                UserQuestionAttempt.question_id.in_(page_qids),
+            )
+            .all()
+        )
+        practiced_ids = {r[0] for r in rows}
+
+    return {
+        "questions": [
+            {
+                "question_id": q.question_id,
+                "question_number": q.question_number_from_apeuni,
+                "title": q.title,
+                "passage_preview": ((q.content_json or {}).get("passage", "") or "")[:100],
+                "difficulty_level": q.difficulty_level,
+                "is_prediction": bool(q.is_prediction),
+                "practiced": q.question_id in practiced_ids,
+            }
+            for q in questions
+        ],
+        "total": total,
+        "page": page,
+        "total_pages": total_pages,
+        "limit": limit,
+    }
+
+
 @router.post("/start")
 def start(
     payload: dict = Body(default={}),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    raw_qid = payload.get("question_id")
     return start_session(
         db=db,
         user_id=current_user.id,
         module="speaking",
         question_type="read_aloud",
         difficulty_level=payload.get("difficulty_level"),
+        question_id=int(raw_qid) if raw_qid is not None else None,
     )
 
 
