@@ -9,6 +9,7 @@ Endpoints:
 import os
 import json
 import time
+import asyncio
 from typing import AsyncGenerator
 from datetime import datetime, timezone
 
@@ -156,31 +157,45 @@ async def chat_stream(
     async def _stream() -> AsyncGenerator[str, None]:
         client = anthropic.Anthropic(api_key=api_key)
         full_reply: list[str] = []
-        try:
-            with client.messages.stream(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1024,
-                system=SYSTEM_PROMPT,
-                messages=messages,
-                timeout=30,
-            ) as stream:
-                for text in stream.text_stream:
-                    full_reply.append(text)
-                    yield f"data: {json.dumps({'chunk': text})}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-        finally:
-            reply_text = "".join(full_reply)
-            if reply_text:
-                db.add(Message(
-                    conversation_id=conv.id,
-                    role="assistant",
-                    content=reply_text,
-                ))
-                conv.message_count = (conv.message_count or 0) + 2
-                conv.last_message_at = datetime.now(timezone.utc)
-                db.commit()
-            yield "data: [DONE]\n\n"
+
+        for attempt in range(1, 4):
+            try:
+                with client.messages.stream(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=1024,
+                    system=SYSTEM_PROMPT,
+                    messages=messages,
+                    timeout=30,
+                ) as stream:
+                    for text in stream.text_stream:
+                        full_reply.append(text)
+                        yield f"data: {json.dumps({'chunk': text})}\n\n"
+                break  # success
+            except anthropic.AuthenticationError:
+                yield f"data: {json.dumps({'chunk': 'AI chat is not configured correctly.'})}\n\n"
+                break
+            except Exception:
+                if full_reply:
+                    # mid-stream failure — friendly suffix, no retry
+                    yield f"data: {json.dumps({'chunk': ' Sorry, the response was interrupted. Please try again.'})}\n\n"
+                    break
+                # pre-stream failure — retry
+                if attempt < 3:
+                    await asyncio.sleep(2)
+                else:
+                    yield f"data: {json.dumps({'chunk': 'Sorry, I am having trouble right now. Please try again.'})}\n\n"
+
+        reply_text = "".join(full_reply)
+        if reply_text:
+            db.add(Message(
+                conversation_id=conv.id,
+                role="assistant",
+                content=reply_text,
+            ))
+            conv.message_count = (conv.message_count or 0) + 2
+            conv.last_message_at = datetime.now(timezone.utc)
+            db.commit()
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         _stream(),
