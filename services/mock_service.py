@@ -451,7 +451,11 @@ def _compute_section_score(section: str, answers: list, weights: dict, max_pts_m
             buckets[rds] = {"earned": 0.0, "max": 0.0, "weight": w,
                             "display": qt.replace("_", " ").title(), "count": 0, "answered": 0}
         max_pts = (a.result_json or {}).get("maxScore") or max_pts_map.get(qt, 1)
-        buckets[rds]["earned"] += float(a.score or 0)
+        raw_score = float(a.score or 0)
+        # Speaking scores are stored as PTE values (10-90); normalise back to rubric scale
+        if qt in _ASYNC_TYPES:
+            raw_score = (raw_score / 90.0) * float(max_pts)
+        buckets[rds]["earned"] += raw_score
         buckets[rds]["max"]    += float(max_pts or 0)
         buckets[rds]["count"]  += 1
         if a.score is not None:
@@ -499,7 +503,10 @@ def _compute_overall_score(answers: list, weights: dict, max_pts_map: dict) -> d
         if rds not in buckets:
             buckets[rds] = {"earned": 0.0, "max": 0.0, "weight": w}
         max_pts = (a.result_json or {}).get("maxScore") or max_pts_map.get(qt, 1)
-        buckets[rds]["earned"] += float(a.score or 0)
+        raw_score = float(a.score or 0)
+        if qt in _ASYNC_TYPES:
+            raw_score = (raw_score / 90.0) * float(max_pts)
+        buckets[rds]["earned"] += raw_score
         buckets[rds]["max"]    += float(max_pts or 0)
 
     weighted_sum   = 0.0
