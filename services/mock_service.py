@@ -142,6 +142,7 @@ _RDS_TASK = {
     "reading_fib_drop_down":      "reading_fib_dropdown",
     "reading_drag_and_drop":      "fib_drag_drop",
     "reorder_paragraphs":         "reorder_paragraph",
+    "listening_sst":              "summarize_spoken_text",
 }
 
 # Alias map — questions_from_apeuni sometimes stores legacy APEUni-prefixed
@@ -886,7 +887,7 @@ def _build_mock_score_args(task_type, payload, content_json, eval_json, question
     if task_type == "summarize_spoken_text":
         text = payload.get("user_text", "")
         prompt = content_json.get("transcript") or content_json.get("audio_url", "")
-        return "listening_sst", {"text": text, "prompt": prompt}, "listening_sst", {"text": text}
+        return "listening_sst", {"text": text, "prompt": prompt}, "summarize_spoken_text", {"text": text}
 
     if task_type == "listening_wfd":
         text = payload.get("user_text", "")
