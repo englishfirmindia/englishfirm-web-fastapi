@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from db.models import User
 from core.dependencies import get_current_user
 
-router = APIRouter(prefix="/questions", tags=["Resources"])
+router = APIRouter(tags=["Resources"])
 
 
 @router.get("/resources")
