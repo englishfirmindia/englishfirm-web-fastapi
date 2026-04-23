@@ -1,208 +1,409 @@
 """
-AI chat router for EnglishFirm web.
+AI chat router for EnglishFirm web — full EF Coach port from mobile.
 
 Endpoints:
   POST /chat        — synchronous reply
   POST /chat/stream — SSE streaming reply
 """
 
-import os
 import json
 import time
 import asyncio
-from typing import AsyncGenerator
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
 from pydantic import BaseModel
-import anthropic
 
 from db.database import get_db
 from db.models import User, Conversation, Message
 from core.dependencies import get_current_user
 
+from mcp_server.tools import get_trainer_profile, get_new_practice_since
+from services.coach_session_service import (
+    detect_and_handle_session_boundary,
+    compute_phase,
+    compute_completeness_flags,
+)
+from services.summary_service import generate_session_summary, save_session_summary
+from services.ai_service import get_ai_reply, stream_ai_reply
+
+import logging
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/chat", tags=["AI Chat"])
 
-SYSTEM_PROMPT = (
-    "You are an expert PTE Academic English tutor at EnglishFirm. "
-    "Help students improve their English and PTE scores. "
-    "Be encouraging, specific, and practical in your feedback. "
-    "Focus on PTE-specific skills: speaking fluency, pronunciation, "
-    "writing coherence, reading comprehension, and listening accuracy."
-)
+# Trigger summary after this many messages in a conversation
+SUMMARY_TRIGGER_COUNT = 6
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _get_or_create_conversation(db: Session, user_id: int) -> Conversation:
-    conv = (
-        db.query(Conversation)
-        .filter_by(user_id=user_id, status="active")
-        .order_by(Conversation.last_message_at.desc())
-        .first()
-    )
-    if not conv:
-        conv = Conversation(user_id=user_id, status="active", message_count=0)
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
-    return conv
-
-
-def _get_history(db: Session, conversation_id: int, limit: int = 20) -> list:
-    msgs = (
-        db.query(Message)
-        .filter_by(conversation_id=conversation_id)
-        .order_by(Message.created_at.desc())
-        .limit(limit)
-        .all()
-    )
-    return [{"role": m.role, "content": m.content} for m in reversed(msgs)]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Request model
-# ─────────────────────────────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     message: str
 
 
+class ChatResponse(BaseModel):
+    response: str
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# POST /chat
+# Background task: generate + save session summary
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("")
-def chat(
-    req: ChatRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+async def _run_summary_if_needed(
+    conversation_id: int,
+    user_id: int,
+    student_name: str,
+    message_count: int,
+    db: Session,
 ):
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return {"reply": "AI chat is not configured yet."}
+    if message_count < SUMMARY_TRIGGER_COUNT:
+        return
 
-    conv = _get_or_create_conversation(db, current_user.id)
-    history = _get_history(db, conv.id)
+    # Only summarise at every SUMMARY_TRIGGER_COUNT boundary (6, 12, 18...)
+    if message_count % SUMMARY_TRIGGER_COUNT != 0:
+        return
 
-    # Save user message
-    db.add(Message(conversation_id=conv.id, role="user", content=req.message))
-    conv.message_count = (conv.message_count or 0) + 1
-    conv.last_message_at = datetime.now(timezone.utc)
-    db.commit()
-
-    client = anthropic.Anthropic(api_key=api_key)
-    messages = history + [{"role": "user", "content": req.message}]
-
-    reply = "Sorry, I'm having trouble right now. Please try again."
-    for attempt in range(1, 4):
-        try:
-            response = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1024,
-                system=SYSTEM_PROMPT,
-                messages=messages,
-                timeout=30,
-            )
-            reply = response.content[0].text
-            break
-        except anthropic.AuthenticationError:
-            reply = "AI chat is not configured correctly."
-            break
-        except Exception as e:
-            if attempt < 3:
-                time.sleep(2)
-            else:
-                reply = "Sorry, I'm having trouble right now. Please try again."
-
-    # Save assistant message
-    db.add(Message(conversation_id=conv.id, role="assistant", content=reply))
-    conv.message_count = (conv.message_count or 0) + 1
-    conv.last_message_at = datetime.now(timezone.utc)
-    db.commit()
-
-    return {"reply": reply}
+    try:
+        messages = (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.id.desc())
+            .limit(12)
+            .all()
+        )
+        msg_dicts = [{"role": m.role, "content": m.content} for m in reversed(messages)]
+        summary = await generate_session_summary(msg_dicts, student_name)
+        if summary:
+            save_session_summary(user_id, summary, db)
+    except Exception as e:
+        log.warning("[SUMMARY_BG] failed: %s", e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# POST /chat/stream  (SSE)
+# Chat endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("", response_model=ChatResponse)
+async def chat(
+    request: ChatRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not request.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    # ── 1. Get or create active conversation ──────────────────────────────────
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.user_id == current_user.id,
+            Conversation.status == "active",
+        )
+        .first()
+    )
+    if conversation is None:
+        conversation = Conversation(
+            user_id=current_user.id,
+            status="active",
+            message_count=0,
+        )
+        db.add(conversation)
+        db.flush()
+        db.refresh(conversation)
+
+    # ── 2. Persist user message ───────────────────────────────────────────────
+    user_message = Message(
+        conversation_id=conversation.id,
+        role="user",
+        content=request.message,
+    )
+    db.add(user_message)
+    db.flush()
+
+    # ── 3. Load trainer profile ───────────────────────────────────────────────
+    trainer_profile = get_trainer_profile(current_user.id, db)
+
+    # ── 4. Session boundary detection ─────────────────────────────────────────
+    last_session_at_dt = None
+    if trainer_profile.get("last_session_at"):
+        try:
+            last_session_at_dt = datetime.fromisoformat(trainer_profile["last_session_at"])
+            if last_session_at_dt.tzinfo is None:
+                last_session_at_dt = last_session_at_dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    detect_and_handle_session_boundary(current_user.id, db)
+    # Refresh after session update
+    trainer_profile = get_trainer_profile(current_user.id, db)
+
+    # ── 5. Check for new practice since last session ──────────────────────────
+    new_practice = get_new_practice_since(current_user.id, db, last_session_at_dt)
+    if new_practice:
+        log.info("[PROACTIVE] %d new practice attempts since last session", len(new_practice))
+
+    # ── 6. Compute phase + completeness flags ─────────────────────────────────
+    phase = compute_phase(trainer_profile, new_practice)
+    completeness_flags = compute_completeness_flags(trainer_profile)
+
+    log.info("[SESSION] user=%s session=#%s phase=%s missing=%d",
+             current_user.username,
+             trainer_profile.get("session_count"),
+             phase,
+             len(completeness_flags))
+
+    # ── 7. Load recent conversation history ───────────────────────────────────
+    recent_messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id)
+        .order_by(Message.id.desc())
+        .limit(10)
+        .all()
+    )
+    conversation_messages = [
+        {"role": m.role, "content": m.content}
+        for m in reversed(recent_messages)
+        if m.id != user_message.id  # exclude the one we just added
+    ]
+
+    # ── 8. Build thin user context ────────────────────────────────────────────
+    from datetime import date
+    days_to_exam = None
+    if current_user.exam_date:
+        try:
+            days_to_exam = (current_user.exam_date - date.today()).days
+            if days_to_exam < 0:
+                days_to_exam = 0
+        except Exception:
+            pass
+
+    user_context = {
+        "username":          current_user.username,
+        "score_requirement": current_user.score_requirement,
+        "exam_date":         current_user.exam_date.isoformat() if current_user.exam_date else None,
+        "days_to_exam":      days_to_exam,
+    }
+
+    # ── 9. Get AI reply ───────────────────────────────────────────────────────
+    reply = await get_ai_reply(
+        db=db,
+        conversation=conversation,
+        user_message=request.message,
+        user_context=user_context,
+        user=current_user,
+        user_id=current_user.id,
+        trainer_profile=trainer_profile,
+        phase=phase,
+        completeness_flags=completeness_flags,
+        new_practice=new_practice,
+        conversation_messages=conversation_messages,
+    )
+
+    # ── 10. Persist assistant message ─────────────────────────────────────────
+    assistant_message = Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content=reply,
+    )
+    db.add(assistant_message)
+
+    conversation.message_count += 2
+    conversation.last_message_at = func.now()
+
+    db.commit()
+
+    # ── 11. Background: generate session summary if threshold reached ─────────
+    background_tasks.add_task(
+        _run_summary_if_needed,
+        conversation_id=conversation.id,
+        user_id=current_user.id,
+        student_name=current_user.username,
+        message_count=conversation.message_count,
+        db=db,
+    )
+
+    return ChatResponse(response=reply)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Streaming chat endpoint (SSE)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/stream")
 async def chat_stream(
-    req: ChatRequest,
-    db: Session = Depends(get_db),
+    request: ChatRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        async def _no_key():
-            yield "data: AI chat is not configured yet.\n\n"
-            yield "data: [DONE]\n\n"
-        return StreamingResponse(_no_key(), media_type="text/event-stream")
+    if not request.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    conv = _get_or_create_conversation(db, current_user.id)
-    history = _get_history(db, conv.id)
+    t0 = time.perf_counter()
+    def ms(label: str, since: float) -> float:
+        elapsed = (time.perf_counter() - since) * 1000
+        log.info("[TTFT] %-30s %6.0f ms", label, elapsed)
+        return time.perf_counter()
 
-    db.add(Message(conversation_id=conv.id, role="user", content=req.message))
-    conv.last_message_at = datetime.now(timezone.utc)
-    db.commit()
+    # ── 1. Get or create active conversation ──────────────────────────────────
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.user_id == current_user.id,
+            Conversation.status == "active",
+        )
+        .first()
+    )
+    if conversation is None:
+        conversation = Conversation(
+            user_id=current_user.id,
+            status="active",
+            message_count=0,
+        )
+        db.add(conversation)
+        db.flush()
+        db.refresh(conversation)
 
-    messages = history + [{"role": "user", "content": req.message}]
+    # ── 2. Persist user message ───────────────────────────────────────────────
+    user_message = Message(
+        conversation_id=conversation.id,
+        role="user",
+        content=request.message,
+    )
+    db.add(user_message)
+    db.flush()
+    t = ms("db:conversation+user_msg", t0)
 
-    async def _stream() -> AsyncGenerator[str, None]:
-        client = anthropic.Anthropic(api_key=api_key)
-        full_reply: list[str] = []
+    # ── 3. Trainer profile (first load) ───────────────────────────────────────
+    trainer_profile = get_trainer_profile(current_user.id, db)
+    t = ms("db:trainer_profile_1", t)
 
-        for attempt in range(1, 4):
-            try:
-                with client.messages.stream(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=1024,
-                    system=SYSTEM_PROMPT,
-                    messages=messages,
-                    timeout=30,
-                ) as stream:
-                    for text in stream.text_stream:
-                        full_reply.append(text)
-                        yield f"data: {json.dumps({'chunk': text})}\n\n"
-                break  # success
-            except anthropic.AuthenticationError:
-                yield f"data: {json.dumps({'chunk': 'AI chat is not configured correctly.'})}\n\n"
-                break
-            except Exception:
-                if full_reply:
-                    # mid-stream failure — friendly suffix, no retry
-                    yield f"data: {json.dumps({'chunk': ' Sorry, the response was interrupted. Please try again.'})}\n\n"
-                    break
-                # pre-stream failure — retry
-                if attempt < 3:
-                    await asyncio.sleep(2)
-                else:
-                    yield f"data: {json.dumps({'chunk': 'Sorry, I am having trouble right now. Please try again.'})}\n\n"
+    # ── 4. Session boundary detection ─────────────────────────────────────────
+    last_session_at_dt = None
+    if trainer_profile.get("last_session_at"):
+        try:
+            last_session_at_dt = datetime.fromisoformat(trainer_profile["last_session_at"])
+            if last_session_at_dt.tzinfo is None:
+                last_session_at_dt = last_session_at_dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
 
-        reply_text = "".join(full_reply)
-        if reply_text:
-            db.add(Message(
-                conversation_id=conv.id,
+    detect_and_handle_session_boundary(current_user.id, db)
+    t = ms("db:session_boundary", t)
+
+    # ── 5. Trainer profile (refresh after session update) ─────────────────────
+    trainer_profile = get_trainer_profile(current_user.id, db)
+    t = ms("db:trainer_profile_2", t)
+
+    # ── 6. New practice + phase ───────────────────────────────────────────────
+    new_practice       = get_new_practice_since(current_user.id, db, last_session_at_dt)
+    phase              = compute_phase(trainer_profile, new_practice)
+    completeness_flags = compute_completeness_flags(trainer_profile)
+    t = ms("db:new_practice+phase", t)
+
+    # ── 7. Recent conversation history ────────────────────────────────────────
+    recent_messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id)
+        .order_by(Message.id.desc())
+        .limit(10)
+        .all()
+    )
+    conversation_messages = [
+        {"role": m.role, "content": m.content}
+        for m in reversed(recent_messages)
+        if m.id != user_message.id
+    ]
+    t = ms("db:recent_messages", t)
+
+    log.info("[TTFT] %-30s %6.0f ms  ← setup done", "TOTAL_SETUP", (time.perf_counter() - t0) * 1000)
+
+    from datetime import date
+    days_to_exam = None
+    if current_user.exam_date:
+        try:
+            days_to_exam = (current_user.exam_date - date.today()).days
+            if days_to_exam < 0:
+                days_to_exam = 0
+        except Exception:
+            pass
+
+    user_context = {
+        "username":          current_user.username,
+        "score_requirement": current_user.score_requirement,
+        "exam_date":         current_user.exam_date.isoformat() if current_user.exam_date else None,
+        "days_to_exam":      days_to_exam,
+    }
+
+    conv_id   = conversation.id
+    user_id   = current_user.id
+    username  = current_user.username
+    msg_count = conversation.message_count
+
+    async def event_generator():
+        full_text    = ""
+        first_chunk  = True
+        try:
+            async for chunk in stream_ai_reply(
+                db=db,
+                user_message=request.message,
+                user_context=user_context,
+                user=current_user,
+                user_id=user_id,
+                trainer_profile=trainer_profile,
+                phase=phase,
+                completeness_flags=completeness_flags,
+                new_practice=new_practice,
+                conversation_messages=conversation_messages,
+                request_t0=t0,
+            ):
+                if first_chunk:
+                    first_chunk = False
+                    log.info("[TTFT] %-30s %6.0f ms  ← FIRST PACKET TO CLIENT",
+                             "FIRST_CHUNK", (time.perf_counter() - t0) * 1000)
+                full_text += chunk
+                yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+
+        except Exception as e:
+            log.error("[STREAM_EP] error: %s", e)
+            err = "Sorry, I'm having trouble right now. Please try again shortly."
+            full_text = err
+            yield f"data: {json.dumps({'chunk': err})}\n\n"
+
+        try:
+            assistant_message = Message(
+                conversation_id=conv_id,
                 role="assistant",
-                content=reply_text,
-            ))
-            conv.message_count = (conv.message_count or 0) + 2
-            conv.last_message_at = datetime.now(timezone.utc)
+                content=full_text or "",
+            )
+            db.add(assistant_message)
+            conversation.message_count = msg_count + 2
+            conversation.last_message_at = func.now()
             db.commit()
+
+            asyncio.create_task(_run_summary_if_needed(
+                conversation_id=conv_id,
+                user_id=user_id,
+                student_name=username,
+                message_count=conversation.message_count,
+                db=db,
+            ))
+            log.info("[TTFT] %-30s %6.0f ms  ← stream complete",
+                     "TOTAL_STREAM", (time.perf_counter() - t0) * 1000)
+        except Exception as e:
+            log.error("[STREAM_EP] DB save failed: %s", e)
+
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
-        _stream(),
+        event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control":    "no-cache",
             "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
+            "Connection":        "keep-alive",
         },
     )
