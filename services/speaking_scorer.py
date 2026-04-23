@@ -16,8 +16,7 @@ from services.scoring.azure_scorer import _compute_question_score
 
 
 def _pte_score(pct: float) -> int:
-    return max(config.PTE_FLOOR, min(config.PTE_CEILING,
-               round(config.PTE_BASE + pct * config.PTE_SCALE)))
+    return min(config.PTE_CEILING, round(pct * config.PTE_CEILING))
 
 
 def _get_stimulus_key_points(question_type: str, audio_url: str) -> list:
@@ -142,7 +141,7 @@ def _run_scoring(
             "content":       round(content, 1),
             "fluency":       fluency,
             "pronunciation": pronunciation,
-            "total":         pte,
+            "total":         max(config.PTE_FLOOR, pte),
             "word_scores":   word_scores,
             **extra,
         })
@@ -172,7 +171,7 @@ def _run_scoring(
                 content=0.0,
                 pronunciation=0.0,
                 fluency=0.0,
-                total=config.PTE_FLOOR,
+                total=0,
                 transcript="",
                 word_scores=[],
             )
