@@ -111,35 +111,42 @@ def mark_submitted(session_id: str, question_id: int, score: int) -> None:
 
     # Record attempt in user_question_attempts for deduplication
     def _record():
-        db = SessionLocal()
-        try:
-            user_id = session.get("user_id")
-            module = session.get("module", "")
-            q_type = session.get("question_type", "")
-            if user_id:
-                exists = db.query(UserQuestionAttempt).filter_by(
-                    user_id=user_id, question_id=question_id
-                ).first()
-                if not exists:
-                    db.add(UserQuestionAttempt(
-                        user_id=user_id,
-                        question_id=question_id,
-                        question_type=q_type,
-                        module=module,
-                    ))
-                # Update PracticeAttempt answered count + total_score
-                attempt_id = session.get("attempt_id")
-                if attempt_id:
-                    attempt = db.query(PracticeAttempt).filter_by(id=attempt_id).first()
-                    if attempt:
-                        attempt.questions_answered = len(session["submitted_questions"])
-                        attempt.total_score = session["score"]
-                db.commit()
-        except Exception as e:
-            print(f"[MARK_SUBMITTED] DB error: {e}", flush=True)
-            db.rollback()
-        finally:
-            db.close()
+        last_exc: Exception = RuntimeError("_record: no attempts made")
+        for attempt in range(1, 4):
+            db = SessionLocal()
+            try:
+                user_id = session.get("user_id")
+                module = session.get("module", "")
+                q_type = session.get("question_type", "")
+                if user_id:
+                    exists = db.query(UserQuestionAttempt).filter_by(
+                        user_id=user_id, question_id=question_id
+                    ).first()
+                    if not exists:
+                        db.add(UserQuestionAttempt(
+                            user_id=user_id,
+                            question_id=question_id,
+                            question_type=q_type,
+                            module=module,
+                        ))
+                    # Update PracticeAttempt answered count + total_score
+                    attempt_id = session.get("attempt_id")
+                    if attempt_id:
+                        pa = db.query(PracticeAttempt).filter_by(id=attempt_id).first()
+                        if pa:
+                            pa.questions_answered = len(session["submitted_questions"])
+                            pa.total_score = session["score"]
+                    db.commit()
+                return
+            except Exception as e:
+                last_exc = e
+                print(f"[MARK_SUBMITTED] DB error attempt={attempt}/3: {e}", flush=True)
+                db.rollback()
+                if attempt < 3:
+                    time.sleep(attempt)
+            finally:
+                db.close()
+        print(f"[MARK_SUBMITTED] failed after 3 attempts: {last_exc}", flush=True)
 
     threading.Thread(target=_record, daemon=True).start()
 
@@ -161,37 +168,44 @@ def persist_answer_to_db(
         return
 
     def _write():
-        db = SessionLocal()
-        try:
-            existing = db.query(AttemptAnswer).filter_by(
-                attempt_id=attempt_id, question_id=question_id
-            ).first()
-            if existing:
-                existing.user_answer_json = user_answer_json
-                existing.correct_answer_json = correct_answer_json
-                existing.result_json = result_json
-                existing.score = score
-                existing.scoring_status = scoring_status
-                if audio_url:
-                    existing.audio_url = audio_url
-            else:
-                db.add(AttemptAnswer(
-                    attempt_id=attempt_id,
-                    question_id=question_id,
-                    question_type=question_type,
-                    user_answer_json=user_answer_json,
-                    correct_answer_json=correct_answer_json,
-                    result_json=result_json,
-                    score=score,
-                    audio_url=audio_url,
-                    scoring_status=scoring_status,
-                ))
-            db.commit()
-        except Exception as e:
-            print(f"[PERSIST_ANSWER] DB error q={question_id}: {e}", flush=True)
-            db.rollback()
-        finally:
-            db.close()
+        last_exc: Exception = RuntimeError("_write: no attempts made")
+        for attempt in range(1, 4):
+            db = SessionLocal()
+            try:
+                existing = db.query(AttemptAnswer).filter_by(
+                    attempt_id=attempt_id, question_id=question_id
+                ).first()
+                if existing:
+                    existing.user_answer_json = user_answer_json
+                    existing.correct_answer_json = correct_answer_json
+                    existing.result_json = result_json
+                    existing.score = score
+                    existing.scoring_status = scoring_status
+                    if audio_url:
+                        existing.audio_url = audio_url
+                else:
+                    db.add(AttemptAnswer(
+                        attempt_id=attempt_id,
+                        question_id=question_id,
+                        question_type=question_type,
+                        user_answer_json=user_answer_json,
+                        correct_answer_json=correct_answer_json,
+                        result_json=result_json,
+                        score=score,
+                        audio_url=audio_url,
+                        scoring_status=scoring_status,
+                    ))
+                db.commit()
+                return
+            except Exception as e:
+                last_exc = e
+                print(f"[PERSIST_ANSWER] DB error attempt={attempt}/3 q={question_id}: {e}", flush=True)
+                db.rollback()
+                if attempt < 3:
+                    time.sleep(attempt)
+            finally:
+                db.close()
+        print(f"[PERSIST_ANSWER] failed after 3 attempts q={question_id}: {last_exc}", flush=True)
 
     threading.Thread(target=_write, daemon=True).start()
 
@@ -208,29 +222,36 @@ def persist_speaking_answer_pending(
         return
 
     def _write():
-        db = SessionLocal()
-        try:
-            existing = db.query(AttemptAnswer).filter_by(
-                attempt_id=attempt_id, question_id=question_id
-            ).first()
-            if not existing:
-                db.add(AttemptAnswer(
-                    attempt_id=attempt_id,
-                    question_id=question_id,
-                    question_type=question_type,
-                    user_answer_json={"audio_url": audio_url},
-                    correct_answer_json={},
-                    result_json={},
-                    score=0,
-                    audio_url=audio_url,
-                    scoring_status="pending",
-                ))
-                db.commit()
-        except Exception as e:
-            print(f"[PERSIST_SPEAKING] DB error q={question_id}: {e}", flush=True)
-            db.rollback()
-        finally:
-            db.close()
+        last_exc: Exception = RuntimeError("_write: no attempts made")
+        for attempt in range(1, 4):
+            db = SessionLocal()
+            try:
+                existing = db.query(AttemptAnswer).filter_by(
+                    attempt_id=attempt_id, question_id=question_id
+                ).first()
+                if not existing:
+                    db.add(AttemptAnswer(
+                        attempt_id=attempt_id,
+                        question_id=question_id,
+                        question_type=question_type,
+                        user_answer_json={"audio_url": audio_url},
+                        correct_answer_json={},
+                        result_json={},
+                        score=0,
+                        audio_url=audio_url,
+                        scoring_status="pending",
+                    ))
+                    db.commit()
+                return
+            except Exception as e:
+                last_exc = e
+                print(f"[PERSIST_SPEAKING] DB error attempt={attempt}/3 q={question_id}: {e}", flush=True)
+                db.rollback()
+                if attempt < 3:
+                    time.sleep(attempt)
+            finally:
+                db.close()
+        print(f"[PERSIST_SPEAKING] failed after 3 attempts q={question_id}: {last_exc}", flush=True)
 
     threading.Thread(target=_write, daemon=True).start()
 
@@ -247,55 +268,62 @@ def update_speaking_score_in_db(
 ) -> None:
     """Update AttemptAnswer with Azure scores after async scoring completes."""
     def _update():
-        db = SessionLocal()
-        try:
-            # Find the most recent pending answer for this user+question
-            answer = (
-                db.query(AttemptAnswer)
-                .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
-                .filter(
-                    PracticeAttempt.user_id == user_id,
-                    AttemptAnswer.question_id == question_id,
-                    AttemptAnswer.scoring_status == "pending",
+        from sqlalchemy import func
+        last_exc: Exception = RuntimeError("_update: no attempts made")
+        for attempt in range(1, 4):
+            db = SessionLocal()
+            try:
+                # Find the most recent pending answer for this user+question
+                answer = (
+                    db.query(AttemptAnswer)
+                    .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
+                    .filter(
+                        PracticeAttempt.user_id == user_id,
+                        AttemptAnswer.question_id == question_id,
+                        AttemptAnswer.scoring_status == "pending",
+                    )
+                    .order_by(AttemptAnswer.submitted_at.desc())
+                    .first()
                 )
-                .order_by(AttemptAnswer.submitted_at.desc())
-                .first()
-            )
-            if answer:
-                answer.content_score = content
-                answer.fluency_score = fluency
-                answer.pronunciation_score = pronunciation
-                answer.score = int(round(total))
-                answer.result_json = {
-                    "content": content,
-                    "pronunciation": pronunciation,
-                    "fluency": fluency,
-                    "total": total,
-                    "transcript": transcript,
-                    "word_scores": word_scores or [],
-                }
-                answer.scoring_status = "complete"
-                db.flush()
-                # Recalculate attempt total_score as sum of all scored answers
-                from sqlalchemy import func
-                attempt = db.query(PracticeAttempt).filter_by(id=answer.attempt_id).first()
-                if attempt:
-                    total_score = db.query(func.sum(AttemptAnswer.score)).filter_by(
-                        attempt_id=attempt.id
-                    ).scalar() or 0
-                    attempt.total_score = int(total_score)
-                    # Mark attempt complete once all answers are scored
-                    pending_count = db.query(AttemptAnswer).filter_by(
-                        attempt_id=attempt.id, scoring_status="pending"
-                    ).count()
-                    if pending_count == 0:
-                        attempt.scoring_status = "complete"
-                db.commit()
-        except Exception as e:
-            print(f"[UPDATE_SCORE] DB error q={question_id}: {e}", flush=True)
-            db.rollback()
-        finally:
-            db.close()
+                if answer:
+                    answer.content_score = content
+                    answer.fluency_score = fluency
+                    answer.pronunciation_score = pronunciation
+                    answer.score = int(round(total))
+                    answer.result_json = {
+                        "content": content,
+                        "pronunciation": pronunciation,
+                        "fluency": fluency,
+                        "total": total,
+                        "transcript": transcript,
+                        "word_scores": word_scores or [],
+                    }
+                    answer.scoring_status = "complete"
+                    db.flush()
+                    # Recalculate attempt total_score as sum of all scored answers
+                    pa = db.query(PracticeAttempt).filter_by(id=answer.attempt_id).first()
+                    if pa:
+                        total_score = db.query(func.sum(AttemptAnswer.score)).filter_by(
+                            attempt_id=pa.id
+                        ).scalar() or 0
+                        pa.total_score = int(total_score)
+                        # Mark attempt complete once all answers are scored
+                        pending_count = db.query(AttemptAnswer).filter_by(
+                            attempt_id=pa.id, scoring_status="pending"
+                        ).count()
+                        if pending_count == 0:
+                            pa.scoring_status = "complete"
+                    db.commit()
+                return
+            except Exception as e:
+                last_exc = e
+                print(f"[UPDATE_SCORE] DB error attempt={attempt}/3 q={question_id}: {e}", flush=True)
+                db.rollback()
+                if attempt < 3:
+                    time.sleep(attempt)
+            finally:
+                db.close()
+        print(f"[UPDATE_SCORE] failed after 3 attempts q={question_id}: {last_exc}", flush=True)
 
     threading.Thread(target=_update, daemon=True).start()
 
