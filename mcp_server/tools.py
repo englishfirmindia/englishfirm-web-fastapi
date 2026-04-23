@@ -405,6 +405,73 @@ def get_last_attempt_breakdown(user_id: int, db: Session) -> dict:
 
     return result
 
+# ── Tool: get_attempt_detail ──────────────────────────────────────────────────
+
+def get_attempt_detail(user_id: int, question_type: str, db: Session) -> Optional[dict]:
+    """
+    Returns per-question breakdown for the student's most recent complete attempt
+    of the given question_type. Resolves the latest attempt internally.
+    """
+    from db.models import PracticeAttempt, AttemptAnswer
+
+    attempt = (
+        db.query(PracticeAttempt)
+        .filter(
+            PracticeAttempt.user_id == user_id,
+            PracticeAttempt.question_type == question_type,
+            PracticeAttempt.status == "complete",
+        )
+        .order_by(PracticeAttempt.id.desc())
+        .first()
+    )
+    if not attempt:
+        return None
+
+    answers = (
+        db.query(AttemptAnswer)
+        .filter(AttemptAnswer.attempt_id == attempt.id)
+        .order_by(AttemptAnswer.id.asc())
+        .limit(20)
+        .all()
+    )
+
+    answer_rows = []
+    for i, a in enumerate(answers, 1):
+        rj = a.result_json or {}
+        row: dict = {
+            "q": i,
+            "question_id": a.question_id,
+            "score": a.score,
+            "scoring_status": a.scoring_status,
+        }
+        # Include pte_score if stored
+        if rj.get("pte_score") is not None:
+            row["pte_score"] = rj["pte_score"]
+        # Speaking-specific sub-scores
+        if a.content_score is not None:
+            row["content"] = round(a.content_score, 2)
+        if a.fluency_score is not None:
+            row["fluency"] = round(a.fluency_score, 2)
+        if a.pronunciation_score is not None:
+            row["pronunciation"] = round(a.pronunciation_score, 2)
+        # Listening WFD: hits/total
+        if rj.get("hits") is not None:
+            row["hits"] = rj["hits"]
+            row["total_words"] = rj.get("total", rj.get("maxScore"))
+        # Max points for context
+        if rj.get("maxScore") is not None:
+            row["max_score"] = rj["maxScore"]
+        answer_rows.append(row)
+
+    return {
+        "attempt_id":    attempt.id,
+        "question_type": question_type,
+        "completed_at":  attempt.completed_at.isoformat() if attempt.completed_at else None,
+        "total_score":   attempt.total_score,
+        "total_questions": attempt.total_questions,
+        "answers":       answer_rows,
+    }
+
 
 # ── Tool: award_milestone ────────────────────────────────────────────────────
 

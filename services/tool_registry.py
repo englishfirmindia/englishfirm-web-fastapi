@@ -41,6 +41,7 @@ TOOL_CALL_LIMITS: dict[str, int] = {
     "get_last_attempt_breakdown": 1,
     "get_milestones":            1,
     "save_student_info":         1,
+    "get_attempt_detail":        1,
 }
 
 
@@ -109,6 +110,31 @@ TOOL_REGISTRY: dict[str, dict] = {
                 "type": "object",
                 "properties": {},
                 "required": [],
+            },
+        },
+    },
+
+    "get_attempt_detail": {
+        "schema": {
+            "name": "get_attempt_detail",
+            "description": (
+                "Get a question-by-question breakdown of the student's most recent attempt "
+                "for a specific question type. Use when the student asks how they did on "
+                "individual questions, wants to review a specific task in detail, or asks "
+                "which questions they got wrong."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "question_type": {
+                        "type": "string",
+                        "description": (
+                            "The question type to look up, e.g. 'read_aloud', 'repeat_sentence', "
+                            "'write_essay', 'summarize_written_text', 'reading_fib', etc."
+                        ),
+                    }
+                },
+                "required": ["question_type"],
             },
         },
     },
@@ -256,6 +282,46 @@ def _handle_get_milestones(args: dict, ctx: ToolContext) -> str:
         return "Milestone data unavailable."
 
 
+def _handle_get_attempt_detail(args: dict, ctx: ToolContext) -> str:
+    qt = str(args.get("question_type", "")).strip()
+    if not qt:
+        return "No question_type provided."
+    try:
+        from mcp_server.tools import get_attempt_detail
+        data = get_attempt_detail(ctx.user_id, qt, ctx.db)
+        if not data:
+            return f"No completed attempts found for question type: {qt}"
+
+        lines = [
+            f"Question type: {data['question_type']}",
+            f"Completed: {(data.get('completed_at') or '')[:10]}",
+            f"Total score: {data['total_score']} / {data['total_questions']} questions",
+            "",
+        ]
+        for a in data["answers"]:
+            parts = [f"Q{a['q']} (id={a['question_id']}): score={a['score']}"]
+            if a.get("pte_score") is not None:
+                parts.append(f"pte={a['pte_score']}")
+            if a.get("content") is not None:
+                parts.append(f"content={a['content']}")
+            if a.get("fluency") is not None:
+                parts.append(f"fluency={a['fluency']}")
+            if a.get("pronunciation") is not None:
+                parts.append(f"pron={a['pronunciation']}")
+            if a.get("hits") is not None:
+                parts.append(f"hits={a['hits']}/{a.get('total_words', '?')}")
+            if a.get("max_score") is not None:
+                parts.append(f"max={a['max_score']}")
+            if a.get("scoring_status") not in (None, "complete", "scored"):
+                parts.append(f"[{a['scoring_status']}]")
+            lines.append("  " + "  ".join(parts))
+
+        return "\n".join(lines)[:_MAX_RESULT_CHARS]
+    except Exception as e:
+        log.warning("[TOOL] get_attempt_detail error: %s", e)
+        return "Attempt detail unavailable."
+
+
 def _handle_save_student_info(args: dict, ctx: ToolContext) -> str:
     # Validate and sanitise before writing
     clean: dict = {}
@@ -302,6 +368,7 @@ _HANDLERS: dict[str, Any] = {
     "search_pte_knowledge":       _handle_search_pte_knowledge,
     "get_last_attempt_breakdown": _handle_get_last_attempt_breakdown,
     "get_milestones":             _handle_get_milestones,
+    "get_attempt_detail":         _handle_get_attempt_detail,
     "save_student_info":          _handle_save_student_info,
 }
 
