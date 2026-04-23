@@ -452,11 +452,7 @@ def _compute_section_score(section: str, answers: list, weights: dict, max_pts_m
         if rds not in buckets:
             buckets[rds] = {"earned": 0.0, "max": 0.0, "weight": w,
                             "display": qt.replace("_", " ").title(), "count": 0, "answered": 0}
-        max_pts = (a.result_json or {}).get("maxScore") or max_pts_map.get(qt, 1)
-        raw_score = float(a.score or 0)
-        # Speaking scores are stored as PTE values (10-90); normalise back to rubric scale
-        if qt in _ASYNC_TYPES:
-            raw_score = ((raw_score - 10.0) / 80.0) * float(max_pts)
+        raw_score, max_pts = _resolve_score_max(a, max_pts_map)
         buckets[rds]["earned"] += raw_score
         buckets[rds]["max"]    += float(max_pts or 0)
         buckets[rds]["count"]  += 1
@@ -517,8 +513,12 @@ def _compute_section_score(section: str, answers: list, weights: dict, max_pts_m
     }
 
 
-def _compute_overall_score(answers: list, weights: dict, max_pts_map: dict) -> dict:
+def _compute_overall_score(answers: list, weights: dict, max_pts_map: dict) -> int:
     """Overall uses overall_percent column from pte_question_weightage."""
+    full_overall_weight = sum(
+        v.get("overall", 0) for v in weights.values() if (v.get("overall", 0) or 0) > 0
+    )
+
     buckets: dict = {}
     for a in answers:
         qt = a.question_type
@@ -528,21 +528,16 @@ def _compute_overall_score(answers: list, weights: dict, max_pts_map: dict) -> d
             continue
         if rds not in buckets:
             buckets[rds] = {"earned": 0.0, "max": 0.0, "weight": w}
-        max_pts = (a.result_json or {}).get("maxScore") or max_pts_map.get(qt, 1)
-        raw_score = float(a.score or 0)
-        if qt in _ASYNC_TYPES:
-            raw_score = ((raw_score - 10.0) / 80.0) * float(max_pts)
+        raw_score, max_pts = _resolve_score_max(a, max_pts_map)
         buckets[rds]["earned"] += raw_score
         buckets[rds]["max"]    += float(max_pts or 0)
 
-    weighted_sum   = 0.0
-    present_weight = 0.0
+    weighted_sum = 0.0
     for b in buckets.values():
         task_pct = (b["earned"] / b["max"]) if b["max"] > 0 else 0.0
-        weighted_sum   += task_pct * b["weight"]
-        present_weight += b["weight"]
+        weighted_sum += task_pct * b["weight"]
 
-    normalised_pct = (weighted_sum / present_weight) if present_weight > 0 else 0.0
+    normalised_pct = (weighted_sum / full_overall_weight) if full_overall_weight > 0 else 0.0
     return max(10, min(90, round(10 + normalised_pct * 80)))
 
 
@@ -583,6 +578,28 @@ def _extract_score_and_max(breakdown: dict, persist_type: str) -> tuple:
         return (1.0 if bd['is_correct'] else 0.0), 1.0
     # Async speaking or missing breakdown — keep old behaviour
     return 0.0, float(_MAX_FALLBACK.get(persist_type, 1))
+
+
+_RULE_SCORED_KEYS = frozenset({'hits', 'max_possible', 'max_score', 'is_correct'})
+
+def _resolve_score_max(a, max_pts_map: dict) -> tuple:
+    """Return (raw_score, max_pts) for any AttemptAnswer type.
+
+    Three cases:
+    - Async speaking (PTE 10-90 stored): de-normalise back to rubric scale.
+    - Rule-scored (FIB/MCQ/HIW/Reorder/WFD): read real counts from result_json breakdown.
+    - AI-scored sync (SWT/WE/SST): use stored score + maxScore directly.
+    """
+    qt = a.question_type
+    rj = a.result_json or {}
+    if qt in _ASYNC_TYPES:
+        max_pts = float(rj.get("maxScore") or max_pts_map.get(qt, 1))
+        return ((float(a.score or 0) - 10.0) / 80.0) * max_pts, max_pts
+    if _RULE_SCORED_KEYS & rj.keys():
+        return _extract_score_and_max(rj, qt)
+    # AI-scored sync: trust stored score and maxScore
+    max_pts = float(rj.get("maxScore") or max_pts_map.get(qt, 1))
+    return float(a.score or 0), max_pts
 
 
 def finish_mock_test(db: Session, session_id: str, user_id: int) -> dict:
