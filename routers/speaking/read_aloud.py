@@ -2,6 +2,7 @@ import math
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, Body, Query
+from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session
 
 from db.database import get_db
@@ -26,6 +27,8 @@ def list_questions(
     difficulty: Optional[int] = Query(default=None),
     is_prediction: Optional[bool] = Query(default=None),
     practiced: Optional[bool] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    sort: str = Query(default='asc'),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -47,12 +50,18 @@ def list_questions(
             query = query.filter(QuestionFromApeuni.question_id.in_(practiced_subq))
         else:
             query = query.filter(~QuestionFromApeuni.question_id.in_(practiced_subq))
+    if search:
+        query = query.filter(
+            QuestionFromApeuni.title.ilike(f'%{search}%') |
+            QuestionFromApeuni.content_json['passage'].astext.ilike(f'%{search}%')
+        )
 
     total = query.count()
     total_pages = math.ceil(total / limit) if total > 0 else 1
+    order_dir = desc if sort == 'desc' else asc
     questions = (
         query
-        .order_by(QuestionFromApeuni.question_id.asc())
+        .order_by(order_dir(QuestionFromApeuni.question_id))
         .offset((page - 1) * limit)
         .limit(limit)
         .all()
