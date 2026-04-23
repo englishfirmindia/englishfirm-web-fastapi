@@ -409,12 +409,41 @@ def get_last_attempt_breakdown(user_id: int, db: Session) -> dict:
 
 def get_attempt_detail(user_id: int, question_type: str, db: Session) -> Optional[dict]:
     """
-    Returns per-question breakdown for the student's most recent complete attempt
-    of the given question_type. Resolves the latest attempt internally.
+    Returns per-question breakdown for the student's most recent attempt of the
+    given question_type. Checks two paths and returns the more recent result:
+      Path 1 — standalone practice attempt (question_type matches directly)
+      Path 2 — mock/sectional attempt (umbrella), filtered by question_type in AttemptAnswer
     """
     from db.models import PracticeAttempt, AttemptAnswer
 
-    attempt = (
+    def _build_answer_rows(answers: list) -> list:
+        rows = []
+        for i, a in enumerate(answers, 1):
+            rj = a.result_json or {}
+            row: dict = {
+                "q": i,
+                "question_id": a.question_id,
+                "score": a.score,
+                "scoring_status": a.scoring_status,
+            }
+            if rj.get("pte_score") is not None:
+                row["pte_score"] = rj["pte_score"]
+            if a.content_score is not None:
+                row["content"] = round(a.content_score, 2)
+            if a.fluency_score is not None:
+                row["fluency"] = round(a.fluency_score, 2)
+            if a.pronunciation_score is not None:
+                row["pronunciation"] = round(a.pronunciation_score, 2)
+            if rj.get("hits") is not None:
+                row["hits"] = rj["hits"]
+                row["total_words"] = rj.get("total", rj.get("maxScore"))
+            if rj.get("maxScore") is not None:
+                row["max_score"] = rj["maxScore"]
+            rows.append(row)
+        return rows
+
+    # ── Path 1: standalone practice attempt ───────────────────────────────────
+    standalone = (
         db.query(PracticeAttempt)
         .filter(
             PracticeAttempt.user_id == user_id,
@@ -424,53 +453,65 @@ def get_attempt_detail(user_id: int, question_type: str, db: Session) -> Optiona
         .order_by(PracticeAttempt.id.desc())
         .first()
     )
-    if not attempt:
-        return None
 
-    answers = (
-        db.query(AttemptAnswer)
-        .filter(AttemptAnswer.attempt_id == attempt.id)
-        .order_by(AttemptAnswer.id.asc())
-        .limit(20)
-        .all()
+    result_standalone = None
+    if standalone:
+        answers = (
+            db.query(AttemptAnswer)
+            .filter(AttemptAnswer.attempt_id == standalone.id)
+            .order_by(AttemptAnswer.id.asc())
+            .limit(20)
+            .all()
+        )
+        result_standalone = {
+            "attempt_id":      standalone.id,
+            "source":          "practice",
+            "question_type":   question_type,
+            "completed_at":    standalone.completed_at.isoformat() if standalone.completed_at else None,
+            "total_score":     standalone.total_score,
+            "total_questions": standalone.total_questions,
+            "answers":         _build_answer_rows(answers),
+        }
+
+    # ── Path 2: latest complete mock/sectional, filtered by question_type ─────
+    umbrella = (
+        db.query(PracticeAttempt)
+        .filter(
+            PracticeAttempt.user_id == user_id,
+            PracticeAttempt.question_type.in_(["mock", "sectional"]),
+            PracticeAttempt.status == "complete",
+        )
+        .order_by(PracticeAttempt.id.desc())
+        .first()
     )
 
-    answer_rows = []
-    for i, a in enumerate(answers, 1):
-        rj = a.result_json or {}
-        row: dict = {
-            "q": i,
-            "question_id": a.question_id,
-            "score": a.score,
-            "scoring_status": a.scoring_status,
-        }
-        # Include pte_score if stored
-        if rj.get("pte_score") is not None:
-            row["pte_score"] = rj["pte_score"]
-        # Speaking-specific sub-scores
-        if a.content_score is not None:
-            row["content"] = round(a.content_score, 2)
-        if a.fluency_score is not None:
-            row["fluency"] = round(a.fluency_score, 2)
-        if a.pronunciation_score is not None:
-            row["pronunciation"] = round(a.pronunciation_score, 2)
-        # Listening WFD: hits/total
-        if rj.get("hits") is not None:
-            row["hits"] = rj["hits"]
-            row["total_words"] = rj.get("total", rj.get("maxScore"))
-        # Max points for context
-        if rj.get("maxScore") is not None:
-            row["max_score"] = rj["maxScore"]
-        answer_rows.append(row)
+    result_umbrella = None
+    if umbrella:
+        answers = (
+            db.query(AttemptAnswer)
+            .filter(
+                AttemptAnswer.attempt_id == umbrella.id,
+                AttemptAnswer.question_type == question_type,
+            )
+            .order_by(AttemptAnswer.id.asc())
+            .limit(20)
+            .all()
+        )
+        if answers:
+            result_umbrella = {
+                "attempt_id":      umbrella.id,
+                "source":          umbrella.question_type,  # "mock" or "sectional"
+                "question_type":   question_type,
+                "completed_at":    umbrella.completed_at.isoformat() if umbrella.completed_at else None,
+                "total_score":     sum(a.score for a in answers),
+                "total_questions": len(answers),
+                "answers":         _build_answer_rows(answers),
+            }
 
-    return {
-        "attempt_id":    attempt.id,
-        "question_type": question_type,
-        "completed_at":  attempt.completed_at.isoformat() if attempt.completed_at else None,
-        "total_score":   attempt.total_score,
-        "total_questions": attempt.total_questions,
-        "answers":       answer_rows,
-    }
+    # ── Pick the more recent result ───────────────────────────────────────────
+    if result_standalone and result_umbrella:
+        return result_standalone if standalone.id > umbrella.id else result_umbrella
+    return result_standalone or result_umbrella
 
 
 # ── Tool: award_milestone ────────────────────────────────────────────────────
