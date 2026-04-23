@@ -15,6 +15,7 @@ import base64
 import hashlib
 import logging
 import threading
+import concurrent.futures
 import requests
 import urllib.parse
 from typing import Optional
@@ -28,9 +29,18 @@ AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "australiaeast")
 def _get_stt_token() -> str:
     """Exchange subscription key for a short-lived bearer token."""
     url = f"https://{AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken"
-    r = requests.post(url, headers={"Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY}, timeout=10)
-    r.raise_for_status()
-    return r.text
+    last_exc: Exception = RuntimeError("_get_stt_token: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            r = requests.post(url, headers={"Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY}, timeout=10)
+            r.raise_for_status()
+            return r.text
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("[AZURE] _get_stt_token attempt=%d/3 failed: %s", attempt, exc)
+            if attempt < 3:
+                time.sleep(2)
+    raise last_exc
 
 
 def _aac_to_wav_pcm(aac_bytes: bytes) -> bytes:
@@ -104,7 +114,12 @@ def assess_pronunciation(
             audio_stream.write(wav_bytes)
             audio_stream.close()
 
-            result = recognizer.recognize_once()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(recognizer.recognize_once)
+                try:
+                    result = future.result(timeout=180)
+                except concurrent.futures.TimeoutError:
+                    raise RuntimeError("Azure: recognize_once timed out after 180s")
 
             if result.reason == speechsdk.ResultReason.NoMatch:
                 raise RuntimeError("Azure: no speech recognised")
@@ -263,70 +278,79 @@ def transcribe_audio_short(audio_bytes: bytes) -> str:
     """
     Pure STT for short audio (< 30s, e.g. Repeat Sentence stimulus).
     Uses recognize_once() — stops on first silence.
-    Returns transcript string.
+    Returns transcript string. Retries up to 3 times with 180s timeout.
     """
     if not AZURE_SPEECH_KEY:
         return ""
-    try:
-        import azure.cognitiveservices.speech as speechsdk
-        wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
-
-        speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
-        audio_stream  = speechsdk.audio.PushAudioInputStream()
-        audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
-        recognizer    = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
-
-        audio_stream.write(wav_bytes)
-        audio_stream.close()
-
-        result = recognizer.recognize_once()
-        if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-            return result.text
-        return ""
-    except Exception as e:
-        logger.error("transcribe_audio_short failed: %s", e)
-        return ""
+    import azure.cognitiveservices.speech as speechsdk
+    for attempt in range(1, 4):
+        try:
+            wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
+            speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+            audio_stream  = speechsdk.audio.PushAudioInputStream()
+            audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
+            recognizer    = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+            audio_stream.write(wav_bytes)
+            audio_stream.close()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(recognizer.recognize_once)
+                try:
+                    result = future.result(timeout=180)
+                except concurrent.futures.TimeoutError:
+                    raise RuntimeError("Azure: recognize_once timed out after 180s")
+            if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                return result.text
+            return ""
+        except Exception as exc:
+            logger.warning("[AZURE] transcribe_audio_short attempt=%d/3 failed: %s", attempt, exc)
+            if attempt < 3:
+                time.sleep(2)
+    logger.error("[AZURE] transcribe_audio_short failed after 3 attempts")
+    return ""
 
 
 def transcribe_audio_full(audio_bytes: bytes) -> str:
     """
     Pure STT for long audio (e.g. Retell Lecture ~90s, SGD ~180s).
     Uses continuous recognition so the full audio is transcribed.
-    Returns full transcript string.
+    Returns full transcript string. Retries up to 3 times with 180s timeout.
     """
     if not AZURE_SPEECH_KEY:
         return ""
-    try:
-        import azure.cognitiveservices.speech as speechsdk
-        wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
+    import azure.cognitiveservices.speech as speechsdk
+    for attempt in range(1, 4):
+        try:
+            wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
+            speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+            audio_stream  = speechsdk.audio.PushAudioInputStream()
+            audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
+            recognizer    = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
 
-        speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
-        audio_stream  = speechsdk.audio.PushAudioInputStream()
-        audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
-        recognizer    = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+            all_text = []
+            done_evt = threading.Event()
 
-        all_text  = []
-        done_evt  = threading.Event()
+            def _recognized(evt):
+                if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                    all_text.append(evt.result.text)
 
-        def _recognized(evt):
-            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                all_text.append(evt.result.text)
+            def _stop(evt):
+                done_evt.set()
 
-        def _stop(evt):
-            done_evt.set()
+            recognizer.recognized.connect(_recognized)
+            recognizer.session_stopped.connect(_stop)
+            recognizer.canceled.connect(_stop)
 
-        recognizer.recognized.connect(_recognized)
-        recognizer.session_stopped.connect(_stop)
-        recognizer.canceled.connect(_stop)
+            audio_stream.write(wav_bytes)
+            audio_stream.close()
 
-        audio_stream.write(wav_bytes)
-        audio_stream.close()
+            recognizer.start_continuous_recognition()
+            done_evt.wait(timeout=180)
+            recognizer.stop_continuous_recognition()
 
-        recognizer.start_continuous_recognition()
-        done_evt.wait(timeout=180)
-        recognizer.stop_continuous_recognition()
-
-        return " ".join(all_text)
-    except Exception as e:
-        logger.error("transcribe_audio_full failed: %s", e)
-        return ""
+            return " ".join(all_text)
+        except Exception as exc:
+            logger.warning("[AZURE] transcribe_audio_full attempt=%d/3 failed: %s", attempt, exc)
+            if attempt < 3:
+                time.sleep(2)
+    logger.error("[AZURE] transcribe_audio_full failed after 3 attempts")
+    return ""
