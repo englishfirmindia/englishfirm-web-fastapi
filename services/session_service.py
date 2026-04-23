@@ -34,8 +34,20 @@ def start_session(
             QuestionFromApeuni.question_type == question_type,
         )
     )
+    start_index = 0
     if question_id is not None:
-        query = query.filter(QuestionFromApeuni.question_id == question_id)
+        from sqlalchemy import func as _func
+        _look_back = 2
+        position = db.query(_func.count(QuestionFromApeuni.question_id)).filter(
+            QuestionFromApeuni.module == module,
+            QuestionFromApeuni.question_type == question_type,
+            QuestionFromApeuni.question_id < question_id,
+        ).scalar() or 0
+        start_offset = max(0, position - _look_back)
+        start_index = position - start_offset
+        query = query.order_by(QuestionFromApeuni.question_id.asc())
+        if limit:
+            query = query.offset(start_offset).limit(limit)
     else:
         if difficulty_level is not None:
             query = query.filter(QuestionFromApeuni.difficulty_level == difficulty_level)
@@ -86,6 +98,7 @@ def start_session(
     return {
         "session_id": session_id,
         "total_questions": len(questions),
+        "start_index": start_index,
         "questions": [
             {
                 "question_id": q.question_id,
