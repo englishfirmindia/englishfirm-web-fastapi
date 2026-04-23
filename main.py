@@ -1,8 +1,12 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI
+import logging
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+log = logging.getLogger(__name__)
 
 from routers.auth import router as auth_router
 from routers.user import router as user_router
@@ -11,6 +15,15 @@ from routers.ai_assistant import router as ai_router
 from routers.reports import router as reports_router
 
 app = FastAPI(title="EnglishFirm Web API", version="1.0.0")
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    log.error(
+        "[UNHANDLED] %s %s — %s: %s",
+        request.method, request.url.path, type(exc).__name__, exc,
+    )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(user_router, prefix="/api/v1")

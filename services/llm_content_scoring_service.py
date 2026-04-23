@@ -25,6 +25,7 @@ def _call_llm(prompt: str, max_tokens: int = 200) -> dict:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
                 max_tokens=max_tokens,
+                timeout=30,
             )
             raw = resp.choices[0].message.content.strip()
             if raw.startswith("```"):
@@ -81,22 +82,32 @@ def extract_key_points(transcript: str, question_type: str) -> list:
         "Return a JSON array of strings only.\n\n"
         f"Text:\n{transcript}"
     ))
-    try:
-        resp = _openai.chat.completions.create(
-            model=_LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=500,
-        )
-        raw = resp.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1].lstrip("json").strip() if len(parts) > 1 else raw
-        result = json.loads(raw)
-        return result if isinstance(result, list) else []
-    except Exception as e:
-        log.error("[LLM] Key point extraction failed (%s): %s", question_type, e)
-        return []
+    last_exc: Exception = RuntimeError("extract_key_points: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            resp = _openai.chat.completions.create(
+                model=_LLM_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=500,
+                timeout=30,
+            )
+            raw = resp.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                parts = raw.split("```")
+                raw = parts[1].lstrip("json").strip() if len(parts) > 1 else raw
+            result = json.loads(raw)
+            return result if isinstance(result, list) else []
+        except _openai_module.AuthenticationError as exc:
+            log.error("[LLM] extract_key_points AuthenticationError: %s", exc)
+            return []
+        except Exception as exc:
+            last_exc = exc
+            log.warning("[LLM] extract_key_points attempt=%d/3 failed: %s", attempt, exc)
+            if attempt < 3:
+                time.sleep(2)
+    log.error("[LLM] extract_key_points failed after 3 attempts: %s", last_exc)
+    return []
 
 
 # ── Speaking content scoring (DI / RL / RTS / SGD) ───────────────────────────

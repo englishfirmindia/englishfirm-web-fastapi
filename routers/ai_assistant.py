@@ -8,6 +8,7 @@ Endpoints:
 
 import os
 import json
+import time
 from typing import AsyncGenerator
 from datetime import datetime, timezone
 
@@ -96,16 +97,26 @@ def chat(
     client = anthropic.Anthropic(api_key=api_key)
     messages = history + [{"role": "user", "content": req.message}]
 
-    try:
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-        )
-        reply = response.content[0].text
-    except Exception as e:
-        reply = f"Sorry, I encountered an error: {str(e)}"
+    reply = "Sorry, I'm having trouble right now. Please try again."
+    for attempt in range(1, 4):
+        try:
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system=SYSTEM_PROMPT,
+                messages=messages,
+                timeout=30,
+            )
+            reply = response.content[0].text
+            break
+        except anthropic.AuthenticationError:
+            reply = "AI chat is not configured correctly."
+            break
+        except Exception as e:
+            if attempt < 3:
+                time.sleep(2)
+            else:
+                reply = "Sorry, I'm having trouble right now. Please try again."
 
     # Save assistant message
     db.add(Message(conversation_id=conv.id, role="assistant", content=reply))
@@ -151,6 +162,7 @@ async def chat_stream(
                 max_tokens=1024,
                 system=SYSTEM_PROMPT,
                 messages=messages,
+                timeout=30,
             ) as stream:
                 for text in stream.text_stream:
                     full_reply.append(text)
