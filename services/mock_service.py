@@ -439,14 +439,15 @@ def update_mock_progress(db: Session, session_id: str, current_part: int, timer_
 
 def _compute_section_score(section: str, answers: list, weights: dict, max_pts_map: dict) -> dict:
     """Section score = sum(task_pct × section_%) / present_weight → CLAUDE.md formula."""
-    # Aggregate per task: earned + max
     buckets: dict = {}
+    questions: list = []
+
     for a in answers:
         qt = a.question_type
         rds = _rds_key(qt)
         w = weights.get(rds, {}).get(section, 0)
         if w <= 0:
-            continue  # this task doesn't contribute to this section
+            continue
         if rds not in buckets:
             buckets[rds] = {"earned": 0.0, "max": 0.0, "weight": w,
                             "display": qt.replace("_", " ").title(), "count": 0, "answered": 0}
@@ -460,6 +461,20 @@ def _compute_section_score(section: str, answers: list, weights: dict, max_pts_m
         buckets[rds]["count"]  += 1
         if a.score is not None:
             buckets[rds]["answered"] += 1
+
+        q_max  = float(max_pts or 0)
+        q_pct  = round(raw_score / q_max * 100, 1) if q_max > 0 else 0.0
+        q_pte  = max(10, min(90, round(10 + (raw_score / q_max) * 80))) if q_max > 0 else 10
+        questions.append({
+            "question_id":   a.question_id,
+            "question_type": qt,
+            "task":          rds,
+            "score":         round(raw_score, 2),
+            "max_score":     round(q_max, 2),
+            "pct":           q_pct,
+            "pte_equivalent": q_pte,
+            "result_detail": a.result_json or {},
+        })
 
     weighted_sum   = 0.0
     present_weight = 0.0
@@ -478,6 +493,7 @@ def _compute_section_score(section: str, answers: list, weights: dict, max_pts_m
             "task_pct":        round(task_pct * 100, 1),
             "section_weight":  b["weight"],
             "contribution":    round(contrib, 2),
+            "task_pte":        max(10, min(90, round(10 + task_pct * 80))),
         }
 
     normalised_pct = (weighted_sum / present_weight) if present_weight > 0 else 0.0
@@ -488,6 +504,7 @@ def _compute_section_score(section: str, answers: list, weights: dict, max_pts_m
         "weighted_sum":     round(weighted_sum, 2),
         "present_weight":   round(present_weight, 2),
         "breakdown":        breakdown,
+        "questions":        questions,
     }
 
 
@@ -520,7 +537,7 @@ def _compute_overall_score(answers: list, weights: dict, max_pts_map: dict) -> d
     return max(10, min(90, round(10 + normalised_pct * 80)))
 
 
-# Fallback max scores when AttemptAnswer.result_json doesn't carry maxScore.
+# Fallback max scores — used only when scorer breakdown is unavailable (e.g. async speaking).
 _MAX_FALLBACK = {
     "read_aloud": 15, "repeat_sentence": 13, "describe_image": 16,
     "retell_lecture": 16, "respond_to_situation": 16,
@@ -532,6 +549,31 @@ _MAX_FALLBACK = {
     "highlight_incorrect_words": 3, "listening_hcs": 1,
     "listening_mcq_multiple": 2, "listening_mcq_single": 1, "listening_smw": 1,
 }
+
+
+def _extract_score_and_max(breakdown: dict, persist_type: str) -> tuple:
+    """Return (actual_score, actual_max) from scorer breakdown.
+
+    Priority order matches mobile: use real counts from breakdown, fall back to
+    _MAX_FALLBACK only when breakdown is absent (async speaking types).
+    """
+    bd = breakdown or {}
+    # FIBScorer (reading/listening FIB, drag-drop), WFDScorer, ReorderScorer
+    if 'hits' in bd:
+        total = float(bd.get('total') or bd.get('total_pairs') or 0)
+        if total > 0:
+            return float(bd['hits']), total
+    # MCQScorer multi — has explicit score + max_possible
+    if 'max_possible' in bd:
+        return float(bd.get('score', 0)), float(bd['max_possible'])
+    # HIWScorer — has score + max_score
+    if 'max_score' in bd:
+        return float(bd.get('score', 0)), float(bd['max_score'])
+    # MCQScorer single — is_correct bool, max is always 1
+    if 'is_correct' in bd:
+        return (1.0 if bd['is_correct'] else 0.0), 1.0
+    # Async speaking or missing breakdown — keep old behaviour
+    return 0.0, float(_MAX_FALLBACK.get(persist_type, 1))
 
 
 def finish_mock_test(db: Session, session_id: str, user_id: int) -> dict:
@@ -811,8 +853,7 @@ def submit_mock_answer(session_id: str, question_id: int, payload: dict) -> dict
     scorer = get_scorer(scorer_key)
     result = scorer.score(question_id=qid, session_id=session_id, answer=answer_dict)
 
-    max_pts = _MAX_FALLBACK.get(persist_type, 1)
-    raw_pts = result.raw_score * max_pts
+    actual_score, actual_max = _extract_score_and_max(result.breakdown, persist_type)
 
     mark_submitted(session_id, qid, result.pte_score)
     persist_answer_to_db(
@@ -821,8 +862,8 @@ def submit_mock_answer(session_id: str, question_id: int, payload: dict) -> dict
         question_type=persist_type,
         user_answer_json=user_answer_json,
         correct_answer_json={},
-        result_json={**(result.breakdown or {}), "maxScore": max_pts},
-        score=raw_pts,
+        result_json={**(result.breakdown or {}), "maxScore": actual_max},
+        score=actual_score,
     )
     return {"pte_score": to_pte_score(result.raw_score), "ok": True}
 
