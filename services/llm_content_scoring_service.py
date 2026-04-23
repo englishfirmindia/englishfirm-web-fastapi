@@ -165,7 +165,7 @@ def score_content_with_llm(student_transcript: str, key_points: list, question_t
 # ── SWT ───────────────────────────────────────────────────────────────────────
 
 def score_swt_content(passage: str, user_text: str) -> int:
-    """Score SWT content 0-4. Falls back to word-count heuristic on failure."""
+    """Score SWT content 0-4. Raises on LLM failure — caller stays pending."""
     if not user_text.strip():
         return 0
     prompt = (
@@ -180,20 +180,16 @@ def score_swt_content(passage: str, user_text: str) -> int:
         "0 = completely off-topic, empty, or verbatim copy of passage\n\n"
         'Return JSON only: {"content": <0-4>, "reasoning": "<one sentence>"}'
     )
-    try:
-        result = _call_llm(prompt)
-        score = max(0, min(4, int(result.get("content", 0))))
-        log.info("[LLM-SWT] content=%d reason=%s", score, result.get("reasoning", ""))
-        return score
-    except Exception as e:
-        log.warning("[LLM-SWT] fallback: %s", e)
-        return min(4, max(1, len(user_text.split()) // 10))
+    result = _call_llm(prompt)
+    score = max(0, min(4, int(result.get("content", 0))))
+    log.info("[LLM-SWT] content=%d reason=%s", score, result.get("reasoning", ""))
+    return score
 
 
 # ── WE ────────────────────────────────────────────────────────────────────────
 
 def score_we_content(essay_prompt: str, user_text: str) -> int:
-    """Score WE content 0-3. Falls back to word-count heuristic on failure."""
+    """Score WE content 0-3. Raises on LLM failure — caller stays pending."""
     if not user_text.strip():
         return 0
     prompt = (
@@ -207,21 +203,16 @@ def score_we_content(essay_prompt: str, user_text: str) -> int:
         "0 = does not address the topic, completely irrelevant or plagiarised prompt\n\n"
         'Return JSON only: {"content": <0-3>, "reasoning": "<one sentence>"}'
     )
-    try:
-        result = _call_llm(prompt)
-        score = max(0, min(3, int(result.get("content", 0))))
-        log.info("[LLM-WE] content=%d reason=%s", score, result.get("reasoning", ""))
-        return score
-    except Exception as e:
-        log.warning("[LLM-WE] fallback: %s", e)
-        wc = len(user_text.split())
-        return 3 if wc >= 200 else 2 if wc >= 120 else 1 if wc >= 60 else 0
+    result = _call_llm(prompt)
+    score = max(0, min(3, int(result.get("content", 0))))
+    log.info("[LLM-WE] content=%d reason=%s", score, result.get("reasoning", ""))
+    return score
 
 
 # ── SST ───────────────────────────────────────────────────────────────────────
 
 def score_sst_content(reference_answer: str, user_text: str) -> int:
-    """Score SST content 0-4. Falls back to word-count heuristic on failure."""
+    """Score SST content 0-4. Raises on LLM failure — caller stays pending."""
     if not user_text.strip():
         return 0
     prompt = (
@@ -237,12 +228,7 @@ def score_sst_content(reference_answer: str, user_text: str) -> int:
         "0 = off-topic or empty\n\n"
         'Return JSON only: {"content": <0-4>, "reasoning": "<one sentence>"}'
     )
-    try:
-        result = _call_llm(prompt)
-        score = max(0, min(4, int(result.get("content", 0))))
-        log.info("[LLM-SST] content=%d reason=%s", score, result.get("reasoning", ""))
-        return score
-    except Exception as e:
-        log.warning("[LLM-SST] fallback: %s", e)
-        wc = len(user_text.split())
-        return min(4, max(0, wc // 15))
+    result = _call_llm(prompt)
+    score = max(0, min(4, int(result.get("content", 0))))
+    log.info("[LLM-SST] content=%d reason=%s", score, result.get("reasoning", ""))
+    return score
