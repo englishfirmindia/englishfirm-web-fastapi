@@ -129,8 +129,29 @@ TOOL_REGISTRY: dict[str, dict] = {
                     "question_type": {
                         "type": "string",
                         "description": (
-                            "The question type to look up, e.g. 'read_aloud', 'repeat_sentence', "
-                            "'write_essay', 'summarize_written_text', 'reading_fib', etc."
+                            "Use exactly one of these values:\n"
+                            "  read_aloud — Read Aloud\n"
+                            "  repeat_sentence — Repeat Sentence\n"
+                            "  answer_short_question — Answer Short Question\n"
+                            "  describe_image — Describe Image\n"
+                            "  retell_lecture — Re-tell Lecture\n"
+                            "  summarize_group_discussion — Summarize Group Discussion\n"
+                            "  ptea_respond_situation — Respond to a Situation\n"
+                            "  summarize_written_text — Summarize Written Text\n"
+                            "  write_essay — Write Essay\n"
+                            "  mcq_single — Reading Multiple Choice (Single)\n"
+                            "  mcq_multiple — Reading Multiple Choice (Multiple)\n"
+                            "  reading_fib_drop_down — Reading Fill in the Blanks\n"
+                            "  reading_drag_and_drop — Reading Fill in the Blanks (Drag & Drop)\n"
+                            "  reorder_paragraphs — Re-order Paragraphs\n"
+                            "  listening_wfd — Write from Dictation\n"
+                            "  listening_fib — Listening Fill in the Blanks\n"
+                            "  listening_hcs — Highlight Correct Summary\n"
+                            "  listening_smw — Select Missing Word\n"
+                            "  listening_mcq_single — Listening MCQ (Single)\n"
+                            "  listening_mcq_multiple — Listening MCQ (Multiple)\n"
+                            "  summarize_spoken_text — Summarize Spoken Text\n"
+                            "  highlight_incorrect_words — Highlight Incorrect Words"
                         ),
                     }
                 },
