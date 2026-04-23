@@ -455,7 +455,7 @@ def _compute_section_score(section: str, answers: list, weights: dict, max_pts_m
         raw_score = float(a.score or 0)
         # Speaking scores are stored as PTE values (10-90); normalise back to rubric scale
         if qt in _ASYNC_TYPES:
-            raw_score = (raw_score / 90.0) * float(max_pts)
+            raw_score = ((raw_score - 10.0) / 80.0) * float(max_pts)
         buckets[rds]["earned"] += raw_score
         buckets[rds]["max"]    += float(max_pts or 0)
         buckets[rds]["count"]  += 1
@@ -522,7 +522,7 @@ def _compute_overall_score(answers: list, weights: dict, max_pts_map: dict) -> d
         max_pts = (a.result_json or {}).get("maxScore") or max_pts_map.get(qt, 1)
         raw_score = float(a.score or 0)
         if qt in _ASYNC_TYPES:
-            raw_score = (raw_score / 90.0) * float(max_pts)
+            raw_score = ((raw_score - 10.0) / 80.0) * float(max_pts)
         buckets[rds]["earned"] += raw_score
         buckets[rds]["max"]    += float(max_pts or 0)
 
