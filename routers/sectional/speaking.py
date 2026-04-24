@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import User
 from core.dependencies import get_current_user
-from services.session_service import ACTIVE_SESSIONS
+from services.session_service import ACTIVE_SESSIONS, persist_speaking_answer_pending
+from services.speaking_scorer import kick_off_scoring
 from services.speaking_sectional_service import (
     get_speaking_sectional_info,
     start_speaking_sectional_exam,
@@ -63,6 +64,13 @@ def submit_audio(
 
     session.setdefault("submitted_audio", {})[question_id] = audio_url
     session.setdefault("submitted_questions", set()).add(question_id)
+
+    # Write pending AttemptAnswer to RDS + kick off Azure scoring immediately
+    q = session.get("questions", {}).get(question_id)
+    if q:
+        persist_speaking_answer_pending(session, question_id, q.question_type, audio_url)
+        reference_text = (q.content_json or {}).get("passage", "")
+        kick_off_scoring(current_user.id, question_id, q.question_type, audio_url, reference_text)
 
     return {"status": "recorded", "question_id": question_id}
 

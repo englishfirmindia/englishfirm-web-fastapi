@@ -275,6 +275,9 @@ def finish_speaking_sectional(session_id: str, user_id: int, db: Session) -> dic
     for qid, audio_url in submitted_audio.items():
         q = questions.get(qid)
         if q and audio_url:
+            # Skip questions already scored per-question at submit time
+            if _SCORE_STORE.get((user_id, qid)):
+                continue
             reference_text = (q.content_json or {}).get("passage", "")
             kick_off_scoring(user_id, qid, q.question_type, audio_url, reference_text)
             kicked += 1
