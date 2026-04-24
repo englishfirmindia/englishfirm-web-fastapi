@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, Body, HTTPException
 from sqlalchemy.orm import Session
 
 from db.database import get_db
-from db.models import User
+from db.models import User, AttemptAnswer
 from core.dependencies import get_current_user
 from services.session_service import ACTIVE_SESSIONS
 from services.scoring import get_scorer
@@ -118,6 +118,26 @@ def submit_answer(
     session.setdefault("question_score_maxes", {})[question_id] = q_max
     session.setdefault("submitted_questions", set()).add(question_id)
     session["score"] = session.get("score", 0) + result.pte_score
+
+    attempt_id = session.get("attempt_id")
+    if attempt_id:
+        existing = db.query(AttemptAnswer).filter_by(
+            attempt_id=attempt_id, question_id=question_id
+        ).first()
+        if not existing:
+            user_answer = {k: v for k, v in answer.items() if k != "evaluation_json"}
+            result_json = {**(result.breakdown or {}), "pte_score": result.pte_score, "maxScore": q_max}
+            db.add(AttemptAnswer(
+                attempt_id          = attempt_id,
+                question_id         = question_id,
+                question_type       = question.question_type,
+                user_answer_json    = user_answer,
+                correct_answer_json = {},
+                result_json         = result_json,
+                score               = result.pte_score,
+                scoring_status      = "complete",
+            ))
+            db.commit()
 
     return {
         "pte_score":  result.pte_score,
