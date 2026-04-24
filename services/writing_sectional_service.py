@@ -156,6 +156,21 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
 
     session_id = str(uuid.uuid4())
 
+    attempt = PracticeAttempt(
+        user_id         = user_id,
+        session_id      = session_id,
+        module          = "writing",
+        question_type   = "sectional",
+        filter_type     = "sectional",
+        total_questions = len(selected_qs),
+        total_score     = 0,
+        status          = "in_progress",
+        scoring_status  = "pending",
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+
     task_timing = {t["task"]: t for t in WRITING_STRUCTURE}
     questions_payload = []
     for q in selected_qs:
@@ -179,6 +194,7 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
         "question_score_maxes": {},
         "module":               "writing",
         "question_type":        "sectional",
+        "attempt_id":           attempt.id,
     }
 
     print(
@@ -205,13 +221,12 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
     if not session_data:
         raise HTTPException(status_code=400, detail="Session not found or expired")
 
-    # Idempotency
     existing = db.query(PracticeAttempt).filter_by(session_id=session_id).first()
-    if existing:
+    if existing and existing.scoring_status == "complete":
         return {
             "attempt_id":     existing.id,
             "session_id":     session_id,
-            "scoring_status": existing.scoring_status or "complete",
+            "scoring_status": "complete",
             "writing_score":  existing.total_score,
         }
 
@@ -269,21 +284,30 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
         min(config.PTE_CEILING, round(config.PTE_BASE + normalised_pct * config.PTE_SCALE)),
     )
 
-    attempt = PracticeAttempt(
-        user_id            = user_id,
-        session_id         = session_id,
-        module             = "writing",
-        question_type      = "sectional",
-        filter_type        = "sectional",
-        total_questions    = len(questions),
-        total_score        = scaled,
-        questions_answered = len(submitted),
-        status             = "complete",
-        scoring_status     = "complete",
-        task_breakdown     = task_breakdown,
-        completed_at       = datetime.now(timezone.utc),
-    )
-    db.add(attempt)
+    if existing:
+        existing.total_score        = scaled
+        existing.questions_answered = len(submitted)
+        existing.status             = "complete"
+        existing.scoring_status     = "complete"
+        existing.task_breakdown     = task_breakdown
+        existing.completed_at       = datetime.now(timezone.utc)
+        attempt = existing
+    else:
+        attempt = PracticeAttempt(
+            user_id            = user_id,
+            session_id         = session_id,
+            module             = "writing",
+            question_type      = "sectional",
+            filter_type        = "sectional",
+            total_questions    = len(questions),
+            total_score        = scaled,
+            questions_answered = len(submitted),
+            status             = "complete",
+            scoring_status     = "complete",
+            task_breakdown     = task_breakdown,
+            completed_at       = datetime.now(timezone.utc),
+        )
+        db.add(attempt)
     db.commit()
     db.refresh(attempt)
 
