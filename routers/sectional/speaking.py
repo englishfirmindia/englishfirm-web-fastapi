@@ -69,7 +69,11 @@ def submit_audio(
     q = session.get("questions", {}).get(question_id)
     if q:
         persist_speaking_answer_pending(session, question_id, q.question_type, audio_url)
-        reference_text = (q.content_json or {}).get("passage", "")
+        cj = q.content_json or {}
+        if q.question_type == "repeat_sentence":
+            reference_text = cj.get("transcript", "")
+        else:
+            reference_text = cj.get("passage", "")
         kick_off_scoring(current_user.id, question_id, q.question_type, audio_url, reference_text)
 
     return {"status": "recorded", "question_id": question_id}

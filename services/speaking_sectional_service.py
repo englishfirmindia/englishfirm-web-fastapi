@@ -278,7 +278,11 @@ def finish_speaking_sectional(session_id: str, user_id: int, db: Session) -> dic
             # Skip questions already scored per-question at submit time
             if _SCORE_STORE.get((user_id, qid)):
                 continue
-            reference_text = (q.content_json or {}).get("passage", "")
+            cj = q.content_json or {}
+            if q.question_type == "repeat_sentence":
+                reference_text = cj.get("transcript", "")
+            else:
+                reference_text = cj.get("passage", "")
             kick_off_scoring(user_id, qid, q.question_type, audio_url, reference_text)
             kicked += 1
 
