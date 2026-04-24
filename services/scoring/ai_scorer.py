@@ -105,15 +105,14 @@ def _score_we_heuristic(user_text: str) -> tuple:
 
 # ── SST heuristic (max 10 pts) ────────────────────────────────────────────────
 
-def _score_sst_heuristic(user_text: str) -> tuple:
-    """Returns (earned, max=10)."""
+def _score_sst_heuristic(user_text: str) -> dict:
+    """Returns component scores dict for SST (max 10 pts)."""
     if not user_text or not user_text.strip():
-        return (0, 10)
+        return {'earned': 0, 'max_pts': 10, 'form': 0, 'content': 0, 'grammar': 0, 'vocabulary': 0, 'word_count': 0}
     text = user_text.strip()
     words = text.split()
     wc = len(words)
 
-    # Form: 50-70 words is ideal for SST
     if 50 <= wc <= 70:
         form_score = 2
     elif 30 <= wc <= 49 or 71 <= wc <= 90:
@@ -122,7 +121,7 @@ def _score_sst_heuristic(user_text: str) -> tuple:
         form_score = 0
 
     if form_score == 0:
-        return (0, 10)
+        return {'earned': 0, 'max_pts': 10, 'form': 0, 'content': 0, 'grammar': 0, 'vocabulary': 0, 'word_count': wc}
 
     content_score = min(4, max(1, wc // 12))
 
@@ -136,7 +135,12 @@ def _score_sst_heuristic(user_text: str) -> tuple:
     vocab_score = min(2, unique_words // 5)
 
     earned = form_score + content_score + grammar_score + vocab_score
-    return (earned, 10)
+    return {
+        'earned': earned, 'max_pts': 10,
+        'form': form_score, 'content': content_score,
+        'grammar': grammar_score, 'vocabulary': vocab_score,
+        'word_count': wc,
+    }
 
 
 # ── Scorer class ──────────────────────────────────────────────────────────────
@@ -188,14 +192,35 @@ class AIScorer(ScoringStrategy):
                 earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
 
         else:  # sst
-            earned, max_pts = _score_sst_heuristic(text)
-            wc = len(text.split())
+            sst = _score_sst_heuristic(text)
+            earned = sst['earned']
+            max_pts = sst['max_pts']
+            wc = sst['word_count']
             form_ok = 30 <= wc <= 90
             if form_ok and prompt and text.strip():
                 from services.llm_content_scoring_service import score_sst_content
-                heuristic_content = min(4, max(1, wc // 12))
+                heuristic_content = sst['content']
                 llm_content = score_sst_content(prompt, text)
                 earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
+                sst['content'] = llm_content
+                sst['earned'] = earned
+
+            pct = earned / max_pts if max_pts > 0 else 0.0
+            return ScoringResult(
+                pte_score=to_pte_score(pct),
+                raw_score=pct,
+                is_async=False,
+                breakdown={
+                    'earned': earned,
+                    'max_pts': max_pts,
+                    'form': sst['form'],
+                    'content': sst['content'],
+                    'grammar': sst['grammar'],
+                    'vocabulary': sst['vocabulary'],
+                    'word_count': wc,
+                    'task_type': self.task_type,
+                },
+            )
 
         pct = earned / max_pts if max_pts > 0 else 0.0
         return ScoringResult(
