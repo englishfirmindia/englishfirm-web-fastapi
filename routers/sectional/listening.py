@@ -148,6 +148,14 @@ def submit_answer(
     session.setdefault("question_score_maxes", {})[question_id] = q_max
     session.setdefault("submitted_questions", set()).add(question_id)
     session["score"] = session.get("score", 0) + pte_score
+    session.setdefault("question_details", {})[question_id] = {
+        "question_type": question.question_type,
+        "pte_score":     pte_score,
+        "raw_score":     raw_score,
+        "earned_raw":    earned_raw,
+        "q_max":         q_max,
+        "breakdown":     breakdown or {},
+    }
 
     return {
         "pte_score":  pte_score,
