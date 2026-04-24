@@ -76,9 +76,12 @@ def get_last_answer(
     )
     if not answer:
         return None
+    result_json = dict(answer.result_json or {})
+    if "pte_score" not in result_json and answer.score is not None:
+        result_json["pte_score"] = answer.score
     return {
         "user_answer_json": answer.user_answer_json,
-        "result_json": answer.result_json,
+        "result_json": result_json,
     }
 
 

@@ -48,6 +48,22 @@ from services.listening_sectional_service import (
 router = APIRouter(prefix="/sectional/listening", tags=["Sectional - Listening"])
 
 
+def _extract_user_answer(question_type: str, payload: dict) -> dict:
+    if question_type == "listening_wfd":
+        return {"text": payload.get("user_text", "")}
+    if question_type in ("listening_sst", "summarize_spoken_text"):
+        return {"text": payload.get("user_answer", "")}
+    if question_type == "listening_fib":
+        return {"user_answers": payload.get("user_answers", {})}
+    if question_type in ("listening_mcs", "listening_hcs", "listening_smw"):
+        return {"selected_option": payload.get("selected_option", "")}
+    if question_type in ("listening_mcm",):
+        return {"selected_options": payload.get("selected_options", [])}
+    if question_type in ("listening_hiw", "highlight_incorrect_words"):
+        return {"highlighted_words": payload.get("highlighted_words", [])}
+    return {}
+
+
 _SCORER_ALIAS = {
     "summarize_spoken_text":   "listening_sst",
     "listening_mcq_single":    "listening_mcs",
@@ -156,11 +172,12 @@ def submit_answer(
         ).first()
         if not existing:
             result_json = {**(breakdown or {}), "pte_score": pte_score, "maxScore": q_max}
+            user_answer_json = _extract_user_answer(question.question_type, payload)
             db.add(AttemptAnswer(
                 attempt_id          = attempt_id,
                 question_id         = question_id,
                 question_type       = question.question_type,
-                user_answer_json    = {},
+                user_answer_json    = user_answer_json,
                 correct_answer_json = {},
                 result_json         = result_json,
                 score               = pte_score,
