@@ -282,8 +282,26 @@ def start_listening_sectional_exam(db: Session, user_id: int, test_number: int) 
             "is_prediction": q.is_prediction,
         })
 
+    # Create PracticeAttempt now so attempt_id is available at every /submit
+    attempt = PracticeAttempt(
+        user_id            = user_id,
+        session_id         = session_id,
+        module             = "listening",
+        question_type      = "sectional",
+        filter_type        = "sectional",
+        total_questions    = len(selected_qs),
+        total_score        = 0,
+        questions_answered = 0,
+        status             = "pending",
+        scoring_status     = "pending",
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+
     ACTIVE_SESSIONS[session_id] = {
         "user_id":              user_id,
+        "attempt_id":           attempt.id,
         "test_number":          test_number,
         "start_time":           int(time.time()),
         "questions":            {q.question_id: q for q in selected_qs},
@@ -334,11 +352,9 @@ def _aggregate_bg(
     submitted: set,
     q_scores: dict,
     q_score_maxes: dict,
-    question_details: dict = None,
 ):
     """Background thread: wait for Azure speaking scores, aggregate, write to DB."""
     from db.database import SessionLocal
-    from db.models import AttemptAnswer
     bg_db = SessionLocal()
     try:
         speaking_qids = [
@@ -415,43 +431,6 @@ def _aggregate_bg(
             attempt.task_breakdown     = task_breakdown
             attempt.completed_at       = datetime.now(timezone.utc)
 
-            # Write per-question AttemptAnswer rows
-            if question_details:
-                existing_qids = {
-                    r[0] for r in bg_db.query(AttemptAnswer.question_id)
-                    .filter_by(attempt_id=attempt_id).all()
-                }
-                for qid, detail in question_details.items():
-                    if qid in existing_qids:
-                        continue
-                    qt = detail["question_type"]
-                    bd = detail["breakdown"]
-                    # For async RS: enrich breakdown with final speaking scores
-                    if qt in _ASYNC_TYPES:
-                        raw = speaking_scores.get(qid, {})
-                        bd = {
-                            "content":       raw.get("content", 0),
-                            "fluency":       raw.get("fluency", 0),
-                            "pronunciation": raw.get("pronunciation", 0),
-                            "total":         raw.get("total", config.PTE_FLOOR),
-                            "transcript":    raw.get("transcript", ""),
-                            "word_scores":   raw.get("word_scores", []),
-                        }
-                        pte = int(float(raw.get("total") or config.PTE_FLOOR))
-                    else:
-                        pte = detail["pte_score"]
-                    result_json = {**bd, "pte_score": pte, "maxScore": detail["q_max"]}
-                    bg_db.add(AttemptAnswer(
-                        attempt_id      = attempt_id,
-                        question_id     = qid,
-                        question_type   = qt,
-                        user_answer_json  = {},
-                        correct_answer_json = {},
-                        result_json     = result_json,
-                        score           = pte,
-                        scoring_status  = "complete",
-                    ))
-
             bg_db.commit()
             print(
                 f"[ListeningBG] ✅ user={user_id} session={session_id} "
@@ -486,39 +465,26 @@ def finish_listening_sectional(session_id: str, user_id: int, db: Session) -> di
             "listening_score": existing.total_score,
         }
 
-    questions        = session_data.get("questions", {})
-    submitted        = set(session_data.get("submitted_questions", set()))
-    q_scores         = dict(session_data.get("question_scores", {}))
-    q_score_maxes    = dict(session_data.get("question_score_maxes", {}))
-    question_details = dict(session_data.get("question_details", {}))
+    questions     = session_data.get("questions", {})
+    submitted     = set(session_data.get("submitted_questions", set()))
+    q_scores      = dict(session_data.get("question_scores", {}))
+    q_score_maxes = dict(session_data.get("question_score_maxes", {}))
 
     print(f"[ListeningFinish] submitted={len(submitted)} q_scores={len(q_scores)}", flush=True)
 
-    if existing:
-        attempt_id = existing.id
-        existing.questions_answered = len(submitted)
+    # PracticeAttempt was created at /exam start — just update answered count
+    attempt_id = session_data.get("attempt_id") or (existing.id if existing else None)
+    if not attempt_id:
+        raise HTTPException(status_code=500, detail="No attempt_id in session")
+
+    attempt_row = db.query(PracticeAttempt).filter_by(id=attempt_id).first()
+    if attempt_row:
+        attempt_row.questions_answered = len(submitted)
         db.commit()
-    else:
-        attempt = PracticeAttempt(
-            user_id            = user_id,
-            session_id         = session_id,
-            module             = "listening",
-            question_type      = "sectional",
-            filter_type        = "sectional",
-            total_questions    = len(questions),
-            total_score        = 0,
-            questions_answered = len(submitted),
-            status             = "pending",
-            scoring_status     = "pending",
-        )
-        db.add(attempt)
-        db.commit()
-        db.refresh(attempt)
-        attempt_id = attempt.id
 
     threading.Thread(
         target=_aggregate_bg,
-        args=(attempt_id, session_id, user_id, questions, submitted, q_scores, q_score_maxes, question_details),
+        args=(attempt_id, session_id, user_id, questions, submitted, q_scores, q_score_maxes),
         daemon=True,
     ).start()
     print(f"[ListeningFinish] ✅ Background scoring started attempt_id={attempt_id}", flush=True)
