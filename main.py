@@ -58,6 +58,7 @@ from routers.sectional import listening as sectional_listening
 # Mock (full PTE exam)
 from routers.mock import router as mock_router
 from routers.resources import router as resources_router
+from routers.mic_check import router as mic_check_router
 
 PREFIX = "/api/v1/questions"
 
@@ -74,5 +75,6 @@ for r in [
     sectional_reading.router, sectional_listening.router,
     mock_router,
     resources_router,
+    mic_check_router,
 ]:
     app.include_router(r, prefix=PREFIX)
