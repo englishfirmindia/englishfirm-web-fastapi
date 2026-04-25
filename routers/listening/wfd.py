@@ -131,15 +131,6 @@ def submit(
             "evaluation_json": question.evaluation.evaluation_json,
         },
     )
-    mark_submitted(session_id, question_id, result.pte_score)
-    persist_answer_to_db(
-        session=session, question_id=question_id, question_type="listening_wfd",
-        user_answer_json={"text": user_text},
-        correct_answer_json={},
-        result_json={**(result.breakdown or {}), "pte_score": result.pte_score, "maxScore": (result.breakdown or {}).get("total", 1)},
-        score=(result.breakdown or {}).get("hits", 0),
-    )
-
     eval_json = question.evaluation.evaluation_json or {}
     correct_answers = eval_json.get("correctAnswers", {}) or {}
     transcript = correct_answers.get("transcript", "") or ""
@@ -150,6 +141,15 @@ def submit(
     total_words = int(breakdown.get("total", 0) or 0)
     is_correct = total_words > 0 and hits == total_words
     total_score = session.get("score", 0)
+
+    mark_submitted(session_id, question_id, result.pte_score)
+    persist_answer_to_db(
+        session=session, question_id=question_id, question_type="listening_wfd",
+        user_answer_json={"text": user_text},
+        correct_answer_json={},
+        result_json={**breakdown, "pte_score": result.pte_score, "maxScore": breakdown.get("total", 1), "is_correct": is_correct, "transcript": transcript},
+        score=hits,
+    )
 
     return {
         "pte_score": result.pte_score,
