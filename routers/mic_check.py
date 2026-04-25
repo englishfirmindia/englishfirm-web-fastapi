@@ -17,7 +17,7 @@ router = APIRouter(tags=["Mic Check"])
 
 _TEST_PHRASE   = "The quick brown fox"
 _DB_SILENT     = -60.0   # below this → silent
-_DB_TOO_QUIET  = -30.0   # below this → too quiet
+_DB_TOO_QUIET  = -42.0   # below this → too quiet
 
 
 _LAST_MIC_CHECK_PATH = "/tmp/mic_check_last.aac"
