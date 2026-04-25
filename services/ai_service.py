@@ -194,7 +194,7 @@ Student data:
 Rules:
 - Be specific and actionable. Reference the actual weak areas above.
 - Structure: Priority tasks this week → Daily routine → Quick wins
-- Keep under 300 words. Use markdown with short bullet points.
+- Keep under 300 words. Use minimal markdown: **bold** labels and bullet points (-) only. No ## or ### headers.
 - Address {name} by name. Trainer tone — encouraging but direct.
 - Do NOT invent scores or tasks not listed above."""
 
@@ -226,7 +226,7 @@ Evaluate against PTE Academic criteria:
 - Spelling & Mechanics
 
 Format:
-# ✍️ Writing Feedback
+**✍️ Writing Feedback**
 
 **Overall:** [1-2 sentence summary]
 
@@ -352,7 +352,7 @@ Student data:
 Rules:
 - Be specific and actionable. Reference the actual weak areas above.
 - Structure: Priority tasks this week → Daily routine → Quick wins
-- Keep under 300 words. Use markdown with short bullet points.
+- Keep under 300 words. Use minimal markdown: **bold** labels and bullet points (-) only. No ## or ### headers.
 - Address {name} by name. Trainer tone — encouraging but direct.
 - Do NOT invent scores or tasks not listed above."""
 
@@ -382,7 +382,7 @@ Evaluate against PTE Academic criteria:
 - Spelling & Mechanics
 
 Format:
-# ✍️ Writing Feedback
+**✍️ Writing Feedback**
 
 **Overall:** [1-2 sentence summary]
 
