@@ -233,11 +233,13 @@ def _handle_search_pte_knowledge(args: dict, ctx: ToolContext) -> str:
             max_num_results=5,
         )
         chunks = [r.content[0].text for r in results.data if r.content]
-        text = "\n\n".join(chunks[:5]) if chunks else "No relevant content found."
+        if not chunks:
+            return "NO_RELEVANT_CONTENT: No documents found in knowledge base for this query."
+        text = "\n\n".join(chunks[:5])
         return text[:_MAX_RESULT_CHARS]
     except Exception as e:
         log.warning("[TOOL] search_pte_knowledge error: %s", e)
-        return "Search unavailable. Use your PTE expertise to answer."
+        return "SEARCH_UNAVAILABLE: Knowledge base search failed. Do not use general knowledge."
 
 
 def _handle_get_last_attempt_breakdown(args: dict, ctx: ToolContext) -> str:

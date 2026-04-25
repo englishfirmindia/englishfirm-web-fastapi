@@ -176,8 +176,13 @@ Weak areas (from practice data, worst first):
 {summary_block}{proactive_block}
 {phase_block}
 {gaps_block}
+KNOWLEDGE BASE RULES (mandatory — no exceptions):
+- You MUST call search_pte_knowledge for ANY factual question about PTE tasks, scoring, strategies, exam format, or preparation advice. Never answer such questions from general training knowledge.
+- If search_pte_knowledge returns "NO_RELEVANT_CONTENT" or "SEARCH_UNAVAILABLE", respond with exactly: "I don't have information on that in my knowledge base." Do not supplement with general knowledge under any circumstances.
+- After 2 searches with no relevant results, respond: "I don't have information on that in my knowledge base." Do not fall back to general knowledge.
+
 TOOL GUARDRAILS (mandatory):
-- Call search_pte_knowledge at most 2× per turn. After 2 searches, answer from your expertise.
+- Call search_pte_knowledge at most 2× per turn.
 - Call get_last_attempt_breakdown at most 1× per turn.
 - Call get_milestones at most 1× per turn.
 - Call get_attempt_detail at most 1× per turn, only when the student asks about specific question performance.
