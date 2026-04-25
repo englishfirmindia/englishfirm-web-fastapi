@@ -55,9 +55,9 @@ def _extract_user_answer(question_type: str, payload: dict) -> dict:
         return {"text": payload.get("user_answer", "")}
     if question_type == "listening_fib":
         return {"user_answers": payload.get("user_answers", {})}
-    if question_type in ("listening_mcs", "listening_hcs", "listening_smw"):
+    if question_type in ("listening_mcs", "listening_hcs", "listening_smw", "listening_mcq_single"):
         return {"selected_option": payload.get("selected_option", "")}
-    if question_type in ("listening_mcm",):
+    if question_type in ("listening_mcm", "listening_mcq_multiple"):
         return {"selected_options": payload.get("selected_options", [])}
     if question_type in ("listening_hiw", "highlight_incorrect_words"):
         return {"highlighted_words": payload.get("highlighted_words", [])}
