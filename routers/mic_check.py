@@ -20,6 +20,9 @@ _DB_SILENT     = -60.0   # below this → silent
 _DB_TOO_QUIET  = -30.0   # below this → too quiet
 
 
+_LAST_MIC_CHECK_PATH = "/tmp/mic_check_last.aac"
+
+
 def _mean_volume_db(audio_bytes: bytes) -> float:
     with tempfile.NamedTemporaryFile(suffix=".aac", delete=False) as f:
         f.write(audio_bytes)
@@ -30,6 +33,9 @@ def _mean_volume_db(audio_bytes: bytes) -> float:
             capture_output=True, text=True,
         )
         m = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", r.stderr)
+        import shutil
+        shutil.copy(path, _LAST_MIC_CHECK_PATH)
+        print(f"[mic-check] saved → {_LAST_MIC_CHECK_PATH}  mean_db={float(m.group(1)) if m else -91.0:.1f}")
         return float(m.group(1)) if m else -91.0
     finally:
         os.unlink(path)
