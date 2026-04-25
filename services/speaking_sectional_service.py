@@ -248,6 +248,108 @@ def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -
     }
 
 
+def resume_speaking_sectional_exam(session_id: str, user_id: int, db: Session) -> dict:
+    """Rebuild session from DB and return questions with fresh presigned URLs + is_submitted flags."""
+    from db.models import AttemptAnswer
+    attempt = db.query(PracticeAttempt).filter_by(
+        session_id=session_id, user_id=user_id, module="speaking",
+    ).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="No resumable speaking session found")
+
+    qid_order = attempt.selected_question_ids or []
+    if not qid_order:
+        raise HTTPException(status_code=404, detail="Speaking attempt has no stored questions")
+
+    submitted_answers = {
+        a.question_id: a
+        for a in db.query(AttemptAnswer).filter_by(attempt_id=attempt.id).all()
+    }
+    submitted_ids = set(submitted_answers.keys())
+
+    session = ACTIVE_SESSIONS.get(session_id)
+    if not session:
+        qs_by_id = {
+            q.question_id: q
+            for q in db.query(QuestionFromApeuni)
+            .options(joinedload(QuestionFromApeuni.evaluation))
+            .filter(QuestionFromApeuni.question_id.in_(qid_order))
+            .all()
+        }
+        selected = [qs_by_id[qid] for qid in qid_order if qid in qs_by_id]
+        ACTIVE_SESSIONS[session_id] = {
+            "user_id":             user_id,
+            "test_number":         1,
+            "start_time":          int(time.time()),
+            "questions":           {q.question_id: q for q in selected},
+            "submitted_questions": submitted_ids,
+            "submitted_audio":     {
+                a.question_id: (a.user_answer_json or {}).get("audio_url", "")
+                for a in submitted_answers.values()
+            },
+            "score":               0,
+            "question_scores":     {},
+            "attempt_id":          attempt.id,
+            "module":              "speaking",
+            "question_type":       "sectional",
+        }
+
+    session = ACTIVE_SESSIONS[session_id]
+    task_timing = {t["task"]: t for t in SPEAKING_STRUCTURE}
+
+    questions_payload = []
+    for qid in qid_order:
+        q = session["questions"].get(qid)
+        if not q:
+            continue
+        timing = task_timing.get(q.question_type, {"prep_seconds": 25, "rec_seconds": 40})
+
+        presigned_url: Optional[str] = None
+        raw_audio = (
+            q.content_json.get("audio_url")
+            or q.content_json.get("s3_key")
+            or q.content_json.get("audio_s3_key")
+        )
+        if raw_audio:
+            try:
+                presigned_url = generate_presigned_url(raw_audio)
+            except Exception:
+                presigned_url = None
+
+        presigned_image_url: Optional[str] = None
+        raw_image = q.content_json.get("image_url") or q.content_json.get("image_s3_key")
+        if raw_image:
+            try:
+                presigned_image_url = generate_presigned_url(raw_image)
+            except Exception:
+                presigned_image_url = None
+
+        questions_payload.append({
+            "question_id":         q.question_id,
+            "task_type":           q.question_type,
+            "prep_seconds":        timing["prep_seconds"],
+            "rec_seconds":         timing["rec_seconds"],
+            "content_json":        q.content_json,
+            "presigned_url":       presigned_url,
+            "presigned_image_url": presigned_image_url,
+            "difficulty_level":    q.difficulty_level,
+            "is_submitted":        qid in submitted_ids,
+        })
+
+    print(
+        f"[Speaking Sectional] Resumed session={session_id} user={user_id} "
+        f"submitted={len(submitted_ids)}/{len(qid_order)}",
+        flush=True,
+    )
+    return {
+        "session_id":      session_id,
+        "attempt_id":      attempt.id,
+        "total_questions": len(qid_order),
+        "submitted_count": len(submitted_ids),
+        "questions":       questions_payload,
+    }
+
+
 def finish_speaking_sectional(session_id: str, user_id: int, db: Session) -> dict:
     """
     Kick off Azure scoring for all submitted audio URLs.

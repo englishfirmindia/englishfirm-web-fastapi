@@ -20,6 +20,7 @@ from services.scoring import get_scorer
 from services.writing_sectional_service import (
     get_writing_sectional_info,
     start_writing_sectional_exam,
+    resume_writing_sectional_exam,
     finish_writing_sectional,
     get_writing_sectional_results,
     _question_max,
@@ -41,6 +42,15 @@ def start_exam(
 ):
     test_number = int(payload.get("test_number", 1))
     return start_writing_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
+
+
+@router.get("/resume/{session_id}")
+def resume_exam(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return resume_writing_sectional_exam(session_id=session_id, user_id=current_user.id, db=db)
 
 
 @router.post("/submit")

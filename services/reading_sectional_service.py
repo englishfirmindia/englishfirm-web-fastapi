@@ -188,15 +188,17 @@ def start_reading_sectional_exam(db: Session, user_id: int, test_number: int) ->
     session_id = str(uuid.uuid4())
 
     attempt = PracticeAttempt(
-        user_id         = user_id,
-        session_id      = session_id,
-        module          = "reading",
-        question_type   = "sectional",
-        filter_type     = "sectional",
-        total_questions = len(selected_qs),
-        total_score     = 0,
-        status          = "in_progress",
-        scoring_status  = "pending",
+        user_id               = user_id,
+        session_id            = session_id,
+        module                = "reading",
+        question_type         = "sectional",
+        filter_type           = "sectional",
+        total_questions       = len(selected_qs),
+        total_score           = 0,
+        status                = "in_progress",
+        scoring_status        = "pending",
+        selected_question_ids = [q.question_id for q in selected_qs],
+        task_breakdown        = {"test_number": test_number},
     )
     db.add(attempt)
     db.commit()
@@ -233,8 +235,81 @@ def start_reading_sectional_exam(db: Session, user_id: int, test_number: int) ->
 
     return {
         "session_id":      session_id,
+        "attempt_id":      attempt.id,
         "test_number":     test_number,
         "total_questions": len(questions_payload),
+        "questions":       questions_payload,
+    }
+
+
+def resume_reading_sectional_exam(session_id: str, user_id: int, db: Session) -> dict:
+    """Rebuild session from DB and return remaining questions with is_submitted flags."""
+    from db.models import AttemptAnswer
+    attempt = db.query(PracticeAttempt).filter_by(
+        session_id=session_id, user_id=user_id, module="reading", status="in_progress",
+    ).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="No resumable reading session found")
+
+    qid_order = attempt.selected_question_ids or []
+    if not qid_order:
+        raise HTTPException(status_code=404, detail="Reading attempt has no stored questions")
+
+    session = ACTIVE_SESSIONS.get(session_id)
+    if not session:
+        qs_by_id = {
+            q.question_id: q
+            for q in db.query(QuestionFromApeuni)
+            .options(joinedload(QuestionFromApeuni.evaluation))
+            .filter(QuestionFromApeuni.question_id.in_(qid_order))
+            .all()
+        }
+        submitted = {
+            a.question_id
+            for a in db.query(AttemptAnswer).filter_by(attempt_id=attempt.id).all()
+        }
+        selected = [qs_by_id[qid] for qid in qid_order if qid in qs_by_id]
+        tb = attempt.task_breakdown or {}
+        ACTIVE_SESSIONS[session_id] = {
+            "user_id":              user_id,
+            "test_number":          tb.get("test_number", 1),
+            "start_time":           int(time.time()),
+            "questions":            {q.question_id: q for q in selected},
+            "submitted_questions":  submitted,
+            "score":                0,
+            "question_scores":      {},
+            "question_score_maxes": {},
+            "module":               "reading",
+            "question_type":        "sectional",
+            "attempt_id":           attempt.id,
+        }
+
+    session   = ACTIVE_SESSIONS[session_id]
+    submitted = session["submitted_questions"]
+
+    questions_payload = []
+    for qid in qid_order:
+        q = session["questions"].get(qid)
+        if not q:
+            continue
+        questions_payload.append({
+            "question_id":  q.question_id,
+            "task_type":    q.question_type,
+            "content_json": q.content_json,
+            "session_id":   session_id,
+            "is_submitted": qid in submitted,
+        })
+
+    print(
+        f"[Reading Sectional] Resumed session={session_id} user={user_id} "
+        f"submitted={len(submitted)}/{len(qid_order)}",
+        flush=True,
+    )
+    return {
+        "session_id":      session_id,
+        "attempt_id":      attempt.id,
+        "total_questions": len(qid_order),
+        "submitted_count": len(submitted),
         "questions":       questions_payload,
     }
 

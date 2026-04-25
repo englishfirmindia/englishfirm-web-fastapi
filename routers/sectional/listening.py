@@ -40,6 +40,7 @@ from services.scoring import get_scorer
 from services.listening_sectional_service import (
     get_listening_sectional_info,
     start_listening_sectional_exam,
+    resume_listening_sectional_exam,
     finish_listening_sectional,
     get_listening_sectional_results,
     _question_max,
@@ -102,6 +103,15 @@ def start_exam(
 ):
     test_number = int(payload.get("test_number", 1))
     return start_listening_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
+
+
+@router.get("/resume/{session_id}")
+def resume_exam(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return resume_listening_sectional_exam(session_id=session_id, user_id=current_user.id, db=db)
 
 
 @router.post("/submit")

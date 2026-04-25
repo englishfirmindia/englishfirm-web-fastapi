@@ -284,16 +284,18 @@ def start_listening_sectional_exam(db: Session, user_id: int, test_number: int) 
 
     # Create PracticeAttempt now so attempt_id is available at every /submit
     attempt = PracticeAttempt(
-        user_id            = user_id,
-        session_id         = session_id,
-        module             = "listening",
-        question_type      = "sectional",
-        filter_type        = "sectional",
-        total_questions    = len(selected_qs),
-        total_score        = 0,
-        questions_answered = 0,
-        status             = "pending",
-        scoring_status     = "pending",
+        user_id               = user_id,
+        session_id            = session_id,
+        module                = "listening",
+        question_type         = "sectional",
+        filter_type           = "sectional",
+        total_questions       = len(selected_qs),
+        total_score           = 0,
+        questions_answered    = 0,
+        status                = "pending",
+        scoring_status        = "pending",
+        selected_question_ids = [q.question_id for q in selected_qs],
+        task_breakdown        = {"test_number": test_number},
     )
     db.add(attempt)
     db.commit()
@@ -321,8 +323,102 @@ def start_listening_sectional_exam(db: Session, user_id: int, test_number: int) 
 
     return {
         "session_id":      session_id,
+        "attempt_id":      attempt.id,
         "test_number":     test_number,
         "total_questions": len(questions_payload),
+        "questions":       questions_payload,
+    }
+
+
+def resume_listening_sectional_exam(session_id: str, user_id: int, db: Session) -> dict:
+    """Rebuild session from DB and return questions with fresh presigned URLs + is_submitted flags."""
+    from db.models import AttemptAnswer
+    attempt = db.query(PracticeAttempt).filter_by(
+        session_id=session_id, user_id=user_id, module="listening",
+    ).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="No resumable listening session found")
+
+    qid_order = attempt.selected_question_ids or []
+    if not qid_order:
+        raise HTTPException(status_code=404, detail="Listening attempt has no stored questions")
+
+    submitted = {
+        a.question_id
+        for a in db.query(AttemptAnswer).filter_by(attempt_id=attempt.id).all()
+    }
+
+    session = ACTIVE_SESSIONS.get(session_id)
+    if not session:
+        qs_by_id = {
+            q.question_id: q
+            for q in db.query(QuestionFromApeuni)
+            .options(joinedload(QuestionFromApeuni.evaluation))
+            .filter(QuestionFromApeuni.question_id.in_(qid_order))
+            .all()
+        }
+        selected = [qs_by_id[qid] for qid in qid_order if qid in qs_by_id]
+        tb = attempt.task_breakdown or {}
+        ACTIVE_SESSIONS[session_id] = {
+            "user_id":              user_id,
+            "attempt_id":           attempt.id,
+            "test_number":          tb.get("test_number", 1),
+            "start_time":           int(time.time()),
+            "questions":            {q.question_id: q for q in selected},
+            "submitted_questions":  submitted,
+            "score":                0,
+            "question_scores":      {},
+            "question_score_maxes": {},
+            "module":               "listening",
+            "question_type":        "sectional",
+        }
+
+    session   = ACTIVE_SESSIONS[session_id]
+    task_timing = {t["task"]: t for t in LISTENING_STRUCTURE}
+
+    questions_payload = []
+    for qid in qid_order:
+        q = session["questions"].get(qid)
+        if not q:
+            continue
+        timing = task_timing.get(q.question_type, {"time_seconds": 120, "prep_seconds": 0, "rec_seconds": 0})
+        presigned_url: Optional[str] = None
+        raw_audio = (
+            (q.content_json or {}).get("audio_url")
+            or (q.content_json or {}).get("s3_key")
+            or (q.content_json or {}).get("audio_s3_key")
+        )
+        if raw_audio:
+            try:
+                presigned_url = generate_presigned_url(raw_audio)
+            except Exception:
+                presigned_url = None
+
+        questions_payload.append({
+            "question_id":   q.question_id,
+            "task_type":     q.question_type,
+            "display_name":  _display_name(q.question_type),
+            "answer_type":   _ANSWER_TYPES.get(q.question_type, "text"),
+            "time_seconds":  timing["time_seconds"],
+            "prep_seconds":  timing["prep_seconds"],
+            "rec_seconds":   timing["rec_seconds"],
+            "content_json":  q.content_json,
+            "presigned_url": presigned_url,
+            "session_id":    session_id,
+            "is_prediction": q.is_prediction,
+            "is_submitted":  qid in submitted,
+        })
+
+    print(
+        f"[Listening Sectional] Resumed session={session_id} user={user_id} "
+        f"submitted={len(submitted)}/{len(qid_order)}",
+        flush=True,
+    )
+    return {
+        "session_id":      session_id,
+        "attempt_id":      attempt.id,
+        "total_questions": len(qid_order),
+        "submitted_count": len(submitted),
         "questions":       questions_payload,
     }
 
