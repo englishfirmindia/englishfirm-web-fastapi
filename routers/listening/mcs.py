@@ -28,7 +28,7 @@ def list_questions(
 ):
     query = db.query(QuestionFromApeuni).filter(
         QuestionFromApeuni.module == "listening",
-        QuestionFromApeuni.question_type == "listening_mcs",
+        QuestionFromApeuni.question_type == "listening_mcq_single",
     )
     if difficulty is not None:
         query = query.filter(QuestionFromApeuni.difficulty_level == difficulty)
