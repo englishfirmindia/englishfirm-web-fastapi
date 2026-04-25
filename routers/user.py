@@ -79,6 +79,21 @@ def get_last_answer(
     result_json = dict(answer.result_json or {})
     if "pte_score" not in result_json and answer.score is not None:
         result_json["pte_score"] = answer.score
+    if "correct_answers" not in result_json:
+        from db.models import QuestionEvaluationApeuni
+        ev = db.query(QuestionEvaluationApeuni).filter_by(question_id=question_id).first()
+        if ev and ev.evaluation_json:
+            eval_json = ev.evaluation_json or {}
+            raw = eval_json.get("correctAnswers", {}) or {}
+            if isinstance(raw, dict) and raw.get("blanks") is not None:
+                correct_answers = {
+                    str(b.get("blankId")): b.get("answer")
+                    for b in raw.get("blanks", [])
+                }
+            else:
+                correct_answers = {str(k): v for k, v in raw.items()}
+            if correct_answers:
+                result_json["correct_answers"] = correct_answers
     return {
         "user_answer_json": answer.user_answer_json,
         "result_json": result_json,
