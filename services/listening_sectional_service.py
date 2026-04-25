@@ -602,7 +602,7 @@ def get_listening_sectional_results(session_id: str, user_id: int, db: Session) 
     return {
         "attempt_id":         attempt.id,
         "session_id":         session_id,
-        "scoring_status":     attempt.scoring_status or "complete",
+        "scoring_status":     attempt.scoring_status or "pending",
         "listening_score":    attempt.total_score,
         "task_breakdown":     attempt.task_breakdown or {},
         "total_questions":    attempt.total_questions,
