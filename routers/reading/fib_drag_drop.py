@@ -116,9 +116,15 @@ def submit(
     question_id = int(payload["question_id"])
     raw = payload.get("user_answers") or payload.get("answers", {})
     if isinstance(raw, list):
-        user_answers = {str(i + 1): v for i, v in enumerate(raw)}
+        user_answers = {f"blank_{i + 1}": v for i, v in enumerate(raw)}
+    elif isinstance(raw, dict):
+        # Normalise plain numeric keys ("1", "2") to "blank_N" to match evaluation_json
+        user_answers = {}
+        for k, v in raw.items():
+            key = str(k)
+            user_answers[key if key.startswith("blank_") else f"blank_{key}"] = v
     else:
-        user_answers = raw
+        user_answers = {}
 
     session = get_session(session_id)
     question = session["questions"].get(question_id)
