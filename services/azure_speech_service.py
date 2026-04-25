@@ -7,7 +7,6 @@ speaking_scoring_service divides by 100.0 to normalise.
 """
 
 import os
-import re
 import json
 import time
 import hmac
@@ -136,11 +135,18 @@ def assess_pronunciation(
                     "ErrorType":     w.error_type,
                 })
 
+            raw_json = json.loads(result.properties.get(
+                speechsdk.PropertyId.SpeechServiceResponse_JsonResult, "{}"
+            ))
+            pa_json = raw_json.get("NBest", [{}])[0].get("PronunciationAssessment", {})
+            completeness = float(pa_json.get("CompletenessScore", 0) or 0)
+
             return {
-                "AccuracyScore":   pa_result.accuracy_score,
-                "FluencyScore":    pa_result.fluency_score,
-                "recognized_text": result.text,
-                "Words":           words,
+                "AccuracyScore":     pa_result.accuracy_score,
+                "FluencyScore":      pa_result.fluency_score,
+                "CompletenessScore": completeness,
+                "recognized_text":   result.text,
+                "Words":             words,
             }
 
         except Exception as exc:
@@ -159,32 +165,6 @@ def assess_pronunciation(
     )
     raise last_exc
 
-
-def _normalize(text: str) -> str:
-    """Lowercase, strip punctuation for word matching."""
-    return re.sub(r"[^a-z0-9\s']", "", text.lower()).strip()
-
-
-def calculate_content_score(reference_text: str, recognized_text: str) -> float:
-    """
-    Content = (matching_words / total_reference_words) * 100
-    Uses simple word-overlap (same as PTE scoring).
-    Returns 0-100.
-    """
-    ref_words  = _normalize(reference_text).split()
-    rec_words  = _normalize(recognized_text).split()
-    if not ref_words:
-        return 0.0
-
-    # Count how many reference words appear in recognised text (order-aware greedy match)
-    rec_copy = rec_words[:]
-    matched  = 0
-    for w in ref_words:
-        if w in rec_copy:
-            matched += 1
-            rec_copy.remove(w)
-
-    return round(min((matched / len(ref_words)) * 100, 100), 1)
 
 
 def transcribe_and_score_free(audio_bytes: bytes) -> dict:
@@ -253,7 +233,7 @@ def score_read_aloud(audio_bytes: bytes, reference_text: str) -> dict:
 
     pronunciation = round(float(accuracy_score), 1)
     fluency       = round(float(fluency_score), 1)
-    content       = calculate_content_score(reference_text, recognized)
+    content       = round(float(azure_result.get("CompletenessScore", 0) or 0), 1)
     total         = round((content + pronunciation + fluency) / 3, 1)
 
     word_scores = []
