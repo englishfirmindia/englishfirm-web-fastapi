@@ -135,11 +135,6 @@ def submit(
         },
     )
     mark_submitted(session_id, question_id, result.pte_score)
-    persist_answer_to_db(
-        session=session, question_id=question_id, question_type="reading_fib_drop_down",
-        user_answer_json={"user_answers": user_answers},
-        correct_answer_json={}, result_json=result.breakdown or {}, score=result.pte_score,
-    )
 
     eval_json = question.evaluation.evaluation_json or {}
     correct_answers_raw = eval_json.get("correctAnswers", {}) or {}
@@ -154,6 +149,19 @@ def submit(
     breakdown = result.breakdown or {}
     blank_results = breakdown.get("blank_results", {}) or {}
     is_correct = bool(blank_results) and all(blank_results.values())
+
+    persist_answer_to_db(
+        session=session, question_id=question_id, question_type="reading_fib_drop_down",
+        user_answer_json={"user_answers": user_answers},
+        correct_answer_json={},
+        result_json={
+            **breakdown,
+            "correct_answers": correct_answers,
+            "pte_score": result.pte_score,
+            "is_correct": is_correct,
+        },
+        score=result.pte_score,
+    )
     total_score = session.get("score", 0)
 
     return {
