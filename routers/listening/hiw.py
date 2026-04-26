@@ -102,7 +102,7 @@ def start(
         db=db,
         user_id=current_user.id,
         module="listening",
-        question_type="highlight_incorrect_words",
+        question_type="listening_hiw",
         difficulty_level=payload.get("difficulty_level"),
         question_id=int(raw_qid) if raw_qid is not None else None,
     )
