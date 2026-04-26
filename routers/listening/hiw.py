@@ -122,11 +122,31 @@ def submit(
 
     # Accept word strings or convert from 0-based word indices
     highlighted_words = payload.get("highlighted_words")
+    content = question.content_json or {}
+    words = content.get("words") or (content.get("transcript") or content.get("passage") or "").split()
+
     if highlighted_words is None:
         indices = payload.get("highlighted_indices", [])
-        content = question.content_json or {}
-        words = content.get("words") or content.get("transcript", "").split()
         highlighted_words = [words[i] for i in indices if isinstance(i, int) and i < len(words)]
+
+    eval_json = question.evaluation.evaluation_json or {}
+    correct_answers = eval_json.get("correctAnswers", {}) or {}
+    incorrect_words_raw = correct_answers.get("incorrectWords", []) or []
+    # Support both plain string list and dict list {wrong, correct, index}
+    incorrect_words = [
+        (w["wrong"] if isinstance(w, dict) else w)
+        for w in incorrect_words_raw
+    ]
+
+    print(f"\n{'='*60}", flush=True)
+    print(f"[HIW] Q{question_id}", flush=True)
+    print(f"[HIW] content keys      : {list(content.keys())}", flush=True)
+    print(f"[HIW] words array len   : {len(words)}", flush=True)
+    print(f"[HIW] words[0:10]       : {words[:10]}", flush=True)
+    print(f"[HIW] payload indices   : {payload.get('highlighted_indices', [])}", flush=True)
+    print(f"[HIW] highlighted_words : {highlighted_words}", flush=True)
+    print(f"[HIW] incorrectWords DB : {incorrect_words_raw[:3]}{'...' if len(incorrect_words_raw)>3 else ''}", flush=True)
+    print(f"[HIW] incorrect_words   : {incorrect_words}", flush=True)
 
     scorer = get_scorer("listening_hiw")
     result = scorer.score(
@@ -134,12 +154,9 @@ def submit(
         session_id=session_id,
         answer={
             "highlighted_words": highlighted_words,
-            "evaluation_json": question.evaluation.evaluation_json,
+            "evaluation_json": {**eval_json, "correctAnswers": {**correct_answers, "incorrectWords": incorrect_words}},
         },
     )
-    eval_json = question.evaluation.evaluation_json or {}
-    correct_answers = eval_json.get("correctAnswers", {}) or {}
-    incorrect_words = list(correct_answers.get("incorrectWords", []) or [])
 
     breakdown = result.breakdown or {}
     correct_clicks = list(breakdown.get("correct_clicks", []) or [])
@@ -148,10 +165,16 @@ def submit(
     is_correct = len(incorrect_clicks) == 0 and len(missed_words) == 0
 
     # Compute which indices in the passage word array are the actual incorrect words
-    content = question.content_json or {}
-    words = content.get("words") or content.get("transcript", "").split()
     incorrect_words_set = {w.lower().strip() for w in incorrect_words}
     incorrect_word_indices = [i for i, w in enumerate(words) if w.lower().strip() in incorrect_words_set]
+
+    print(f"[HIW] correct_clicks    : {correct_clicks}", flush=True)
+    print(f"[HIW] incorrect_clicks  : {incorrect_clicks}", flush=True)
+    print(f"[HIW] missed_words      : {missed_words}", flush=True)
+    print(f"[HIW] is_correct        : {is_correct}", flush=True)
+    print(f"[HIW] incorrect_indices : {incorrect_word_indices}", flush=True)
+    print(f"[HIW] pte_score         : {result.pte_score}", flush=True)
+    print(f"{'='*60}\n", flush=True)
 
     mark_submitted(session_id, question_id, result.pte_score)
     persist_answer_to_db(
