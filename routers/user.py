@@ -124,6 +124,7 @@ def get_attempts_history(
             "total_score": a.total_score,
             "status": a.status,
             "scoring_status": a.scoring_status,
+            "task_breakdown": a.task_breakdown,
             "started_at": a.started_at.isoformat() if a.started_at else None,
             "completed_at": a.completed_at.isoformat() if a.completed_at else None,
         }
