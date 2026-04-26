@@ -155,6 +155,12 @@ def submit(
     is_correct = len(incorrect_clicks) == 0 and len(missed_words) == 0
     total_score = session.get("score", 0)
 
+    # Compute which indices in the passage word array are the actual incorrect words
+    content = question.content_json or {}
+    words = content.get("words") or content.get("transcript", "").split()
+    incorrect_words_set = {w.lower().strip() for w in incorrect_words}
+    incorrect_word_indices = [i for i, w in enumerate(words) if w.lower().strip() in incorrect_words_set]
+
     return {
         "pte_score": result.pte_score,
         "is_async": result.is_async,
@@ -162,6 +168,7 @@ def submit(
         "totalScore": total_score,
         # snake_case
         "incorrect_words": incorrect_words,
+        "incorrect_word_indices": incorrect_word_indices,
         "highlighted_words": highlighted_words,
         "correct_clicks": correct_clicks,
         "incorrect_clicks": incorrect_clicks,

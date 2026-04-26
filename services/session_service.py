@@ -84,6 +84,7 @@ def start_session(
         attempt_id = None
 
     ACTIVE_SESSIONS[session_id] = {
+        "session_id": session_id,
         "user_id": user_id,
         "start_time": int(time.time()),
         "questions": {q.question_id: q for q in questions},
@@ -181,14 +182,22 @@ def persist_answer_to_db(
 ) -> None:
     """Write or upsert an AttemptAnswer row for this question."""
     attempt_id = session.get("attempt_id")
-    if not attempt_id:
+    session_id = session.get("session_id")
+    if not attempt_id and not session_id:
         return
 
     def _write():
+        nonlocal attempt_id
         last_exc: Exception = RuntimeError("_write: no attempts made")
         for attempt in range(1, 4):
             db = SessionLocal()
             try:
+                # If attempt_id not cached in memory, look it up by session_id
+                if not attempt_id and session_id:
+                    pa = db.query(PracticeAttempt).filter_by(session_id=session_id).first()
+                    if not pa:
+                        return
+                    attempt_id = pa.id
                 existing = db.query(AttemptAnswer).filter_by(
                     attempt_id=attempt_id, question_id=question_id
                 ).first()
