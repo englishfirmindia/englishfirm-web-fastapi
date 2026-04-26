@@ -230,7 +230,7 @@ def attempted_tests(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Returns test numbers for all completed listening sectional attempts by this user."""
+    """Returns completed listening sectional tests with most-recent completion date."""
     attempts = (
         db.query(PracticeAttempt)
         .filter(
@@ -239,15 +239,22 @@ def attempted_tests(
             PracticeAttempt.question_type == "sectional",
             PracticeAttempt.status == "complete",
         )
+        .order_by(PracticeAttempt.completed_at.desc())
         .all()
     )
-    test_numbers = set()
+    # Keep only the most recent completion per test_number
+    seen: dict[int, str] = {}
     for a in attempts:
         tb = a.task_breakdown or {}
         tn = tb.get("test_number")
-        if isinstance(tn, int):
-            test_numbers.add(tn)
-    return {"attempted_test_numbers": sorted(test_numbers)}
+        if isinstance(tn, int) and tn not in seen:
+            seen[tn] = a.completed_at.isoformat() if a.completed_at else None
+    return {
+        "attempted_tests": [
+            {"test_number": tn, "completed_at": dt}
+            for tn, dt in sorted(seen.items())
+        ]
+    }
 
 
 @router.get("/latest")
