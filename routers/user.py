@@ -107,7 +107,10 @@ def get_attempts_history(
 ):
     attempts = (
         db.query(PracticeAttempt)
-        .filter(PracticeAttempt.user_id == current_user.id)
+        .filter(
+            PracticeAttempt.user_id == current_user.id,
+            PracticeAttempt.status == "complete",
+        )
         .order_by(PracticeAttempt.started_at.desc())
         .limit(50)
         .all()

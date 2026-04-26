@@ -156,6 +156,15 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
 
     session_id = str(uuid.uuid4())
 
+    # Remove any incomplete previous attempts so history stays clean
+    db.query(PracticeAttempt).filter(
+        PracticeAttempt.user_id        == user_id,
+        PracticeAttempt.module         == "writing",
+        PracticeAttempt.question_type  == "sectional",
+        PracticeAttempt.status         != "complete",
+    ).delete(synchronize_session=False)
+    db.commit()
+
     attempt = PracticeAttempt(
         user_id               = user_id,
         session_id            = session_id,

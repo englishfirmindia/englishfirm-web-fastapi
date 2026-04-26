@@ -199,6 +199,15 @@ def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -
             "difficulty_level":    q.difficulty_level,
         })
 
+    # Remove any incomplete previous attempts so history stays clean
+    db.query(PracticeAttempt).filter(
+        PracticeAttempt.user_id        == user_id,
+        PracticeAttempt.module         == "speaking",
+        PracticeAttempt.question_type  == "sectional",
+        PracticeAttempt.status         != "complete",
+    ).delete(synchronize_session=False)
+    db.commit()
+
     # Create PracticeAttempt in DB
     session_id = str(uuid.uuid4())
     attempt = PracticeAttempt(
