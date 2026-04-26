@@ -8,7 +8,7 @@ from sqlalchemy import asc, desc
 from db.database import get_db
 from db.models import User, QuestionFromApeuni, UserQuestionAttempt
 from core.dependencies import get_current_user
-from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
+from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db, ACTIVE_SESSIONS
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url
 
@@ -98,14 +98,18 @@ def start(
     current_user: User = Depends(get_current_user),
 ):
     raw_qid = payload.get("question_id")
-    return start_session(
+    result = start_session(
         db=db,
         user_id=current_user.id,
         module="listening",
-        question_type="listening_hiw",
+        question_type="highlight_incorrect_words",
         difficulty_level=payload.get("difficulty_level"),
         question_id=int(raw_qid) if raw_qid is not None else None,
     )
+    # Override stored question_type so UserQuestionAttempt uses "listening_hiw"
+    # (the value that fetchAnsweredQuestionIds queries for)
+    ACTIVE_SESSIONS[result["session_id"]]["question_type"] = "listening_hiw"
+    return result
 
 
 @router.post("/submit")
