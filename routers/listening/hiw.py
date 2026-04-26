@@ -137,13 +137,6 @@ def submit(
             "evaluation_json": question.evaluation.evaluation_json,
         },
     )
-    mark_submitted(session_id, question_id, result.pte_score)
-    persist_answer_to_db(
-        session=session, question_id=question_id, question_type="listening_hiw",
-        user_answer_json={"highlighted_words": list(highlighted_words or [])},
-        correct_answer_json={}, result_json=result.breakdown or {}, score=result.pte_score,
-    )
-
     eval_json = question.evaluation.evaluation_json or {}
     correct_answers = eval_json.get("correctAnswers", {}) or {}
     incorrect_words = list(correct_answers.get("incorrectWords", []) or [])
@@ -153,13 +146,28 @@ def submit(
     incorrect_clicks = list(breakdown.get("incorrect_clicks", []) or [])
     missed_words = list(breakdown.get("missed_words", []) or [])
     is_correct = len(incorrect_clicks) == 0 and len(missed_words) == 0
-    total_score = session.get("score", 0)
 
     # Compute which indices in the passage word array are the actual incorrect words
     content = question.content_json or {}
     words = content.get("words") or content.get("transcript", "").split()
     incorrect_words_set = {w.lower().strip() for w in incorrect_words}
     incorrect_word_indices = [i for i, w in enumerate(words) if w.lower().strip() in incorrect_words_set]
+
+    mark_submitted(session_id, question_id, result.pte_score)
+    persist_answer_to_db(
+        session=session, question_id=question_id, question_type="listening_hiw",
+        user_answer_json={"highlighted_words": list(highlighted_words or [])},
+        correct_answer_json={},
+        result_json={
+            **breakdown,
+            "incorrect_words": incorrect_words,
+            "incorrect_word_indices": incorrect_word_indices,
+            "is_correct": is_correct,
+        },
+        score=result.pte_score,
+    )
+
+    total_score = session.get("score", 0)
 
     return {
         "pte_score": result.pte_score,
