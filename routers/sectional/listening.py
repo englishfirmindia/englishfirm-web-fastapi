@@ -33,7 +33,7 @@ from fastapi import APIRouter, Depends, Body, HTTPException
 from sqlalchemy.orm import Session
 
 from db.database import get_db
-from db.models import User, AttemptAnswer
+from db.models import User, AttemptAnswer, PracticeAttempt
 from core.dependencies import get_current_user
 from services.session_service import ACTIVE_SESSIONS
 from services.scoring import get_scorer
@@ -223,6 +223,31 @@ def get_results(
     current_user: User = Depends(get_current_user),
 ):
     return get_listening_sectional_results(session_id=session_id, user_id=current_user.id, db=db)
+
+
+@router.get("/attempted-tests")
+def attempted_tests(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Returns test numbers for all completed listening sectional attempts by this user."""
+    attempts = (
+        db.query(PracticeAttempt)
+        .filter(
+            PracticeAttempt.user_id == current_user.id,
+            PracticeAttempt.module == "listening",
+            PracticeAttempt.question_type == "sectional",
+            PracticeAttempt.status == "complete",
+        )
+        .all()
+    )
+    test_numbers = set()
+    for a in attempts:
+        tb = a.task_breakdown or {}
+        tn = tb.get("test_number")
+        if isinstance(tn, int):
+            test_numbers.add(tn)
+    return {"attempted_test_numbers": sorted(test_numbers)}
 
 
 @router.get("/latest")
