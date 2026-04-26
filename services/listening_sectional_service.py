@@ -36,7 +36,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt
-from services.session_service import ACTIVE_SESSIONS, _SCORE_STORE
+from services.session_service import ACTIVE_SESSIONS
 from services.s3_service import generate_presigned_url
 import core.config as config
 
@@ -423,89 +423,122 @@ def resume_listening_sectional_exam(session_id: str, user_id: int, db: Session) 
     }
 
 
-def _wait_for_speaking_scores(user_id: int, question_ids: list, timeout: int = 300) -> dict:
-    """Poll _SCORE_STORE until all async speaking scores are resolved."""
+def _earned_pct_from_answer(score: int) -> float:
+    """Convert a stored pte_score to a 0.0–1.0 fraction for weighted aggregation.
+
+    Works for both sync and async question types:
+      - Sync questions store pte_score directly (10–90).
+      - Async (speaking) questions store the Azure pte result (10–90 normally, 0 for no-speech).
+    A score of 0 (no-speech error) and a score of 10 (floor) both correctly map to 0.0.
+    """
+    return max(0.0, (score - config.PTE_BASE) / config.PTE_SCALE)
+
+
+def _wait_for_speaking_in_rds(
+    bg_db,
+    attempt_id: int,
+    speaking_qids: list,
+    timeout: int = 300,
+) -> None:
+    """Poll attempt_answers until all speaking rows have scoring_status='complete'."""
+    if not speaking_qids:
+        return
+    from db.models import AttemptAnswer
     deadline = time.time() + timeout
+    print(f"[ListeningBG] Waiting for {len(speaking_qids)} speaking scores in RDS…", flush=True)
     while time.time() < deadline:
-        if all(
-            _SCORE_STORE.get((user_id, qid)) is not None
-            and _SCORE_STORE.get((user_id, qid), {}).get("scoring") != "pending"
-            for qid in question_ids
-        ):
-            break
+        pending = (
+            bg_db.query(AttemptAnswer)
+            .filter(
+                AttemptAnswer.attempt_id == attempt_id,
+                AttemptAnswer.question_id.in_(speaking_qids),
+                AttemptAnswer.scoring_status == "pending",
+            )
+            .count()
+        )
+        if pending == 0:
+            return
         time.sleep(3)
-    return {
-        qid: _SCORE_STORE.get((user_id, qid), {"scoring": "timeout", "total": config.PTE_FLOOR})
-        for qid in question_ids
-    }
+    print(f"[ListeningBG] ⏱  Speaking scoring timed out after {timeout}s for attempt={attempt_id}", flush=True)
 
 
 def _aggregate_bg(
     attempt_id: int,
     session_id: str,
     user_id: int,
-    questions: dict,
-    submitted: set,
-    q_scores: dict,
-    q_score_maxes: dict,
+    all_question_ids: list,
 ):
-    """Background thread: wait for Azure speaking scores, aggregate, write to DB."""
+    """Background thread: compute weighted score entirely from RDS, write back to DB.
+
+    Reads all answered rows from attempt_answers, waits for async speaking scores to
+    land in RDS, then builds task buckets and applies the PTE weighted formula.
+    This approach is resilient to server restarts — no in-memory state needed.
+    """
     from db.database import SessionLocal
+    from db.models import AttemptAnswer, QuestionFromApeuni
+    from sqlalchemy.orm.attributes import flag_modified
+
     bg_db = SessionLocal()
     try:
-        speaking_qids = [
-            qid for qid, q in questions.items()
-            if q.question_type in _ASYNC_TYPES and qid in submitted
-        ]
-        speaking_scores = {}
-        if speaking_qids:
-            print(f"[ListeningBG] Waiting for {len(speaking_qids)} speaking scores…", flush=True)
-            speaking_scores = _wait_for_speaking_scores(user_id, speaking_qids)
+        # ── 1. Resolve question types for all exam questions ──────────────────
+        qs_rows = (
+            bg_db.query(QuestionFromApeuni.question_id, QuestionFromApeuni.question_type)
+            .filter(QuestionFromApeuni.question_id.in_(all_question_ids))
+            .all()
+        )
+        type_by_qid = {r.question_id: r.question_type for r in qs_rows}
 
-        # Build per-task buckets
+        # ── 2. Wait for speaking answers to be scored in RDS ──────────────────
+        speaking_qids = [
+            qid for qid in all_question_ids
+            if type_by_qid.get(qid) in _ASYNC_TYPES
+        ]
+        _wait_for_speaking_in_rds(bg_db, attempt_id, speaking_qids)
+
+        # Expire cached objects so subsequent queries see fresh DB state.
+        bg_db.expire_all()
+
+        # ── 3. Load all answered rows ──────────────────────────────────────────
+        answered_rows = (
+            bg_db.query(AttemptAnswer)
+            .filter_by(attempt_id=attempt_id)
+            .all()
+        )
+        answered_by_qid = {row.question_id: row for row in answered_rows}
+
+        # ── 4. Build per-task buckets ──────────────────────────────────────────
         task_buckets: dict = {}
-        for qid, q in questions.items():
-            t = q.question_type
+        for qid in all_question_ids:
+            t = type_by_qid.get(qid)
+            if not t:
+                continue  # question deleted from DB — skip
             if t not in task_buckets:
-                task_buckets[t] = {"earned_pct_sum": 0.0, "total": 0, "answered": 0,
-                                   "earned_raw": 0.0, "max_raw": 0.0}
+                task_buckets[t] = {"earned_pct_sum": 0.0, "total": 0, "answered": 0}
             task_buckets[t]["total"] += 1
-            if qid not in submitted:
+
+            row = answered_by_qid.get(qid)
+            if not row:
                 continue
             task_buckets[t]["answered"] += 1
+            task_buckets[t]["earned_pct_sum"] += _earned_pct_from_answer(row.score or 0)
 
-            if t in _ASYNC_TYPES:
-                raw = speaking_scores.get(qid, {})
-                stored_total = float(raw.get("total") or config.PTE_FLOOR)
-                pct = (stored_total - config.PTE_BASE) / config.PTE_SCALE
-                task_buckets[t]["earned_pct_sum"] += max(0.0, pct)
-                task_buckets[t]["earned_raw"]     += stored_total
-                task_buckets[t]["max_raw"]        += config.PTE_CEILING
-            else:
-                earned = q_scores.get(qid, 0)
-                q_max  = q_score_maxes.get(qid) or _question_max(q)
-                task_buckets[t]["earned_raw"]     += earned
-                task_buckets[t]["max_raw"]        += q_max
-                task_buckets[t]["earned_pct_sum"] += (earned / q_max) if q_max > 0 else 0.0
-
+        # ── 5. Weighted score ──────────────────────────────────────────────────
         weighted_sum   = 0.0
         present_weight = 0
         task_breakdown: dict = {}
 
         for task_type, bucket in task_buckets.items():
-            weight   = _LISTENING_WEIGHTS.get(task_type, 0)
-            total    = bucket["total"]
-            answered = bucket["answered"]
-            task_pct = (bucket["earned_pct_sum"] / total) if total > 0 else 0.0
-            contribution  = task_pct * weight
+            weight       = _LISTENING_WEIGHTS.get(task_type, 0)
+            total        = bucket["total"]
+            answered     = bucket["answered"]
+            task_pct     = bucket["earned_pct_sum"] / total if total > 0 else 0.0
+            contribution = task_pct * weight
             weighted_sum  += contribution
             present_weight += weight
             task_breakdown[task_type] = {
                 "display_name":       _display_name(task_type),
                 "total_questions":    total,
                 "questions_answered": answered,
-                "earned_raw":         round(bucket["earned_raw"], 2),
-                "max_raw":            round(bucket["max_raw"], 2),
                 "task_pct":           round(task_pct * 100, 1),
                 "listening_weight":   weight,
                 "contribution":       round(contribution, 2),
@@ -518,75 +551,79 @@ def _aggregate_bg(
             min(config.PTE_CEILING, round(config.PTE_BASE + normalised_pct * config.PTE_SCALE)),
         )
 
+        # ── 6. Write back to DB ────────────────────────────────────────────────
         attempt = bg_db.query(PracticeAttempt).filter_by(id=attempt_id).first()
         if attempt:
             attempt.total_score        = scaled
-            attempt.questions_answered = len(submitted)
+            attempt.questions_answered = len(answered_by_qid)
             attempt.status             = "complete"
             attempt.scoring_status     = "complete"
             attempt.task_breakdown     = task_breakdown
             attempt.completed_at       = datetime.now(timezone.utc)
-
+            flag_modified(attempt, "task_breakdown")
             bg_db.commit()
             print(
                 f"[ListeningBG] ✅ user={user_id} session={session_id} "
-                f"score={scaled} norm_pct={round(normalised_pct * 100, 1)}%",
+                f"score={scaled} norm_pct={round(normalised_pct * 100, 1)}% "
+                f"answered={len(answered_by_qid)}/{len(all_question_ids)}",
                 flush=True,
             )
         else:
             print(f"[ListeningBG] ❌ attempt_id={attempt_id} not found in DB", flush=True)
 
     except Exception as e:
+        import traceback
         print(f"[ListeningBG] ❌ Failed session={session_id}: {e}", flush=True)
+        traceback.print_exc()
     finally:
         bg_db.close()
 
 
 def finish_listening_sectional(session_id: str, user_id: int, db: Session) -> dict:
     """
-    Kick off background scoring and return immediately with scoring_status='pending'.
-    Background thread waits for Azure speaking scores, aggregates, and writes to DB.
+    Kick off RDS-based background scoring and return immediately with scoring_status='pending'.
+    The background thread reads all answered rows from attempt_answers, waits for speaking
+    scores to land in RDS, and computes the final weighted listening score.
+    Does not depend on in-memory ACTIVE_SESSIONS — resilient to server restarts.
     """
-    session_data = ACTIVE_SESSIONS.get(session_id)
-    if not session_data:
-        raise HTTPException(status_code=400, detail="Session not found or expired")
+    attempt = db.query(PracticeAttempt).filter_by(
+        session_id=session_id, user_id=user_id, module="listening",
+    ).first()
+    if not attempt:
+        raise HTTPException(status_code=400, detail="Session not found")
 
     # Idempotency — if already scored, return existing result
-    existing = db.query(PracticeAttempt).filter_by(session_id=session_id).first()
-    if existing and existing.scoring_status == "complete":
+    if attempt.scoring_status == "complete":
         return {
-            "attempt_id":      existing.id,
+            "attempt_id":      attempt.id,
             "session_id":      session_id,
             "scoring_status":  "complete",
-            "listening_score": existing.total_score,
+            "listening_score": attempt.total_score,
         }
 
-    questions     = session_data.get("questions", {})
-    submitted     = set(session_data.get("submitted_questions", set()))
-    q_scores      = dict(session_data.get("question_scores", {}))
-    q_score_maxes = dict(session_data.get("question_score_maxes", {}))
+    all_question_ids = attempt.selected_question_ids or []
+    if not all_question_ids:
+        raise HTTPException(status_code=400, detail="No questions found for this session")
 
-    print(f"[ListeningFinish] submitted={len(submitted)} q_scores={len(q_scores)}", flush=True)
-
-    # PracticeAttempt was created at /exam start — just update answered count
-    attempt_id = session_data.get("attempt_id") or (existing.id if existing else None)
-    if not attempt_id:
-        raise HTTPException(status_code=500, detail="No attempt_id in session")
-
-    attempt_row = db.query(PracticeAttempt).filter_by(id=attempt_id).first()
-    if attempt_row:
-        attempt_row.questions_answered = len(submitted)
-        db.commit()
+    print(
+        f"[ListeningFinish] session={session_id} user={user_id} "
+        f"attempt={attempt.id} questions={len(all_question_ids)}",
+        flush=True,
+    )
 
     threading.Thread(
         target=_aggregate_bg,
-        args=(attempt_id, session_id, user_id, questions, submitted, q_scores, q_score_maxes),
+        kwargs=dict(
+            attempt_id       = attempt.id,
+            session_id       = session_id,
+            user_id          = user_id,
+            all_question_ids = all_question_ids,
+        ),
         daemon=True,
     ).start()
-    print(f"[ListeningFinish] ✅ Background scoring started attempt_id={attempt_id}", flush=True)
 
     return {
-        "attempt_id":     attempt_id,
+        "attempt_id":     attempt.id,
         "session_id":     session_id,
         "scoring_status": "pending",
         "message":        "Scoring in progress. Check the Feedback tab in a moment.",
