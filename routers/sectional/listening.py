@@ -102,6 +102,22 @@ def start_exam(
     current_user: User = Depends(get_current_user),
 ):
     test_number = int(payload.get("test_number", 1))
+    already_done = (
+        db.query(PracticeAttempt)
+        .filter(
+            PracticeAttempt.user_id == current_user.id,
+            PracticeAttempt.module == "listening",
+            PracticeAttempt.question_type == "sectional",
+            PracticeAttempt.status == "complete",
+        )
+        .all()
+    )
+    for a in already_done:
+        if (a.task_breakdown or {}).get("test_number") == test_number:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Test {test_number} has already been completed and cannot be retaken.",
+            )
     return start_listening_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
 
 
