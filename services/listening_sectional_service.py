@@ -35,7 +35,7 @@ from typing import Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 
-from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt
+from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt, AttemptAnswer
 from services.session_service import ACTIVE_SESSIONS
 from services.s3_service import generate_presigned_url
 import core.config as config
@@ -636,6 +636,25 @@ def get_listening_sectional_results(session_id: str, user_id: int, db: Session) 
     ).first()
     if not attempt:
         return {"scoring_status": "not_found"}
+
+    answers = (
+        db.query(AttemptAnswer)
+        .filter_by(attempt_id=attempt.id)
+        .order_by(AttemptAnswer.submitted_at)
+        .all()
+    )
+    questions = [
+        {
+            "question_id":      a.question_id,
+            "question_type":    a.question_type,
+            "score":            a.score,
+            "result_json":      a.result_json or {},
+            "user_answer_json": a.user_answer_json or {},
+            "scoring_status":   a.scoring_status,
+        }
+        for a in answers
+    ]
+
     return {
         "attempt_id":         attempt.id,
         "session_id":         session_id,
@@ -645,4 +664,5 @@ def get_listening_sectional_results(session_id: str, user_id: int, db: Session) 
         "total_questions":    attempt.total_questions,
         "questions_answered": attempt.questions_answered,
         "completed_at":       attempt.completed_at.isoformat() if attempt.completed_at else None,
+        "questions":          questions,
     }
