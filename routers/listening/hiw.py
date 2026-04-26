@@ -1,4 +1,5 @@
 import math
+import re
 from typing import Optional
 from fastapi import APIRouter, Depends, Body, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -123,7 +124,7 @@ def submit(
     # Accept word strings or convert from 0-based word indices
     highlighted_words = payload.get("highlighted_words")
     content = question.content_json or {}
-    words = content.get("words") or (content.get("transcript") or content.get("passage") or "").split()
+    words = content.get("words") or (content.get("transcript") or content.get("passage") or content.get("text") or "").split()
 
     if highlighted_words is None:
         indices = payload.get("highlighted_indices", [])
@@ -165,8 +166,11 @@ def submit(
     is_correct = len(incorrect_clicks) == 0 and len(missed_words) == 0
 
     # Compute which indices in the passage word array are the actual incorrect words
-    incorrect_words_set = {w.lower().strip() for w in incorrect_words}
-    incorrect_word_indices = [i for i, w in enumerate(words) if w.lower().strip() in incorrect_words_set]
+    def _norm(w: str) -> str:
+        return re.sub(r'[^\w]', '', w).lower()
+
+    incorrect_words_set = {_norm(w) for w in incorrect_words}
+    incorrect_word_indices = [i for i, w in enumerate(words) if _norm(w) in incorrect_words_set]
 
     print(f"[HIW] correct_clicks    : {correct_clicks}", flush=True)
     print(f"[HIW] incorrect_clicks  : {incorrect_clicks}", flush=True)
