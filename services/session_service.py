@@ -148,10 +148,11 @@ def mark_submitted(session_id: str, question_id: int, score: int) -> None:
                             module=module,
                         ))
                     # Update PracticeAttempt answered count + total_score
+                    # Skip for sectional — bg aggregation thread owns total_score
                     attempt_id = session.get("attempt_id")
                     if attempt_id:
                         pa = db.query(PracticeAttempt).filter_by(id=attempt_id).first()
-                        if pa:
+                        if pa and pa.question_type != "sectional":
                             pa.questions_answered = len(session["submitted_questions"])
                             pa.total_score = session["score"]
                     db.commit()
