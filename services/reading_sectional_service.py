@@ -1,22 +1,18 @@
 """
 Reading Sectional Service
 =========================
-Selects questions for the reading sectional exam (5 task types, 15 questions),
+Selects questions for the reading sectional exam (8 task types, 17 questions),
 stores the session, and handles weighted scoring at finish.
 
-Task types (web variant — uses web question_type names):
-  reading_fib         — 5 questions
-  reading_mcs         — 2 questions
-  reading_mcm         — 2 questions
-  reorder_paragraphs  — 2 questions
-  reading_fib_drop_down — 4 questions
-
-Scoring weights (from PTE weightage table, normalised to the types present):
-  reading_fib:          25%   (FIB Reading & Writing)
-  reading_fib_drop_down: 20%  (FIB Reading drag-and-drop)
-  reorder_paragraphs:    9%
-  reading_mcm:           5%
-  reading_mcs:           3%
+Task types in APEuni Part II order:
+  summarize_written_text   — 1 question  (module: writing)
+  reading_fib_drop_down    — 5 questions (module: reading)
+  mcq_multiple             — 2 questions (module: reading)
+  reorder_paragraphs       — 2 questions (module: reading)
+  reading_fib              — 4 questions (module: reading)
+  mcq_single               — 2 questions (module: reading)
+  hcs                      — 2 questions (module: listening)
+  highlight_incorrect_words — 1 question (module: listening)
 
 PTE formula (CLAUDE.md guardrail):
   pte_score = max(10, min(90, round(10 + weighted_pct * 80)))
@@ -33,31 +29,44 @@ from sqlalchemy.orm import Session, joinedload
 
 from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt
 from services.session_service import ACTIVE_SESSIONS
+from services.s3_service import generate_presigned_url
 import core.config as config
+
+_AUDIO_TASKS = {"hcs", "highlight_incorrect_words"}
 
 # ─── Sectional structure ──────────────────────────────────────────────────────
 READING_STRUCTURE = [
-    {"task": "reading_fib_drop_down", "count": 9, "module": "reading"},
-    {"task": "mcq_single",            "count": 2, "module": "reading"},
-    {"task": "mcq_multiple",          "count": 2, "module": "reading"},
-    {"task": "reorder_paragraphs",    "count": 2, "module": "reading"},
+    {"task": "summarize_written_text",    "count": 1, "module": "writing"},
+    {"task": "reading_fib_drop_down",     "count": 5, "module": "reading"},
+    {"task": "mcq_multiple",              "count": 2, "module": "reading"},
+    {"task": "reorder_paragraphs",        "count": 2, "module": "reading"},
+    {"task": "reading_fib",               "count": 4, "module": "reading"},
+    {"task": "mcq_single",                "count": 2, "module": "reading"},
+    {"task": "hcs",                       "count": 2, "module": "listening"},
+    {"task": "highlight_incorrect_words", "count": 1, "module": "listening"},
 ]
 
 _READING_WEIGHTS = {
-    "reading_fib_drop_down": 45,
-    "reorder_paragraphs":     9,
-    "mcq_multiple":           5,
-    "mcq_single":             3,
+    "summarize_written_text":    10,
+    "reading_fib_drop_down":     22,
+    "mcq_multiple":               5,
+    "reorder_paragraphs":         9,
+    "reading_fib":               13,
+    "mcq_single":                 3,
+    "hcs":                        5,
+    "highlight_incorrect_words":  9,
 }
 
 _DISPLAY_NAMES = {
-    "reading_fib_drop_down": "Fill in the Blanks",
-    "mcq_single":            "Multiple Choice (Single)",
-    "mcq_multiple":          "Multiple Choice (Multiple)",
-    "reorder_paragraphs":    "Re-order Paragraphs",
+    "summarize_written_text":    "Summarize Written Text",
+    "reading_fib_drop_down":     "Fill in the Blanks (Dropdown)",
+    "mcq_multiple":              "Multiple Choice (Multiple)",
+    "reorder_paragraphs":        "Re-order Paragraphs",
+    "reading_fib":               "Fill in the Blanks",
+    "mcq_single":                "Multiple Choice (Single)",
+    "hcs":                       "Highlight Correct Summary",
+    "highlight_incorrect_words": "Highlight Incorrect Words",
 }
-
-_SWT_MAX = 10
 
 
 def _display_name(task_type: str) -> str:
@@ -67,32 +76,44 @@ def _display_name(task_type: str) -> str:
 def _question_max(q) -> int:
     """Return max achievable raw score for one question using rubric rules."""
     qt = q.question_type
+
+    if qt == "summarize_written_text":
+        return 1
+
     try:
         ev    = q.evaluation.evaluation_json
         rules = ev.get("scoringRules", {})
         ans   = ev.get("correctAnswers", {})
 
-        if qt == "reading_fib_drop_down":
+        if qt in ("reading_fib", "reading_fib_drop_down"):
             return len(ans) * rules.get("marksPerBlank", 1)
 
         if qt == "mcq_multiple":
             return len(ans.get("correctOptions", [])) * rules.get("marksPerCorrect", 1)
 
-        if qt == "mcq_single":
+        if qt in ("mcq_single", "hcs"):
             return rules.get("marksPerCorrect", 1)
 
         if qt == "reorder_paragraphs":
             seq = ans.get("correctSequence", [])
             return max(0, len(seq) - 1) * rules.get("marksPerAdjacentPair", 1)
 
+        if qt == "highlight_incorrect_words":
+            incorrect = ans.get("incorrectWordIndices", [])
+            return len(incorrect) if incorrect else 1
+
     except Exception:
         pass
 
     return {
-        "reading_fib_drop_down": 4,
-        "mcq_multiple":          2,
-        "mcq_single":            1,
-        "reorder_paragraphs":    3,
+        "summarize_written_text":    1,
+        "reading_fib_drop_down":     4,
+        "reading_fib":               4,
+        "mcq_multiple":              2,
+        "mcq_single":                1,
+        "reorder_paragraphs":        3,
+        "hcs":                       1,
+        "highlight_incorrect_words": 1,
     }.get(qt, 1)
 
 
@@ -120,7 +141,7 @@ def start_reading_sectional_exam(db: Session, user_id: int, test_number: int) ->
         for row in db.query(UserQuestionAttempt.question_id)
         .filter(
             UserQuestionAttempt.user_id == user_id,
-            UserQuestionAttempt.module  == "reading",
+            UserQuestionAttempt.module.in_(["reading", "writing", "listening"]),
         )
         .all()
     )
@@ -215,12 +236,20 @@ def start_reading_sectional_exam(db: Session, user_id: int, test_number: int) ->
 
     questions_payload = []
     for q in selected_qs:
-        questions_payload.append({
+        entry = {
             "question_id":  q.question_id,
             "task_type":    q.question_type,
             "content_json": q.content_json,
             "session_id":   session_id,
-        })
+        }
+        if q.question_type in _AUDIO_TASKS:
+            audio_url = (q.content_json or {}).get("audio_url", "")
+            if audio_url:
+                try:
+                    entry["presigned_url"] = generate_presigned_url(audio_url)
+                except Exception:
+                    entry["presigned_url"] = audio_url
+        questions_payload.append(entry)
 
     ACTIVE_SESSIONS[session_id] = {
         "user_id":              user_id,
@@ -301,13 +330,21 @@ def resume_reading_sectional_exam(session_id: str, user_id: int, db: Session) ->
         q = session["questions"].get(qid)
         if not q:
             continue
-        questions_payload.append({
+        entry = {
             "question_id":  q.question_id,
             "task_type":    q.question_type,
             "content_json": q.content_json,
             "session_id":   session_id,
             "is_submitted": qid in submitted,
-        })
+        }
+        if q.question_type in _AUDIO_TASKS:
+            audio_url = (q.content_json or {}).get("audio_url", "")
+            if audio_url:
+                try:
+                    entry["presigned_url"] = generate_presigned_url(audio_url)
+                except Exception:
+                    entry["presigned_url"] = audio_url
+        questions_payload.append(entry)
 
     print(
         f"[Reading Sectional] Resumed session={session_id} user={user_id} "

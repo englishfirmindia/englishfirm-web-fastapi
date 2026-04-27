@@ -51,14 +51,18 @@ _SCORER_ALIAS = {
 
 def _build_answer(question_type: str, payload: dict) -> dict:
     """Build the answer dict expected by each scorer, given the raw request payload."""
-    if question_type == "reading_fib_drop_down":
+    if question_type in ("reading_fib", "reading_fib_drop_down"):
         return {"user_answers": payload.get("user_answers", {})}
-    if question_type == "mcq_single":
+    if question_type in ("mcq_single", "hcs"):
         return {"selected_option": payload.get("selected_option", "")}
     if question_type == "mcq_multiple":
         return {"selected_options": payload.get("selected_options", [])}
     if question_type == "reorder_paragraphs":
         return {"user_sequence": payload.get("user_sequence", [])}
+    if question_type == "summarize_written_text":
+        return {"user_answer": payload.get("user_answer", "")}
+    if question_type == "highlight_incorrect_words":
+        return {"highlighted_indices": payload.get("highlighted_indices", [])}
     return {}
 
 
@@ -107,11 +111,12 @@ def submit_answer(
     question = session["questions"].get(question_id)
     if not question:
         raise HTTPException(status_code=404, detail="Question not found in session")
-    if not question.evaluation:
+    if not question.evaluation and question.question_type not in {"summarize_written_text"}:
         raise HTTPException(status_code=422, detail="Question has no evaluation data")
 
     answer = _build_answer(question.question_type, payload)
-    answer["evaluation_json"] = question.evaluation.evaluation_json
+    if question.evaluation:
+        answer["evaluation_json"] = question.evaluation.evaluation_json
 
     scorer = get_scorer(_SCORER_ALIAS.get(question.question_type, question.question_type))
     result = scorer.score(
