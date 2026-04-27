@@ -107,7 +107,18 @@ def start_session(
                 "question_type": q.question_type,
                 "difficulty_level": q.difficulty_level,
                 "time_limit_seconds": q.time_limit_seconds,
-                "content_json": q.content_json,
+                "content_json": {
+                    **(q.content_json or {}),
+                    **({
+                        "situation_text": (
+                            (q.evaluation.evaluation_json or {})
+                            .get("correctAnswers", {})
+                            .get("transcript", "")
+                        )
+                    } if q.evaluation and q.evaluation.evaluation_json and
+                         (q.evaluation.evaluation_json.get("correctAnswers", {}).get("transcript", ""))
+                      else {}),
+                },
             }
             for q in questions
         ],
