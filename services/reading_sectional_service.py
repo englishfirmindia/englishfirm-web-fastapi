@@ -30,7 +30,17 @@ from sqlalchemy.orm import Session, joinedload
 from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt
 from services.session_service import ACTIVE_SESSIONS
 from services.s3_service import generate_presigned_url
+from services.scoring.base import to_pte_score
 import core.config as config
+
+
+def _earned_pct_from_answer(score: int) -> float:
+    """Convert a stored pte_score (10–90) to a 0.0–1.0 fraction for weighted aggregation.
+
+    Mirrors listening/speaking sectional aggregation so per-Q contributions are
+    averaged uniformly across the three modules.
+    """
+    return max(0.0, (score - config.PTE_BASE) / config.PTE_SCALE)
 
 _AUDIO_TASKS = {"listening_hcs", "highlight_incorrect_words"}
 
@@ -443,33 +453,45 @@ def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict
             flush=True,
         )
 
-    # Build per-task buckets
+    # Per-task buckets — averaged per-Q pct (matches listening/speaking sectional).
+    # earned_raw/max_raw are kept for diagnostic display (mobile feedback page).
     task_buckets: dict = {}
     for qid, q in questions.items():
         t = q.question_type
         if t not in task_buckets:
-            task_buckets[t] = {"earned": 0.0, "max": 0.0, "total": 0, "answered": 0}
+            task_buckets[t] = {
+                "earned_pct_sum": 0.0,
+                "earned_raw":     0.0,
+                "max_raw":        0.0,
+                "total":          0,
+                "answered":       0,
+            }
 
         q_max = q_score_maxes.get(qid) or _question_max(q)
-        task_buckets[t]["max"]   += q_max
-        task_buckets[t]["total"] += 1
+        task_buckets[t]["max_raw"] += q_max
+        task_buckets[t]["total"]   += 1
 
         if qid in submitted:
             earned = q_scores.get(qid, 0)
-            task_buckets[t]["earned"]   += earned
-            task_buckets[t]["answered"] += 1
+            task_buckets[t]["earned_raw"] += earned
+            task_buckets[t]["answered"]   += 1
 
-    # Weighted aggregation
+            # Per-Q PTE → fraction, identical to listening/speaking aggregation.
+            raw_pct = (earned / q_max) if q_max > 0 else 0.0
+            pte = to_pte_score(raw_pct)
+            task_buckets[t]["earned_pct_sum"] += _earned_pct_from_answer(pte)
+
+    # Weighted aggregation: skipped Qs count toward `total` so skipping hurts;
+    # task types with zero Qs in the exam stay out of the bucket entirely.
     weighted_sum   = 0.0
     present_weight = 0
     task_breakdown: dict = {}
 
     for task_type, bucket in task_buckets.items():
-        weight   = _READING_WEIGHTS.get(task_type, 0)
-        q_max    = bucket["max"]
-        earned   = bucket["earned"]
+        weight = _READING_WEIGHTS.get(task_type, 0)
+        total  = bucket["total"]
 
-        task_pct     = (earned / q_max) if q_max > 0 else 0.0
+        task_pct     = (bucket["earned_pct_sum"] / total) if total > 0 else 0.0
         contribution = task_pct * weight
 
         weighted_sum   += contribution
@@ -477,10 +499,10 @@ def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict
 
         task_breakdown[task_type] = {
             "display_name":       _display_name(task_type),
-            "total_questions":    bucket["total"],
+            "total_questions":    total,
             "questions_answered": bucket["answered"],
-            "earned_raw":         round(earned, 2),
-            "max_raw":            round(q_max, 2),
+            "earned_raw":         round(bucket["earned_raw"], 2),
+            "max_raw":            round(bucket["max_raw"], 2),
             "task_pct":           round(task_pct * 100, 1),
             "reading_weight":     weight,
             "contribution":       round(contribution, 2),
