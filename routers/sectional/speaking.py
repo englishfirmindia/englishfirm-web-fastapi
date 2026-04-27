@@ -9,11 +9,11 @@ Endpoints:
   GET  /sectional/speaking/results/{sid}     → poll scoring status + final score
 """
 
-from fastapi import APIRouter, Depends, Body
+from fastapi import APIRouter, Depends, Body, HTTPException
 from sqlalchemy.orm import Session
 
 from db.database import get_db
-from db.models import User
+from db.models import User, PracticeAttempt
 from core.dependencies import get_current_user
 from services.session_service import ACTIVE_SESSIONS, persist_speaking_answer_pending
 from services.speaking_scorer import kick_off_scoring
@@ -40,6 +40,22 @@ def start_exam(
     current_user: User = Depends(get_current_user),
 ):
     test_number = int(payload.get("test_number", 1))
+    already_done = (
+        db.query(PracticeAttempt)
+        .filter(
+            PracticeAttempt.user_id == current_user.id,
+            PracticeAttempt.module == "speaking",
+            PracticeAttempt.question_type == "sectional",
+            PracticeAttempt.status == "complete",
+        )
+        .all()
+    )
+    for a in already_done:
+        if (a.task_breakdown or {}).get("test_number") == test_number:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Test {test_number} has already been completed and cannot be retaken.",
+            )
     return start_speaking_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
 
 
@@ -106,6 +122,37 @@ def get_results(
     current_user: User = Depends(get_current_user),
 ):
     return get_speaking_sectional_results(session_id=session_id, user_id=current_user.id, db=db)
+
+
+@router.get("/attempted-tests")
+def attempted_tests(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Returns completed speaking sectional tests with most-recent completion date."""
+    attempts = (
+        db.query(PracticeAttempt)
+        .filter(
+            PracticeAttempt.user_id == current_user.id,
+            PracticeAttempt.module == "speaking",
+            PracticeAttempt.question_type == "sectional",
+            PracticeAttempt.status == "complete",
+        )
+        .order_by(PracticeAttempt.completed_at.desc())
+        .all()
+    )
+    seen: dict[int, str] = {}
+    for a in attempts:
+        tb = a.task_breakdown or {}
+        tn = tb.get("test_number")
+        if isinstance(tn, int) and tn not in seen:
+            seen[tn] = a.completed_at.isoformat() if a.completed_at else None
+    return {
+        "attempted_tests": [
+            {"test_number": tn, "completed_at": dt}
+            for tn, dt in sorted(seen.items())
+        ]
+    }
 
 
 @router.get("/latest")
