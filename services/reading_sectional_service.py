@@ -32,7 +32,7 @@ from services.session_service import ACTIVE_SESSIONS
 from services.s3_service import generate_presigned_url
 import core.config as config
 
-_AUDIO_TASKS = {"hcs", "highlight_incorrect_words"}
+_AUDIO_TASKS = {"listening_hcs", "highlight_incorrect_words"}
 
 # ─── Sectional structure ──────────────────────────────────────────────────────
 READING_STRUCTURE = [
@@ -42,7 +42,7 @@ READING_STRUCTURE = [
     {"task": "reorder_paragraphs",        "count": 2, "module": "reading"},
     {"task": "reading_fib",               "count": 4, "module": "reading"},
     {"task": "mcq_single",                "count": 2, "module": "reading"},
-    {"task": "hcs",                       "count": 2, "module": "listening"},
+    {"task": "listening_hcs",             "count": 2, "module": "listening"},
     {"task": "highlight_incorrect_words", "count": 1, "module": "listening"},
 ]
 
@@ -53,7 +53,7 @@ _READING_WEIGHTS = {
     "reorder_paragraphs":         9,
     "reading_fib":               13,
     "mcq_single":                 3,
-    "hcs":                        5,
+    "listening_hcs":              5,
     "highlight_incorrect_words":  9,
 }
 
@@ -64,7 +64,7 @@ _DISPLAY_NAMES = {
     "reorder_paragraphs":        "Re-order Paragraphs",
     "reading_fib":               "Fill in the Blanks",
     "mcq_single":                "Multiple Choice (Single)",
-    "hcs":                       "Highlight Correct Summary",
+    "listening_hcs":             "Highlight Correct Summary",
     "highlight_incorrect_words": "Highlight Incorrect Words",
 }
 
@@ -91,7 +91,7 @@ def _question_max(q) -> int:
         if qt == "mcq_multiple":
             return len(ans.get("correctOptions", [])) * rules.get("marksPerCorrect", 1)
 
-        if qt in ("mcq_single", "hcs"):
+        if qt in ("mcq_single", "listening_hcs"):
             return rules.get("marksPerCorrect", 1)
 
         if qt == "reorder_paragraphs":
@@ -112,7 +112,7 @@ def _question_max(q) -> int:
         "mcq_multiple":              2,
         "mcq_single":                1,
         "reorder_paragraphs":        3,
-        "hcs":                       1,
+        "listening_hcs":             1,
         "highlight_incorrect_words": 1,
     }.get(qt, 1)
 

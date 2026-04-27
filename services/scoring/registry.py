@@ -47,7 +47,6 @@ _REGISTRY: Dict[str, ScoringStrategy] = {
     'listening_hiw': HIWScorer(),
 
     # ── Reading sectional cross-module aliases ─────────────────────────────
-    'hcs':                    MCQScorer(single=True),
     'highlight_incorrect_words': HIWScorer(),
 }
 

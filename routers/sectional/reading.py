@@ -53,7 +53,7 @@ def _build_answer(question_type: str, payload: dict) -> dict:
     """Build the answer dict expected by each scorer, given the raw request payload."""
     if question_type in ("reading_fib", "reading_fib_drop_down"):
         return {"user_answers": payload.get("user_answers", {})}
-    if question_type in ("mcq_single", "hcs"):
+    if question_type in ("mcq_single", "listening_hcs"):
         return {"selected_option": payload.get("selected_option", "")}
     if question_type == "mcq_multiple":
         return {"selected_options": payload.get("selected_options", [])}
