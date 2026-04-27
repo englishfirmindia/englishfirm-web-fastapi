@@ -62,7 +62,10 @@ def _build_answer(question_type: str, payload: dict) -> dict:
     if question_type == "summarize_written_text":
         return {"user_answer": payload.get("user_answer", "")}
     if question_type == "highlight_incorrect_words":
-        return {"highlighted_indices": payload.get("highlighted_indices", [])}
+        words = payload.get("highlighted_words")
+        if words is None:
+            words = payload.get("highlighted_indices", [])
+        return {"highlighted_words": words}
     return {}
 
 
@@ -104,7 +107,15 @@ def submit_answer(
 
     session = ACTIVE_SESSIONS.get(session_id)
     if not session:
-        raise HTTPException(status_code=400, detail="Session not found or expired")
+        # Resilience: rebuild minimal session from DB if backend was restarted
+        from services.reading_sectional_service import resume_reading_sectional_exam
+        try:
+            resume_reading_sectional_exam(session_id=session_id, user_id=current_user.id, db=db)
+        except HTTPException:
+            raise HTTPException(status_code=400, detail="Session not found or expired")
+        session = ACTIVE_SESSIONS.get(session_id)
+        if not session:
+            raise HTTPException(status_code=400, detail="Session not found or expired")
     if session.get("user_id") != current_user.id:
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -141,7 +152,12 @@ def submit_answer(
         ).first()
         if not existing:
             user_answer = {k: v for k, v in answer.items() if k != "evaluation_json"}
-            result_json = {**(result.breakdown or {}), "pte_score": result.pte_score, "maxScore": q_max}
+            result_json = {
+                **(result.breakdown or {}),
+                "pte_score":  result.pte_score,
+                "maxScore":   q_max,
+                "earned_raw": earned_raw,
+            }
             db.add(AttemptAnswer(
                 attempt_id          = attempt_id,
                 question_id         = question_id,

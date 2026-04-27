@@ -362,12 +362,14 @@ def resume_reading_sectional_exam(session_id: str, user_id: int, db: Session) ->
 
 def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict:
     """
-    Weighted scoring over the 5 reading task types.
+    Weighted scoring over the reading sectional task types.
     Formula: max(10, min(90, round(10 + normalised_pct * 80)))
+
+    Resilient to backend restarts — rebuilds session state from PracticeAttempt +
+    AttemptAnswer when in-memory ACTIVE_SESSIONS is missing the session.
     """
-    session_data = ACTIVE_SESSIONS.get(session_id)
-    if not session_data:
-        raise HTTPException(status_code=400, detail="Session not found or expired")
+    from db.models import AttemptAnswer
+    from services.scoring import get_scorer
 
     existing = db.query(PracticeAttempt).filter_by(session_id=session_id).first()
     if existing and existing.scoring_status == "complete":
@@ -378,10 +380,68 @@ def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict
             "reading_score":  existing.total_score,
         }
 
-    questions     = session_data.get("questions", {})
-    submitted     = session_data.get("submitted_questions", set())
-    q_scores      = session_data.get("question_scores", {})
-    q_score_maxes = session_data.get("question_score_maxes", {})
+    session_data = ACTIVE_SESSIONS.get(session_id)
+    if session_data:
+        questions     = session_data.get("questions", {})
+        submitted     = session_data.get("submitted_questions", set())
+        q_scores      = session_data.get("question_scores", {})
+        q_score_maxes = session_data.get("question_score_maxes", {})
+    else:
+        if not existing:
+            raise HTTPException(status_code=400, detail="Session not found or expired")
+        qid_order = existing.selected_question_ids or []
+        qs_list = (
+            db.query(QuestionFromApeuni)
+            .options(joinedload(QuestionFromApeuni.evaluation))
+            .filter(QuestionFromApeuni.question_id.in_(qid_order))
+            .all()
+        )
+        questions = {q.question_id: q for q in qs_list}
+        answers = db.query(AttemptAnswer).filter_by(attempt_id=existing.id).all()
+        submitted = {a.question_id for a in answers}
+        q_scores = {}
+        q_score_maxes = {}
+        for a in answers:
+            res = a.result_json or {}
+            q_max = res.get("maxScore") or (
+                _question_max(questions[a.question_id])
+                if a.question_id in questions else 1
+            )
+            earned_raw = res.get("earned_raw")
+            if earned_raw is None:
+                # Re-score for older AttemptAnswer rows that didn't store earned_raw
+                q_obj = questions.get(a.question_id)
+                if q_obj and q_obj.evaluation:
+                    try:
+                        scorer_name = q_obj.question_type
+                        if scorer_name == "mcq_single":
+                            scorer_name = "reading_mcs"
+                        elif scorer_name == "mcq_multiple":
+                            scorer_name = "reading_mcm"
+                        scorer = get_scorer(scorer_name)
+                        user_ans = dict(a.user_answer_json or {})
+                        user_ans["evaluation_json"] = q_obj.evaluation.evaluation_json
+                        result = scorer.score(
+                            question_id=a.question_id,
+                            session_id=session_id,
+                            answer=user_ans,
+                        )
+                        earned_raw = result.raw_score * q_max
+                    except Exception as e:
+                        print(
+                            f"[Reading Sectional] re-score failed q={a.question_id}: {e}",
+                            flush=True,
+                        )
+                        earned_raw = 0
+                else:
+                    earned_raw = 0
+            q_scores[a.question_id] = earned_raw
+            q_score_maxes[a.question_id] = q_max
+        print(
+            f"[Reading Sectional] Finish rebuilt session={session_id} from DB "
+            f"questions={len(questions)} submitted={len(submitted)}",
+            flush=True,
+        )
 
     # Build per-task buckets
     task_buckets: dict = {}
