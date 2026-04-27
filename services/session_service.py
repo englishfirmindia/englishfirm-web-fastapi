@@ -326,14 +326,15 @@ def update_speaking_score_in_db(
                     }
                     answer.scoring_status = "complete"
                     db.flush()
-                    # Recalculate attempt total_score as sum of all scored answers
+                    # For sectional attempts the background aggregation thread owns
+                    # total_score and scoring_status — skip the raw-sum accumulation
+                    # so the bg thread's weighted PTE score is never overwritten.
                     pa = db.query(PracticeAttempt).filter_by(id=answer.attempt_id).first()
-                    if pa:
+                    if pa and pa.question_type != "sectional":
                         total_score = db.query(func.sum(AttemptAnswer.score)).filter_by(
                             attempt_id=pa.id
                         ).scalar() or 0
                         pa.total_score = int(total_score)
-                        # Mark attempt complete once all answers are scored
                         pending_count = db.query(AttemptAnswer).filter_by(
                             attempt_id=pa.id, scoring_status="pending"
                         ).count()

@@ -162,25 +162,25 @@ def _run_scoring(
         store_score(user_id, question_id, {"scoring": "error", "error": str(e)})
         if "no speech recognised" in str(e).lower():
             logger.warning(
-                "[SCORER] user=%s question=%s type=%s no speech recognised — marking complete with floor score",
+                "[SCORER] user=%s question=%s type=%s no speech recognised",
                 user_id, question_id, question_type,
-            )
-            update_speaking_score_in_db(
-                user_id=user_id,
-                question_id=question_id,
-                content=0.0,
-                pronunciation=0.0,
-                fluency=0.0,
-                total=0,
-                transcript="",
-                word_scores=[],
             )
         else:
             logger.error(
-                "[SCORER ERROR] user=%s question=%s type=%s exception=%s: %s "
-                "— scoring_status remains pending",
+                "[SCORER ERROR] user=%s question=%s type=%s exception=%s: %s",
                 user_id, question_id, question_type, type(e).__name__, e,
             )
+        # Always mark AttemptAnswer complete so background aggregation is never blocked
+        update_speaking_score_in_db(
+            user_id=user_id,
+            question_id=question_id,
+            content=0.0,
+            pronunciation=0.0,
+            fluency=0.0,
+            total=0,
+            transcript="",
+            word_scores=[],
+        )
 
 
 def kick_off_scoring(
