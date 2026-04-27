@@ -143,16 +143,6 @@ def submit(
         for w in incorrect_words_raw
     ]
 
-    print(f"\n{'='*60}", flush=True)
-    print(f"[HIW] Q{question_id}", flush=True)
-    print(f"[HIW] content keys      : {list(content.keys())}", flush=True)
-    print(f"[HIW] words array len   : {len(words)}", flush=True)
-    print(f"[HIW] words[0:10]       : {words[:10]}", flush=True)
-    print(f"[HIW] payload indices   : {payload.get('highlighted_indices', [])}", flush=True)
-    print(f"[HIW] highlighted_words : {highlighted_words}", flush=True)
-    print(f"[HIW] incorrectWords DB : {incorrect_words_raw[:3]}{'...' if len(incorrect_words_raw)>3 else ''}", flush=True)
-    print(f"[HIW] incorrect_words   : {incorrect_words}", flush=True)
-
     scorer = get_scorer("listening_hiw")
     result = scorer.score(
         question_id=question_id,
@@ -175,14 +165,6 @@ def submit(
 
     incorrect_words_set = {_norm(w) for w in incorrect_words}
     incorrect_word_indices = [i for i, w in enumerate(words) if _norm(w) in incorrect_words_set]
-
-    print(f"[HIW] correct_clicks    : {correct_clicks}", flush=True)
-    print(f"[HIW] incorrect_clicks  : {incorrect_clicks}", flush=True)
-    print(f"[HIW] missed_words      : {missed_words}", flush=True)
-    print(f"[HIW] is_correct        : {is_correct}", flush=True)
-    print(f"[HIW] incorrect_indices : {incorrect_word_indices}", flush=True)
-    print(f"[HIW] pte_score         : {result.pte_score}", flush=True)
-    print(f"{'='*60}\n", flush=True)
 
     mark_submitted(session_id, question_id, result.pte_score)
     persist_answer_to_db(
