@@ -223,6 +223,7 @@ def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -
         status                = "pending",
         scoring_status        = "pending",
         selected_question_ids = [q.question_id for q in selected_qs],
+        task_breakdown        = {"test_number": test_number},
     )
     db.add(attempt)
     db.commit()
