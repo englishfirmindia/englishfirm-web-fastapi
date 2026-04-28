@@ -179,7 +179,11 @@ class AIScorer(ScoringStrategy):
                 from services.llm_content_scoring_service import score_swt_content
                 heuristic_content = min(4, max(1, wc // 10))
                 llm_content = score_swt_content(prompt, text)
-                earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
+                if llm_content == 0:
+                    # LLM judged content completely off-topic — floor to PTE 10
+                    earned = 0
+                else:
+                    earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
 
         elif self.task_type == 'we':
             earned, max_pts = _score_we_heuristic(text)
@@ -189,7 +193,11 @@ class AIScorer(ScoringStrategy):
                 from services.llm_content_scoring_service import score_we_content
                 heuristic_content = 3 if wc >= 200 else 2 if wc >= 120 else 1 if wc >= 60 else 0
                 llm_content = score_we_content(prompt, text)
-                earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
+                if llm_content == 0:
+                    # LLM judged content completely off-topic — floor to PTE 10
+                    earned = 0
+                else:
+                    earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
 
         else:  # sst
             sst = _score_sst_heuristic(text)
@@ -201,9 +209,15 @@ class AIScorer(ScoringStrategy):
                 from services.llm_content_scoring_service import score_sst_content
                 heuristic_content = sst['content']
                 llm_content = score_sst_content(prompt, text)
-                earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
-                sst['content'] = llm_content
-                sst['earned'] = earned
+                if llm_content == 0:
+                    # LLM judged content completely off-topic — floor to PTE 10
+                    earned = 0
+                    sst['content'] = 0
+                    sst['earned'] = 0
+                else:
+                    earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
+                    sst['content'] = llm_content
+                    sst['earned'] = earned
 
             pct = earned / max_pts if max_pts > 0 else 0.0
             return ScoringResult(
