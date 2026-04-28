@@ -28,7 +28,20 @@ from sqlalchemy.orm import Session, joinedload
 
 from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt
 from services.session_service import ACTIVE_SESSIONS
+from services.s3_service import generate_presigned_url
 import core.config as config
+
+
+def _maybe_presigned_url(q) -> Optional[str]:
+    """Return a presigned audio URL for SST/WFD, None otherwise."""
+    cj = q.content_json or {}
+    raw_audio = cj.get("audio_url") or cj.get("s3_key") or cj.get("audio_s3_key")
+    if not raw_audio:
+        return None
+    try:
+        return generate_presigned_url(raw_audio)
+    except Exception:
+        return None
 
 # ─── Sectional structure ──────────────────────────────────────────────────────
 WRITING_STRUCTURE = [
@@ -209,11 +222,12 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
     for q in selected_qs:
         timing = task_timing.get(q.question_type, {"time_seconds": 600})
         questions_payload.append({
-            "question_id":  q.question_id,
-            "task_type":    q.question_type,
-            "time_seconds": timing["time_seconds"],
-            "content_json": q.content_json,
-            "session_id":   session_id,
+            "question_id":   q.question_id,
+            "task_type":     q.question_type,
+            "time_seconds":  timing["time_seconds"],
+            "content_json":  q.content_json,
+            "presigned_url": _maybe_presigned_url(q),
+            "session_id":    session_id,
         })
 
     ACTIVE_SESSIONS[session_id] = {
@@ -299,12 +313,13 @@ def resume_writing_sectional_exam(session_id: str, user_id: int, db: Session) ->
             continue
         timing = task_timing.get(q.question_type, {"time_seconds": 600})
         questions_payload.append({
-            "question_id":  q.question_id,
-            "task_type":    q.question_type,
-            "time_seconds": timing["time_seconds"],
-            "content_json": q.content_json,
-            "session_id":   session_id,
-            "is_submitted": qid in submitted,
+            "question_id":   q.question_id,
+            "task_type":     q.question_type,
+            "time_seconds":  timing["time_seconds"],
+            "content_json":  q.content_json,
+            "presigned_url": _maybe_presigned_url(q),
+            "session_id":    session_id,
+            "is_submitted":  qid in submitted,
         })
 
     print(
