@@ -17,6 +17,28 @@ ACTIVE_SESSIONS: Dict[str, dict] = {}
 _SCORE_STORE: Dict[tuple, dict] = {}
 
 
+def _enrich_content_json(q) -> dict:
+    """Merge evaluation transcript into content_json under the right field.
+
+    For RTS, the transcript IS the situation prompt (must show before submit).
+    For everything else (DI / RL / SGD / ASQ), the transcript is the model
+    answer and is exposed as `sample_answer` so the UI can show it after submit.
+    """
+    base = dict(q.content_json or {})
+    if not (q.evaluation and q.evaluation.evaluation_json):
+        return base
+    transcript = (
+        q.evaluation.evaluation_json.get("correctAnswers", {}).get("transcript", "") or ""
+    )
+    if not transcript:
+        return base
+    if q.question_type == "ptea_respond_situation":
+        base.setdefault("situation_text", transcript)
+    else:
+        base.setdefault("sample_answer", transcript)
+    return base
+
+
 def start_session(
     db: Session,
     user_id: int,
@@ -107,18 +129,7 @@ def start_session(
                 "question_type": q.question_type,
                 "difficulty_level": q.difficulty_level,
                 "time_limit_seconds": q.time_limit_seconds,
-                "content_json": {
-                    **(q.content_json or {}),
-                    **({
-                        "situation_text": (
-                            (q.evaluation.evaluation_json or {})
-                            .get("correctAnswers", {})
-                            .get("transcript", "")
-                        )
-                    } if q.evaluation and q.evaluation.evaluation_json and
-                         (q.evaluation.evaluation_json.get("correctAnswers", {}).get("transcript", ""))
-                      else {}),
-                },
+                "content_json": _enrich_content_json(q),
             }
             for q in questions
         ],
