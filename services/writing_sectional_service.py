@@ -338,8 +338,9 @@ def resume_writing_sectional_exam(session_id: str, user_id: int, db: Session) ->
 
 def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict:
     """
-    Weighted scoring: SWT(50%) + WE(50%)
-    Scaled with PTE formula: max(10, min(90, round(10 + normalised_pct * 80)))
+    Weighted scoring across writing sectional task types.
+    task_pct = average of per-Q raw fractions (mirrors listening/reading/speaking).
+    final = max(10, min(90, round(10 + normalised_pct * 80)))
     """
     session_data = ACTIVE_SESSIONS.get(session_id)
     if not session_data:
@@ -359,21 +360,32 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
     q_scores      = session_data.get("question_scores", {})
     q_score_maxes = session_data.get("question_score_maxes", {})
 
-    # Build per-task buckets
+    # Build per-task buckets — mirrors the listening/reading/speaking pattern:
+    # task_pct is the average of per-Q raw fractions, so each question carries
+    # equal weight regardless of its rubric max. earned_raw/max_raw are kept
+    # for diagnostic display only.
     task_buckets: dict = {}
     for qid, q in questions.items():
         t = q.question_type
         if t not in task_buckets:
-            task_buckets[t] = {"earned": 0.0, "max": 0.0, "total": 0, "answered": 0}
+            task_buckets[t] = {
+                "earned_pct_sum": 0.0,
+                "earned_raw":     0.0,
+                "max_raw":        0.0,
+                "total":          0,
+                "answered":       0,
+            }
 
         q_max = q_score_maxes.get(qid) or _question_max(q)
-        task_buckets[t]["max"]   += q_max
-        task_buckets[t]["total"] += 1
+        task_buckets[t]["max_raw"] += q_max
+        task_buckets[t]["total"]   += 1
 
         if qid in submitted:
-            earned = q_scores.get(qid, 0)
-            task_buckets[t]["earned"]   += earned
-            task_buckets[t]["answered"] += 1
+            earned   = q_scores.get(qid, 0)
+            per_q_pct = (earned / q_max) if q_max > 0 else 0.0
+            task_buckets[t]["earned_pct_sum"] += per_q_pct
+            task_buckets[t]["earned_raw"]     += earned
+            task_buckets[t]["answered"]       += 1
 
     # Weighted aggregation
     weighted_sum   = 0.0
@@ -381,11 +393,10 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
     task_breakdown: dict = {}
 
     for task_type, bucket in task_buckets.items():
-        weight   = _WRITING_WEIGHTS.get(task_type, 0)
-        q_max    = bucket["max"]
-        earned   = bucket["earned"]
+        weight = _WRITING_WEIGHTS.get(task_type, 0)
+        total  = bucket["total"]
 
-        task_pct     = (earned / q_max) if q_max > 0 else 0.0
+        task_pct     = (bucket["earned_pct_sum"] / total) if total > 0 else 0.0
         contribution = task_pct * weight
 
         weighted_sum   += contribution
@@ -393,10 +404,10 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
 
         task_breakdown[task_type] = {
             "display_name":       _display_name(task_type),
-            "total_questions":    bucket["total"],
+            "total_questions":    total,
             "questions_answered": bucket["answered"],
-            "earned_raw":         round(earned, 2),
-            "max_raw":            round(q_max, 2),
+            "earned_raw":         round(bucket["earned_raw"], 2),
+            "max_raw":            round(bucket["max_raw"], 2),
             "task_pct":           round(task_pct * 100, 1),
             "writing_weight":     weight,
             "contribution":       round(contribution, 2),
