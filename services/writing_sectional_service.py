@@ -463,11 +463,31 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
 
 
 def get_writing_sectional_results(session_id: str, user_id: int, db: Session) -> dict:
+    from db.models import AttemptAnswer
     attempt = db.query(PracticeAttempt).filter_by(
         session_id=session_id, user_id=user_id
     ).first()
     if not attempt:
         return {"scoring_status": "not_found"}
+
+    answers = (
+        db.query(AttemptAnswer)
+        .filter_by(attempt_id=attempt.id)
+        .order_by(AttemptAnswer.submitted_at)
+        .all()
+    )
+    questions = [
+        {
+            "question_id":      a.question_id,
+            "question_type":    a.question_type,
+            "score":            a.score,
+            "result_json":      a.result_json or {},
+            "user_answer_json": a.user_answer_json or {},
+            "scoring_status":   a.scoring_status,
+        }
+        for a in answers
+    ]
+
     return {
         "attempt_id":         attempt.id,
         "session_id":         session_id,
@@ -477,4 +497,5 @@ def get_writing_sectional_results(session_id: str, user_id: int, db: Session) ->
         "total_questions":    attempt.total_questions,
         "questions_answered": attempt.questions_answered,
         "completed_at":       attempt.completed_at.isoformat() if attempt.completed_at else None,
+        "questions":          questions,
     }
