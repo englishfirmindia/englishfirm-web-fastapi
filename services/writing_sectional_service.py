@@ -1,15 +1,17 @@
 """
 Writing Sectional Service
 =========================
-Selects questions for the writing sectional exam (2 task types, 4 questions),
+Selects questions for the writing sectional exam (4 task types, 7 questions),
 stores the session, and handles weighted scoring at finish.
 
 Task types:
-  summarize_written_text (SWT) — 2 questions, 10 min each
-  write_essay             (WE)  — 2 questions, 20 min each
+  summarize_written_text (SWT) — 2 questions, 10 min each (per-Q timer)
+  write_essay             (WE)  — 1 question,  20 min     (per-Q timer)
+  summarize_spoken_text   (SST) — 1 question,  10 min     (per-Q timer)
+  listening_wfd           (WFD) — 3 questions, 60 s each  (shared block timer)
 
-Scoring weights (equal split):
-  SWT: 50%   WE: 50%
+Scoring weights (from RDS pte_question_weightage.writing_percent):
+  SWT: 28  WE: 31  SST: 18  WFD: 23
 
 PTE formula (CLAUDE.md guardrail):
   pte_score = max(10, min(90, round(10 + weighted_pct * 80)))
@@ -30,28 +32,42 @@ import core.config as config
 
 # ─── Sectional structure ──────────────────────────────────────────────────────
 WRITING_STRUCTURE = [
-    {"task": "summarize_written_text", "count": 2, "time_seconds": 600},
-    {"task": "write_essay",            "count": 1, "time_seconds": 1200},
+    {"task": "summarize_written_text", "count": 2, "time_seconds":  600, "module": "writing"},
+    {"task": "write_essay",            "count": 1, "time_seconds": 1200, "module": "writing"},
+    {"task": "summarize_spoken_text",  "count": 1, "time_seconds":  600, "module": "listening"},
+    {"task": "listening_wfd",          "count": 3, "time_seconds":   60, "module": "listening"},
 ]
 
 # Weights from RDS pte_question_weightage.writing_percent
 _WRITING_WEIGHTS = {
     "summarize_written_text": 28,
     "write_essay":            31,
+    "summarize_spoken_text":  18,
+    "listening_wfd":          23,
 }
 
 # Raw rubric max per question type
 _SWT_MAX = 10  # PTE SWT rubric max
 _WE_MAX  = 15  # PTE WE rubric max
+_SST_MAX = 10  # PTE SST rubric max
 
 _DISPLAY_NAMES = {
     "summarize_written_text": "Summarize Written Text",
     "write_essay":            "Write Essay",
+    "summarize_spoken_text":  "Summarize Spoken Text",
+    "listening_wfd":          "Write From Dictation",
 }
 
 
 def _display_name(task_type: str) -> str:
     return _DISPLAY_NAMES.get(task_type, task_type.replace("_", " ").title())
+
+
+def _wfd_max(q) -> int:
+    """WFD raw max = transcript word count."""
+    eval_json = (q.evaluation.evaluation_json if q.evaluation else {}) or {}
+    transcript = (eval_json.get("correctAnswers", {}) or {}).get("transcript", "") or ""
+    return max(1, len(transcript.split()))
 
 
 def _question_max(q) -> int:
@@ -60,6 +76,10 @@ def _question_max(q) -> int:
         return _SWT_MAX
     if qt == "write_essay":
         return _WE_MAX
+    if qt == "summarize_spoken_text":
+        return _SST_MAX
+    if qt == "listening_wfd":
+        return _wfd_max(q)
     return 1
 
 
@@ -91,7 +111,7 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
         for row in db.query(UserQuestionAttempt.question_id)
         .filter(
             UserQuestionAttempt.user_id == user_id,
-            UserQuestionAttempt.module  == "writing",
+            UserQuestionAttempt.module.in_(["writing", "listening"]),
         )
         .all()
     )
@@ -100,6 +120,7 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
 
     for task in WRITING_STRUCTURE:
         task_type = task["task"]
+        db_module = task["module"]
         count     = task["count"]
 
         opts  = [joinedload(QuestionFromApeuni.evaluation)]
@@ -107,7 +128,7 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
             db.query(QuestionFromApeuni)
             .options(*opts)
             .filter(
-                QuestionFromApeuni.module        == "writing",
+                QuestionFromApeuni.module        == db_module,
                 QuestionFromApeuni.question_type == task_type,
                 ~QuestionFromApeuni.question_id.in_(practiced_ids) if practiced_ids else True,
             )
@@ -124,7 +145,7 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
                 db.query(QuestionFromApeuni)
                 .options(*opts)
                 .filter(
-                    QuestionFromApeuni.module        == "writing",
+                    QuestionFromApeuni.module        == db_module,
                     QuestionFromApeuni.question_type == task_type,
                 )
                 .all()
@@ -148,7 +169,7 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
                 user_id=user_id,
                 question_id=q.question_id,
                 question_type=q.question_type,
-                module="writing",
+                module=q.module,
             ))
             seen.add(q.question_id)
     if new_attempts:
