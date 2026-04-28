@@ -18,23 +18,38 @@ _SCORE_STORE: Dict[tuple, dict] = {}
 
 
 def _enrich_content_json(q) -> dict:
-    """Merge evaluation transcript into content_json under the right field.
+    """Merge evaluation transcript / expected answer into content_json.
 
-    For RTS, the transcript IS the situation prompt (must show before submit).
-    For everything else (DI / RL / SGD / ASQ), the transcript is the model
-    answer and is exposed as `sample_answer` so the UI can show it after submit.
+    Per question type, `correctAnswers` stores the model answer in different
+    fields:
+      - RTS  → correctAnswers.transcript (the situation prompt itself; show
+               before submit, mapped to `situation_text`)
+      - DI / RL / SGD → correctAnswers.transcript (model answer; show after
+                        submit, mapped to `sample_answer`)
+      - ASQ  → correctAnswers.answer (single expected answer; show after
+               submit, mapped to `sample_answer`)
     """
     base = dict(q.content_json or {})
     if not (q.evaluation and q.evaluation.evaluation_json):
         return base
-    transcript = (
-        q.evaluation.evaluation_json.get("correctAnswers", {}).get("transcript", "") or ""
-    )
-    if not transcript:
-        return base
+    correct = q.evaluation.evaluation_json.get("correctAnswers", {}) or {}
+
     if q.question_type == "ptea_respond_situation":
-        base.setdefault("situation_text", transcript)
-    else:
+        transcript = correct.get("transcript", "") or ""
+        if transcript:
+            base.setdefault("situation_text", transcript)
+        return base
+
+    if q.question_type == "answer_short_question":
+        # ASQ stores the expected answer as a single string in `answer`;
+        # `acceptedVariants` lists alternatives but the canonical one is `answer`.
+        expected = correct.get("answer", "") or ""
+        if expected:
+            base.setdefault("sample_answer", expected)
+        return base
+
+    transcript = correct.get("transcript", "") or ""
+    if transcript:
         base.setdefault("sample_answer", transcript)
     return base
 

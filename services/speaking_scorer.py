@@ -142,6 +142,7 @@ def _run_scoring(
             "fluency":       fluency,
             "pronunciation": pronunciation,
             "total":         max(config.PTE_FLOOR, pte),
+            "transcript":    transcript,
             "word_scores":   word_scores,
             **extra,
         })
