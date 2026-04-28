@@ -175,7 +175,10 @@ class AIScorer(ScoringStrategy):
                 len([s for s in re.split(r'[.!?]+', text.strip()) if s.strip()]) == 1
                 and 5 <= wc <= 75
             )
-            if form_ok and prompt and text.strip():
+            if not form_ok:
+                # Form gate failed (wrong sentence count or word range) — floor to PTE 10
+                earned = 0
+            elif prompt and text.strip():
                 from services.llm_content_scoring_service import score_swt_content
                 heuristic_content = min(4, max(1, wc // 10))
                 llm_content = score_swt_content(prompt, text)
@@ -189,7 +192,10 @@ class AIScorer(ScoringStrategy):
             earned, max_pts = _score_we_heuristic(text)
             wc = len(text.split())
             form_ok = 120 <= wc <= 380
-            if form_ok and prompt and text.strip():
+            if not form_ok:
+                # Form gate failed (word count outside 120–380) — floor to PTE 10
+                earned = 0
+            elif prompt and text.strip():
                 from services.llm_content_scoring_service import score_we_content
                 heuristic_content = 3 if wc >= 200 else 2 if wc >= 120 else 1 if wc >= 60 else 0
                 llm_content = score_we_content(prompt, text)
@@ -205,7 +211,12 @@ class AIScorer(ScoringStrategy):
             max_pts = sst['max_pts']
             wc = sst['word_count']
             form_ok = 30 <= wc <= 90
-            if form_ok and prompt and text.strip():
+            if not form_ok:
+                # Form gate failed (word count outside 30–90) — floor to PTE 10
+                earned = 0
+                sst['content'] = 0
+                sst['earned'] = 0
+            elif prompt and text.strip():
                 from services.llm_content_scoring_service import score_sst_content
                 heuristic_content = sst['content']
                 llm_content = score_sst_content(prompt, text)
