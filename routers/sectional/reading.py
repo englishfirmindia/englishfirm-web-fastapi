@@ -51,7 +51,7 @@ _SCORER_ALIAS = {
 
 def _build_answer(question_type: str, payload: dict) -> dict:
     """Build the answer dict expected by each scorer, given the raw request payload."""
-    if question_type in ("reading_fib", "reading_fib_drop_down"):
+    if question_type in ("reading_fib", "reading_fib_drop_down", "reading_drag_and_drop"):
         return {"user_answers": payload.get("user_answers", {})}
     if question_type in ("mcq_single", "listening_hcs"):
         return {"selected_option": payload.get("selected_option", "")}

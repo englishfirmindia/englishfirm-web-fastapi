@@ -30,6 +30,7 @@ _REGISTRY: Dict[str, ScoringStrategy] = {
     'reading_mcm':           MCQScorer(single=False),
     'reading_fib':           FIBScorer(),
     'reading_fib_drop_down': FIBScorer(),
+    'reading_drag_and_drop': FIBScorer(),
     'reorder_paragraphs':    ReorderScorer(),
 
     # ── Writing — AI sync ─────────────────────────────────────────────────

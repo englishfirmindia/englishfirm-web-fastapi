@@ -48,6 +48,7 @@ _AUDIO_TASKS = {"listening_hcs", "highlight_incorrect_words"}
 READING_STRUCTURE = [
     {"task": "summarize_written_text",    "count": 1, "module": "writing"},
     {"task": "reading_fib_drop_down",     "count": 5, "module": "reading"},
+    {"task": "reading_drag_and_drop",     "count": 3, "module": "reading"},
     {"task": "mcq_multiple",              "count": 2, "module": "reading"},
     {"task": "reorder_paragraphs",        "count": 2, "module": "reading"},
     {"task": "reading_fib",               "count": 4, "module": "reading"},
@@ -59,6 +60,7 @@ READING_STRUCTURE = [
 _READING_WEIGHTS = {
     "summarize_written_text":    10,
     "reading_fib_drop_down":     22,
+    "reading_drag_and_drop":     13,
     "mcq_multiple":               5,
     "reorder_paragraphs":         9,
     "reading_fib":               13,
@@ -70,6 +72,7 @@ _READING_WEIGHTS = {
 _DISPLAY_NAMES = {
     "summarize_written_text":    "Summarize Written Text",
     "reading_fib_drop_down":     "Fill in the Blanks (Dropdown)",
+    "reading_drag_and_drop":     "Fill in the Blanks (Drag & Drop)",
     "mcq_multiple":              "Multiple Choice (Multiple)",
     "reorder_paragraphs":        "Re-order Paragraphs",
     "reading_fib":               "Fill in the Blanks",
@@ -95,7 +98,7 @@ def _question_max(q) -> int:
         rules = ev.get("scoringRules", {})
         ans   = ev.get("correctAnswers", {})
 
-        if qt in ("reading_fib", "reading_fib_drop_down"):
+        if qt in ("reading_fib", "reading_fib_drop_down", "reading_drag_and_drop"):
             return len(ans) * rules.get("marksPerBlank", 1)
 
         if qt == "mcq_multiple":
@@ -118,6 +121,7 @@ def _question_max(q) -> int:
     return {
         "summarize_written_text":    1,
         "reading_fib_drop_down":     4,
+        "reading_drag_and_drop":     4,
         "reading_fib":               4,
         "mcq_multiple":              2,
         "mcq_single":                1,
