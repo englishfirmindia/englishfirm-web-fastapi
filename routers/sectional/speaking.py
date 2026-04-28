@@ -112,7 +112,43 @@ def finish_exam(
     current_user: User = Depends(get_current_user),
 ):
     session_id = payload["session_id"]
-    return finish_speaking_sectional(session_id=session_id, user_id=current_user.id, db=db)
+
+    # Drain any locally-cached audio submissions before kicking off final scoring.
+    pending = payload.get("pending_submits") or []
+    pending_failed = []
+    for item in pending:
+        if not isinstance(item, dict):
+            continue
+        qid = item.get("question_id")
+        inner = item.get("payload") or {}
+        if qid is None:
+            continue
+        try:
+            submit_audio(
+                payload={
+                    **inner,
+                    "session_id": session_id,
+                    "question_id": qid,
+                },
+                current_user=current_user,
+            )
+        except Exception as e:
+            print(
+                f"[Speaking Sectional] pending_submit failed q={qid}: {e}",
+                flush=True,
+            )
+            pending_failed.append(
+                {"question_id": qid, "error": str(e)[:200]}
+            )
+
+    result = finish_speaking_sectional(
+        session_id=session_id, user_id=current_user.id, db=db
+    )
+    if pending_failed:
+        result["pending_questions"] = pending_failed
+        if result.get("scoring_status") == "complete":
+            result["scoring_status"] = "partial"
+    return result
 
 
 @router.get("/results/{session_id}")

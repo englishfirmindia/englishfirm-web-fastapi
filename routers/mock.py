@@ -94,7 +94,38 @@ def mock_finish(
     session_id = payload.get("session_id", "")
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id required")
-    return finish_mock_test(db=db, session_id=session_id, user_id=current_user.id)
+
+    # Drain locally-cached submits the client couldn't send mid-test.
+    pending = payload.get("pending_submits") or []
+    pending_failed = []
+    for item in pending:
+        if not isinstance(item, dict):
+            continue
+        qid = item.get("question_id")
+        inner = item.get("payload") or {}
+        if qid is None:
+            continue
+        try:
+            submit_mock_answer(
+                session_id=session_id,
+                question_id=int(qid),
+                payload={**inner, "session_id": session_id, "question_id": qid},
+            )
+        except Exception as e:
+            print(
+                f"[Mock] pending_submit failed q={qid}: {e}",
+                flush=True,
+            )
+            pending_failed.append(
+                {"question_id": qid, "error": str(e)[:200]}
+            )
+
+    result = finish_mock_test(db=db, session_id=session_id, user_id=current_user.id)
+    if pending_failed and isinstance(result, dict):
+        result["pending_questions"] = pending_failed
+        if result.get("scoring_status") == "complete":
+            result["scoring_status"] = "partial"
+    return result
 
 
 @router.get("/mock/results/{session_id}")
