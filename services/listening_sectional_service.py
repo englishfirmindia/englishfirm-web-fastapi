@@ -49,13 +49,13 @@ LISTENING_STRUCTURE = [
     {"task": "summarize_group_discussion", "count": 1, "module": "speaking", "time_seconds": 125, "prep_seconds": 3,  "rec_seconds": 120},
     {"task": "answer_short_question",      "count": 2, "module": "speaking", "time_seconds":  19, "prep_seconds": 0,  "rec_seconds": 5},
     # ── Pure listening tasks (sync scored) ────────────────────────────────────
-    {"task": "summarize_spoken_text",      "count": 2, "module": "listening", "time_seconds": 675, "prep_seconds": 0, "rec_seconds": 0},
+    {"task": "summarize_spoken_text",      "count": 1, "module": "listening", "time_seconds": 675, "prep_seconds": 0, "rec_seconds": 0},
     {"task": "listening_mcq_multiple",     "count": 2, "module": "listening", "time_seconds":  90, "prep_seconds": 0, "rec_seconds": 0},
-    {"task": "listening_fib",              "count": 3, "module": "listening", "time_seconds": 105, "prep_seconds": 0, "rec_seconds": 0},
+    {"task": "listening_fib",              "count": 2, "module": "listening", "time_seconds": 105, "prep_seconds": 0, "rec_seconds": 0},
     {"task": "listening_hcs",              "count": 2, "module": "listening", "time_seconds": 135, "prep_seconds": 0, "rec_seconds": 0},
-    {"task": "listening_smw",              "count": 2, "module": "listening", "time_seconds":  90, "prep_seconds": 0, "rec_seconds": 0},
+    {"task": "listening_smw",              "count": 1, "module": "listening", "time_seconds":  90, "prep_seconds": 0, "rec_seconds": 0},
     {"task": "highlight_incorrect_words",  "count": 2, "module": "listening", "time_seconds": 120, "prep_seconds": 0, "rec_seconds": 0},
-    {"task": "listening_mcq_single",       "count": 2, "module": "listening", "time_seconds":  90, "prep_seconds": 0, "rec_seconds": 0},
+    {"task": "listening_mcq_single",       "count": 1, "module": "listening", "time_seconds":  90, "prep_seconds": 0, "rec_seconds": 0},
     {"task": "listening_wfd",              "count": 3, "module": "listening", "time_seconds":  53, "prep_seconds": 0, "rec_seconds": 0},
 ]
 

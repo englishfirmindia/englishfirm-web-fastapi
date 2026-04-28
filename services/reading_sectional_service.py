@@ -47,26 +47,26 @@ _AUDIO_TASKS = {"listening_hcs", "highlight_incorrect_words"}
 # ─── Sectional structure ──────────────────────────────────────────────────────
 READING_STRUCTURE = [
     {"task": "summarize_written_text",    "count": 1, "module": "writing"},
-    {"task": "reading_fib_drop_down",     "count": 5, "module": "reading"},
-    {"task": "reading_drag_and_drop",     "count": 3, "module": "reading"},
-    {"task": "mcq_multiple",              "count": 2, "module": "reading"},
-    {"task": "reorder_paragraphs",        "count": 2, "module": "reading"},
+    {"task": "reading_fib_drop_down",     "count": 6, "module": "reading"},
+    {"task": "reading_drag_and_drop",     "count": 4, "module": "reading"},
+    {"task": "mcq_multiple",              "count": 3, "module": "reading"},
+    {"task": "reorder_paragraphs",        "count": 1, "module": "reading"},
     {"task": "reading_fib",               "count": 4, "module": "reading"},
     {"task": "mcq_single",                "count": 2, "module": "reading"},
     {"task": "listening_hcs",             "count": 2, "module": "listening"},
-    {"task": "highlight_incorrect_words", "count": 1, "module": "listening"},
+    {"task": "highlight_incorrect_words", "count": 2, "module": "listening"},
 ]
 
 _READING_WEIGHTS = {
-    "summarize_written_text":    10,
-    "reading_fib_drop_down":     22,
-    "reading_drag_and_drop":     13,
+    "summarize_written_text":    23,
+    "reading_fib_drop_down":     25,
+    "reading_drag_and_drop":     20,
     "mcq_multiple":               5,
     "reorder_paragraphs":         9,
     "reading_fib":               13,
     "mcq_single":                 3,
-    "listening_hcs":              5,
-    "highlight_incorrect_words":  9,
+    "listening_hcs":              3,
+    "highlight_incorrect_words": 13,
 }
 
 _DISPLAY_NAMES = {

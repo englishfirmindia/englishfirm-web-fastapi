@@ -31,12 +31,13 @@ import core.config as config
 # ─── Sectional structure ──────────────────────────────────────────────────────
 WRITING_STRUCTURE = [
     {"task": "summarize_written_text", "count": 2, "time_seconds": 600},
-    {"task": "write_essay",            "count": 2, "time_seconds": 1200},
+    {"task": "write_essay",            "count": 1, "time_seconds": 1200},
 ]
 
+# Weights from RDS pte_question_weightage.writing_percent
 _WRITING_WEIGHTS = {
-    "summarize_written_text": 50,
-    "write_essay":            50,
+    "summarize_written_text": 28,
+    "write_essay":            31,
 }
 
 # Raw rubric max per question type

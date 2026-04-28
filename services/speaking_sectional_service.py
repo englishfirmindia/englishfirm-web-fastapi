@@ -34,22 +34,23 @@ import core.config as config
 SPEAKING_STRUCTURE = [
     {"task": "read_aloud",                 "count": 6,  "prep_seconds": 35, "rec_seconds": 40},
     {"task": "repeat_sentence",            "count": 10, "prep_seconds": 0,  "rec_seconds": 15},
-    {"task": "describe_image",             "count": 3,  "prep_seconds": 25, "rec_seconds": 40},
-    {"task": "retell_lecture",             "count": 3,  "prep_seconds": 10, "rec_seconds": 40},
+    {"task": "describe_image",             "count": 5,  "prep_seconds": 25, "rec_seconds": 40},
+    {"task": "retell_lecture",             "count": 2,  "prep_seconds": 10, "rec_seconds": 40},
     {"task": "answer_short_question",      "count": 5,  "prep_seconds": 0,  "rec_seconds": 10},
-    {"task": "ptea_respond_situation",      "count": 3,  "prep_seconds": 0,  "rec_seconds": 40},
+    {"task": "ptea_respond_situation",      "count": 2,  "prep_seconds": 0,  "rec_seconds": 40},
     {"task": "summarize_group_discussion", "count": 2,  "prep_seconds": 10, "rec_seconds": 60},
 ]
 
-# Weights: speaking contributes equally across all task types (normalised at finish)
+# Weights from RDS pte_question_weightage.speaking_percent.
+# ASQ contributes only to listening per PTE rules (speaking_percent=NULL → 0).
 _SPEAKING_WEIGHTS = {
-    "read_aloud":                 20,
-    "repeat_sentence":            17,
-    "describe_image":             15,
+    "read_aloud":                  9,
+    "repeat_sentence":            16,
+    "describe_image":             31,
     "retell_lecture":             13,
-    "answer_short_question":       4,
-    "ptea_respond_situation":      15,
-    "summarize_group_discussion": 16,
+    "answer_short_question":       0,
+    "ptea_respond_situation":     13,
+    "summarize_group_discussion": 19,
 }
 
 _DISPLAY_NAMES = {
