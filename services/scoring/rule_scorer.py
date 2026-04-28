@@ -383,7 +383,7 @@ class HIWScorer(ScoringStrategy):
         evaluation_json: dict = answer.get('evaluation_json', {})
 
         incorrect_words = [
-            w.lower().strip()
+            (w['wrong'] if isinstance(w, dict) else w).lower().strip()
             for w in evaluation_json.get('correctAnswers', {}).get('incorrectWords', [])
         ]
         scoring_rules = evaluation_json.get('scoringRules', {})
