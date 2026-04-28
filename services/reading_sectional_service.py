@@ -375,14 +375,16 @@ def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict
     Weighted scoring over the reading sectional task types.
     Formula: max(10, min(90, round(10 + normalised_pct * 80)))
 
-    Resilient to backend restarts — rebuilds session state from PracticeAttempt +
-    AttemptAnswer when in-memory ACTIVE_SESSIONS is missing the session.
+    Reads entirely from RDS (PracticeAttempt + AttemptAnswer + QuestionFromApeuni)
+    so aggregation matches listening/speaking sectional and survives backend
+    restarts. Per-Q PTE comes from `attempt_answers.score`, written at submit time.
     """
     from db.models import AttemptAnswer
-    from services.scoring import get_scorer
 
     existing = db.query(PracticeAttempt).filter_by(session_id=session_id).first()
-    if existing and existing.scoring_status == "complete":
+    if not existing:
+        raise HTTPException(status_code=400, detail="Session not found or expired")
+    if existing.scoring_status == "complete":
         return {
             "attempt_id":     existing.id,
             "session_id":     session_id,
@@ -390,73 +392,30 @@ def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict
             "reading_score":  existing.total_score,
         }
 
-    session_data = ACTIVE_SESSIONS.get(session_id)
-    if session_data:
-        questions     = session_data.get("questions", {})
-        submitted     = session_data.get("submitted_questions", set())
-        q_scores      = session_data.get("question_scores", {})
-        q_score_maxes = session_data.get("question_score_maxes", {})
-    else:
-        if not existing:
-            raise HTTPException(status_code=400, detail="Session not found or expired")
-        qid_order = existing.selected_question_ids or []
-        qs_list = (
-            db.query(QuestionFromApeuni)
-            .options(joinedload(QuestionFromApeuni.evaluation))
-            .filter(QuestionFromApeuni.question_id.in_(qid_order))
-            .all()
-        )
-        questions = {q.question_id: q for q in qs_list}
-        answers = db.query(AttemptAnswer).filter_by(attempt_id=existing.id).all()
-        submitted = {a.question_id for a in answers}
-        q_scores = {}
-        q_score_maxes = {}
-        for a in answers:
-            res = a.result_json or {}
-            q_max = res.get("maxScore") or (
-                _question_max(questions[a.question_id])
-                if a.question_id in questions else 1
-            )
-            earned_raw = res.get("earned_raw")
-            if earned_raw is None:
-                # Re-score for older AttemptAnswer rows that didn't store earned_raw
-                q_obj = questions.get(a.question_id)
-                if q_obj and q_obj.evaluation:
-                    try:
-                        scorer_name = q_obj.question_type
-                        if scorer_name == "mcq_single":
-                            scorer_name = "reading_mcs"
-                        elif scorer_name == "mcq_multiple":
-                            scorer_name = "reading_mcm"
-                        scorer = get_scorer(scorer_name)
-                        user_ans = dict(a.user_answer_json or {})
-                        user_ans["evaluation_json"] = q_obj.evaluation.evaluation_json
-                        result = scorer.score(
-                            question_id=a.question_id,
-                            session_id=session_id,
-                            answer=user_ans,
-                        )
-                        earned_raw = result.raw_score * q_max
-                    except Exception as e:
-                        print(
-                            f"[Reading Sectional] re-score failed q={a.question_id}: {e}",
-                            flush=True,
-                        )
-                        earned_raw = 0
-                else:
-                    earned_raw = 0
-            q_scores[a.question_id] = earned_raw
-            q_score_maxes[a.question_id] = q_max
-        print(
-            f"[Reading Sectional] Finish rebuilt session={session_id} from DB "
-            f"questions={len(questions)} submitted={len(submitted)}",
-            flush=True,
-        )
+    qid_order = existing.selected_question_ids or []
+    if not qid_order:
+        raise HTTPException(status_code=400, detail="Reading attempt has no stored questions")
 
-    # Per-task buckets — averaged per-Q pct (matches listening/speaking sectional).
-    # earned_raw/max_raw are kept for diagnostic display (mobile feedback page).
+    # 1. Question metadata — needed for type lookup and `max_raw` on unanswered Qs.
+    qs_rows = (
+        db.query(QuestionFromApeuni)
+        .options(joinedload(QuestionFromApeuni.evaluation))
+        .filter(QuestionFromApeuni.question_id.in_(qid_order))
+        .all()
+    )
+    questions = {q.question_id: q for q in qs_rows}
+
+    # 2. Per-Q PTE comes from attempt_answers.score — same source as listening/speaking.
+    answered_rows = db.query(AttemptAnswer).filter_by(attempt_id=existing.id).all()
+    answered_by_qid = {row.question_id: row for row in answered_rows}
+
+    # 3. Per-task buckets — averaged per-Q pct, identical pattern to listening/speaking.
+    # earned_raw/max_raw are kept for diagnostic display (mobile feedback page) only.
     task_buckets: dict = {}
-    for qid, q in questions.items():
+    for qid in qid_order:
+        q = questions.get(qid)
+        if not q:
+            continue  # question deleted from DB — skip
         t = q.question_type
         if t not in task_buckets:
             task_buckets[t] = {
@@ -467,19 +426,17 @@ def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict
                 "answered":       0,
             }
 
-        q_max = q_score_maxes.get(qid) or _question_max(q)
+        row = answered_by_qid.get(qid)
+        res = (row.result_json or {}) if row else {}
+        q_max = res.get("maxScore") or _question_max(q)
+
         task_buckets[t]["max_raw"] += q_max
         task_buckets[t]["total"]   += 1
 
-        if qid in submitted:
-            earned = q_scores.get(qid, 0)
-            task_buckets[t]["earned_raw"] += earned
-            task_buckets[t]["answered"]   += 1
-
-            # Per-Q PTE → fraction, identical to listening/speaking aggregation.
-            raw_pct = (earned / q_max) if q_max > 0 else 0.0
-            pte = to_pte_score(raw_pct)
-            task_buckets[t]["earned_pct_sum"] += _earned_pct_from_answer(pte)
+        if row:
+            task_buckets[t]["earned_raw"]     += res.get("earned_raw", 0)
+            task_buckets[t]["answered"]       += 1
+            task_buckets[t]["earned_pct_sum"] += _earned_pct_from_answer(row.score or 0)
 
     # Weighted aggregation: skipped Qs count toward `total` so skipping hurts;
     # task types with zero Qs in the exam stay out of the bucket entirely.
@@ -514,41 +471,24 @@ def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict
         min(config.PTE_CEILING, round(config.PTE_BASE + normalised_pct * config.PTE_SCALE)),
     )
 
-    if existing:
-        existing.total_score        = scaled
-        existing.questions_answered = len(submitted)
-        existing.status             = "complete"
-        existing.scoring_status     = "complete"
-        existing.task_breakdown     = task_breakdown
-        existing.completed_at       = datetime.now(timezone.utc)
-        attempt = existing
-    else:
-        attempt = PracticeAttempt(
-            user_id            = user_id,
-            session_id         = session_id,
-            module             = "reading",
-            question_type      = "sectional",
-            filter_type        = "sectional",
-            total_questions    = len(questions),
-            total_score        = scaled,
-            questions_answered = len(submitted),
-            status             = "complete",
-            scoring_status     = "complete",
-            task_breakdown     = task_breakdown,
-            completed_at       = datetime.now(timezone.utc),
-        )
-        db.add(attempt)
+    existing.total_score        = scaled
+    existing.questions_answered = len(answered_by_qid)
+    existing.status             = "complete"
+    existing.scoring_status     = "complete"
+    existing.task_breakdown     = task_breakdown
+    existing.completed_at       = datetime.now(timezone.utc)
     db.commit()
-    db.refresh(attempt)
+    db.refresh(existing)
 
     print(
         f"[Reading Sectional] Finished session={session_id} score={scaled} "
-        f"answered={len(submitted)}/{len(questions)}",
+        f"norm_pct={round(normalised_pct * 100, 1)}% "
+        f"answered={len(answered_by_qid)}/{len(qid_order)}",
         flush=True,
     )
 
     return {
-        "attempt_id":     attempt.id,
+        "attempt_id":     existing.id,
         "session_id":     session_id,
         "scoring_status": "complete",
         "reading_score":  scaled,
