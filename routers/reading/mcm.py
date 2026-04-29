@@ -131,11 +131,6 @@ def submit(
         },
     )
     mark_submitted(session_id, question_id, result.pte_score, question_type="reading_mcm")
-    persist_answer_to_db(
-        session=session, question_id=question_id, question_type="reading_mcm",
-        user_answer_json={"selected_options": list(selected_options or [])},
-        correct_answer_json={}, result_json=result.breakdown or {}, score=result.pte_score,
-    )
 
     eval_json = question.evaluation.evaluation_json or {}
     correct_answers = eval_json.get("correctAnswers", {}) or {}
@@ -144,7 +139,7 @@ def submit(
     is_correct = set(selected_option_ids) == set(correct_option_ids)
     total_score = session.get("score", 0)
 
-    return {
+    response = {
         "pte_score": result.pte_score,
         "is_async": result.is_async,
         "breakdown": result.breakdown,
@@ -160,3 +155,12 @@ def submit(
         "isCorrect": is_correct,
         "scoreForQuestion": result.pte_score,
     }
+
+    persist_answer_to_db(
+        session=session, question_id=question_id, question_type="reading_mcm",
+        user_answer_json={"selected_options": selected_option_ids},
+        correct_answer_json={"correctOptions": correct_option_ids},
+        result_json=response, score=result.pte_score,
+    )
+
+    return response

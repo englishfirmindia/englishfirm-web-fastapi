@@ -135,17 +135,11 @@ def submit(
 
     breakdown = result.breakdown or {}
     correct_option = breakdown.get("correct_option")
-    persist_answer_to_db(
-        session=session, question_id=question_id, question_type="reading_mcs",
-        user_answer_json={"selected_option": selected_option},
-        correct_answer_json={"correct_option": correct_option},
-        result_json=breakdown, score=result.pte_score,
-    )
     is_correct = bool(breakdown.get("is_correct", False))
     correct_option_ids = [correct_option] if correct_option is not None else []
     total_score = session.get("score", 0)
 
-    return {
+    response = {
         "pte_score": result.pte_score,
         "is_async": result.is_async,
         "breakdown": breakdown,
@@ -162,3 +156,12 @@ def submit(
         "isCorrect": is_correct,
         "scoreForQuestion": result.pte_score,
     }
+
+    persist_answer_to_db(
+        session=session, question_id=question_id, question_type="reading_mcs",
+        user_answer_json={"selected_option": selected_option},
+        correct_answer_json={"correct_option": correct_option},
+        result_json=response, score=result.pte_score,
+    )
+
+    return response
