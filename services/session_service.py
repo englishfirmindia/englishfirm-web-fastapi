@@ -151,11 +151,70 @@ def start_session(
     }
 
 
+class _LazyQuestionsDict(dict):
+    """Dict that lazy-loads QuestionFromApeuni rows from the DB on .get(qid).
+
+    Used when ACTIVE_SESSIONS is rebuilt after a backend reload — we don't
+    know which questions were originally selected for the practice session,
+    so we load them on demand as the user submits each one.
+    """
+    def get(self, key, default=None):  # type: ignore[override]
+        if key in self:
+            return self[key]
+        db = SessionLocal()
+        try:
+            from sqlalchemy.orm import joinedload as _joinedload
+            q = (
+                db.query(QuestionFromApeuni)
+                .options(_joinedload(QuestionFromApeuni.evaluation))
+                .filter(QuestionFromApeuni.question_id == key)
+                .first()
+            )
+            if q:
+                self[key] = q
+                return q
+        finally:
+            db.close()
+        return default
+
+
 def get_session(session_id: str) -> dict:
     session = ACTIVE_SESSIONS.get(session_id)
-    if not session:
-        raise HTTPException(status_code=400, detail="Invalid or expired session")
-    return session
+    if session:
+        return session
+
+    # Rebuild from DB — survives uvicorn --reload that wipes in-memory state.
+    db = SessionLocal()
+    try:
+        attempt = (
+            db.query(PracticeAttempt)
+            .filter_by(session_id=session_id)
+            .first()
+        )
+        if not attempt:
+            raise HTTPException(status_code=400, detail="Invalid or expired session")
+
+        submitted_qids = {
+            row[0] for row in
+            db.query(AttemptAnswer.question_id)
+              .filter_by(attempt_id=attempt.id)
+              .all()
+        }
+
+        rebuilt = {
+            "session_id": session_id,
+            "user_id": attempt.user_id,
+            "start_time": int(time.time()),
+            "questions": _LazyQuestionsDict(),
+            "score": attempt.total_score or 0,
+            "submitted_questions": submitted_qids,
+            "module": attempt.module,
+            "attempt_id": attempt.id,
+        }
+        ACTIVE_SESSIONS[session_id] = rebuilt
+        return rebuilt
+    finally:
+        db.close()
 
 
 def mark_submitted(session_id: str, question_id: int, score: int) -> None:
