@@ -394,7 +394,43 @@ def update_speaking_score_in_db(
 
 
 def get_score_from_store(user_id: int, question_id: int) -> Optional[dict]:
-    return _SCORE_STORE.get((user_id, question_id))
+    """Look up a speaking score; falls back to AttemptAnswer.result_json if the
+    in-memory store has been cleared (e.g. by a backend reload).
+    """
+    cached = _SCORE_STORE.get((user_id, question_id))
+    if cached:
+        return cached
+
+    db = SessionLocal()
+    try:
+        answer = (
+            db.query(AttemptAnswer)
+            .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
+            .filter(
+                PracticeAttempt.user_id == user_id,
+                AttemptAnswer.question_id == question_id,
+                AttemptAnswer.scoring_status == "complete",
+            )
+            .order_by(AttemptAnswer.submitted_at.desc())
+            .first()
+        )
+        if not answer or not answer.result_json:
+            return None
+        rj = answer.result_json
+        result = {
+            "scoring":       "complete",
+            "content":       rj.get("content", 0),
+            "fluency":       rj.get("fluency", 0),
+            "pronunciation": rj.get("pronunciation", 0),
+            "total":         rj.get("total", answer.score),
+            "transcript":    rj.get("transcript", ""),
+            "word_scores":   rj.get("word_scores", []),
+        }
+        # Repopulate in-memory store so subsequent polls don't re-hit the DB
+        _SCORE_STORE[(user_id, question_id)] = result
+        return result
+    finally:
+        db.close()
 
 
 def store_score(user_id: int, question_id: int, result: dict) -> None:
