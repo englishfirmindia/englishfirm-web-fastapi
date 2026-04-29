@@ -105,6 +105,9 @@ def get_attempts_history(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from sqlalchemy import func as _func
+    from db.models import TrainerNote, TrainerShare
+
     attempts = (
         db.query(PracticeAttempt)
         .filter(
@@ -115,6 +118,33 @@ def get_attempts_history(
         .limit(50)
         .all()
     )
+    attempt_ids = [a.id for a in attempts]
+
+    # Per-attempt counts in two cheap aggregates (no n+1).
+    notes_by_attempt: dict = {}
+    shares_by_attempt: dict = {}
+    if attempt_ids:
+        for aid, cnt in (
+            db.query(TrainerNote.attempt_id, _func.count(TrainerNote.id))
+            .filter(
+                TrainerNote.attempt_id.in_(attempt_ids),
+                TrainerNote.deleted_at.is_(None),
+            )
+            .group_by(TrainerNote.attempt_id)
+            .all()
+        ):
+            notes_by_attempt[aid] = cnt
+        for aid, cnt in (
+            db.query(TrainerShare.attempt_id, _func.count(TrainerShare.id))
+            .filter(
+                TrainerShare.attempt_id.in_(attempt_ids),
+                TrainerShare.revoked_at.is_(None),
+            )
+            .group_by(TrainerShare.attempt_id)
+            .all()
+        ):
+            shares_by_attempt[aid] = cnt
+
     return [
         {
             "id": a.id,
@@ -130,6 +160,8 @@ def get_attempts_history(
             "task_breakdown": a.task_breakdown,
             "started_at": a.started_at.isoformat() if a.started_at else None,
             "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+            "notes_count": notes_by_attempt.get(a.id, 0),
+            "active_shares_count": shares_by_attempt.get(a.id, 0),
         }
         for a in attempts
     ]
