@@ -407,3 +407,38 @@ async def chat_stream(
             "Connection":        "keep-alive",
         },
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# History endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/history")
+async def chat_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.user_id == current_user.id,
+            Conversation.status == "active",
+        )
+        .first()
+    )
+    if conversation is None:
+        return {"messages": []}
+
+    messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id)
+        .order_by(Message.id.asc())
+        .limit(50)
+        .all()
+    )
+    return {
+        "messages": [
+            {"role": m.role, "content": m.content}
+            for m in messages
+        ]
+    }
