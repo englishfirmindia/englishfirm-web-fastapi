@@ -4,6 +4,7 @@ Downloads audio from S3, runs Azure scoring, applies rubric weights + PTE formul
 Ported from englishfirm-app-fastapi/services/question_service.py _score_free_form_bg.
 """
 import logging
+import re
 import threading
 import requests as _requests
 
@@ -83,9 +84,18 @@ def _run_scoring(
             is_correct = False
             if expected_answers:
                 t_lower = transcript.lower().strip()
+                # Match each accepted variant as a whole phrase with word
+                # boundaries. Any variant match → correct. The DB-provided
+                # acceptedVariants list already covers article/phrasing
+                # alternatives ("diaper", "a diaper", "the diaper"), so we
+                # don't need to split the variant into per-word tokens —
+                # which would re-introduce false positives like "a sheep"
+                # matching "a banana" on the article alone.
                 for ans in expected_answers:
                     ans_lower = ans.lower().strip()
-                    if any(word in t_lower for word in ans_lower.split() if len(word) > 2):
+                    if not ans_lower:
+                        continue
+                    if re.search(rf'\b{re.escape(ans_lower)}\b', t_lower):
                         is_correct = True
                         break
             content = 100.0 if is_correct else 0.0
@@ -158,6 +168,12 @@ def _run_scoring(
         )
         print(f"[SCORER] q={question_id} type={question_type} content={content:.1f} "
               f"fluency={fluency} pronunciation={pronunciation} pte={pte}", flush=True)
+        if question_type == "answer_short_question":
+            print(f"[ASQ] q={question_id} "
+                  f"user_said={transcript!r} "
+                  f"expected={expected_answers!r} "
+                  f"is_correct={extra.get('is_correct')} "
+                  f"pte={pte}", flush=True)
 
     except Exception as e:
         store_score(user_id, question_id, {"scoring": "error", "error": str(e)})
