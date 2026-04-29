@@ -395,10 +395,17 @@ def update_speaking_score_in_db(
 
 def get_score_from_store(user_id: int, question_id: int) -> Optional[dict]:
     """Look up a speaking score; falls back to AttemptAnswer.result_json if the
-    in-memory store has been cleared (e.g. by a backend reload).
+    in-memory store has been cleared (e.g. by a backend reload) or the cached
+    entry is stale (missing fields added after the entry was cached).
     """
     cached = _SCORE_STORE.get((user_id, question_id))
-    if cached:
+    # Treat completed-but-missing-transcript cache entries as stale — they were
+    # written by an older code path before transcript was included.
+    cache_is_fresh = (
+        cached is not None
+        and (cached.get("scoring") != "complete" or "transcript" in cached)
+    )
+    if cache_is_fresh:
         return cached
 
     db = SessionLocal()
