@@ -432,13 +432,13 @@ async def chat_history(
     messages = (
         db.query(Message)
         .filter(Message.conversation_id == conversation.id)
-        .order_by(Message.id.asc())
+        .order_by(Message.id.desc())
         .limit(50)
         .all()
     )
     return {
         "messages": [
             {"role": m.role, "content": m.content}
-            for m in messages
+            for m in reversed(messages)
         ]
     }
