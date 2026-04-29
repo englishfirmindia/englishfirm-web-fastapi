@@ -27,7 +27,7 @@ def list_questions(
 ):
     query = db.query(QuestionFromApeuni).filter(
         QuestionFromApeuni.module == "reading",
-        QuestionFromApeuni.question_type == "reading_fib",
+        QuestionFromApeuni.question_type == "reading_drag_and_drop",
     )
     if difficulty is not None:
         query = query.filter(QuestionFromApeuni.difficulty_level == difficulty)
@@ -100,7 +100,7 @@ def start(
         db=db,
         user_id=current_user.id,
         module="reading",
-        question_type="reading_fib",
+        question_type="reading_drag_and_drop",
         difficulty_level=payload.get("difficulty_level"),
         question_id=int(raw_qid) if raw_qid is not None else None,
     )
@@ -125,7 +125,7 @@ def submit(
     if not question or not question.evaluation:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    scorer = get_scorer("reading_fib")
+    scorer = get_scorer("reading_drag_and_drop")
     result = scorer.score(
         question_id=question_id,
         session_id=session_id,
@@ -136,7 +136,7 @@ def submit(
     )
     mark_submitted(session_id, question_id, result.pte_score)
     persist_answer_to_db(
-        session=session, question_id=question_id, question_type="reading_fib",
+        session=session, question_id=question_id, question_type="reading_drag_and_drop",
         user_answer_json={"user_answers": user_answers},
         correct_answer_json={}, result_json=result.breakdown or {}, score=result.pte_score,
     )
