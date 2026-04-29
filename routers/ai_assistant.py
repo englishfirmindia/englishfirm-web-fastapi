@@ -249,7 +249,14 @@ async def chat_stream(
         content=request.message,
     )
     db.add(user_message)
-    db.flush()
+    # Commit the user's message *before* invoking the LLM. This way the
+    # row survives even if the client disconnects mid-stream (Cmd-Tab
+    # away, Chrome freezes the tab, network blip), so the next history
+    # fetch already includes the question and the UI can rebuild
+    # correctly. The assistant message is committed separately at the
+    # end of the stream.
+    db.commit()
+    db.refresh(user_message)
     t = ms("db:conversation+user_msg", t0)
 
     trainer_profile = get_trainer_profile(current_user.id, db)
