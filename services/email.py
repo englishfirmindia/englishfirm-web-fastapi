@@ -62,11 +62,16 @@ def send_trainer_otp(to: str, code: str, expires_in_minutes: int) -> None:
     send_email(to, subject, body)
 
 
-def send_trainer_share_received(to: str, student_name: str, test_label: str) -> None:
+def send_trainer_share_received(
+    to: str, student_name: str, test_label: str, share_id: int
+) -> None:
     subject = f"{student_name} shared a {test_label} test with you"
+    next_path = f"/trainer/shared/{share_id}"
+    link = f"{config.FRONTEND_URL.rstrip('/')}/trainer/login?next={next_path}"
     body = (
-        f"{student_name} just shared a {test_label} test with you on EnglishFirm.\n"
-        f"Sign in to view it: open the trainer login page and enter your email.\n"
+        f"{student_name} just shared a {test_label} test with you on EnglishFirm.\n\n"
+        f"Open the test: {link}\n\n"
+        f"You'll be asked to enter your email to receive a one-time sign-in code.\n"
     )
     send_email(to, subject, body)
 

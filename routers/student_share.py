@@ -171,6 +171,7 @@ def share_attempt(
         to=trainer.email,
         student_name=current_user.username or current_user.email,
         test_label=_test_label_for_attempt(attempt),
+        share_id=share.id,
     )
 
     return {"share": _serialize_share(share, trainer), "already_shared": False}

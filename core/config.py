@@ -46,3 +46,7 @@ USER_JWT_AUDIENCE = "user"
 # ── Email delivery ────────────────────────────────────────────────────────────
 EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@englishfirm.local")
 EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL", "")  # optional Zapier/etc.
+
+# ── Frontend (used to build links inside outbound emails) ─────────────────────
+# Override in production with the deployed web app URL, e.g. https://app.englishfirm.com
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080")
