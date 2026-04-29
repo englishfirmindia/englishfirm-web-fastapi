@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Body, HTTPException
 from sqlalchemy.orm import Session
 
 from db.database import get_db
-from db.models import User, AttemptAnswer
+from db.models import User, AttemptAnswer, PracticeAttempt
 from core.dependencies import get_current_user
 from services.session_service import ACTIVE_SESSIONS
 from services.scoring import get_scorer
@@ -75,6 +75,22 @@ def start_exam(
     current_user: User = Depends(get_current_user),
 ):
     test_number = int(payload.get("test_number", 1))
+    already_done = (
+        db.query(PracticeAttempt)
+        .filter(
+            PracticeAttempt.user_id == current_user.id,
+            PracticeAttempt.module == "writing",
+            PracticeAttempt.question_type == "sectional",
+            PracticeAttempt.status == "complete",
+        )
+        .all()
+    )
+    for a in already_done:
+        if (a.task_breakdown or {}).get("test_number") == test_number:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Test {test_number} has already been completed and cannot be retaken.",
+            )
     return start_writing_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
 
 
@@ -217,4 +233,35 @@ def latest(
         "attempt_id": attempt.id,
         "scoring_status": attempt.scoring_status or "pending",
         "writing_score": attempt.total_score,
+    }
+
+
+@router.get("/attempted-tests")
+def attempted_tests(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Returns completed writing sectional tests with most-recent completion date."""
+    attempts = (
+        db.query(PracticeAttempt)
+        .filter(
+            PracticeAttempt.user_id == current_user.id,
+            PracticeAttempt.module == "writing",
+            PracticeAttempt.question_type == "sectional",
+            PracticeAttempt.status == "complete",
+        )
+        .order_by(PracticeAttempt.completed_at.desc())
+        .all()
+    )
+    seen: dict[int, str] = {}
+    for a in attempts:
+        tb = a.task_breakdown or {}
+        tn = tb.get("test_number")
+        if isinstance(tn, int) and tn not in seen:
+            seen[tn] = a.completed_at.isoformat() if a.completed_at else None
+    return {
+        "attempted_tests": [
+            {"test_number": tn, "completed_at": dt}
+            for tn, dt in sorted(seen.items())
+        ]
     }
