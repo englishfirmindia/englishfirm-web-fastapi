@@ -13,6 +13,7 @@ from routers.user import router as user_router
 from routers.milestones import router as milestones_router
 from routers.ai_assistant import router as ai_router
 from routers.reports import router as reports_router
+from routers.trainer.auth import router as trainer_auth_router
 
 app = FastAPI(title="EnglishFirm Web API", version="1.0.0")
 
@@ -30,6 +31,7 @@ app.include_router(user_router, prefix="/api/v1")
 app.include_router(milestones_router, prefix="/api/v1")
 app.include_router(ai_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
+app.include_router(trainer_auth_router, prefix="/api/v1")
 
 app.add_middleware(
     CORSMiddleware,

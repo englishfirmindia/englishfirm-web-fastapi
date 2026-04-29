@@ -29,3 +29,20 @@ PTE_FLOOR = 10
 PTE_CEILING = 90
 PTE_BASE = 10
 PTE_SCALE = 80
+
+# ── Trainer (OTP login + sharing) ─────────────────────────────────────────────
+TRAINER_OTP_LENGTH = 6
+TRAINER_OTP_EXPIRY_MINUTES = 10
+TRAINER_OTP_MAX_ATTEMPTS = 5
+TRAINER_OTP_RATE_LIMIT_PER_HOUR = 5
+TRAINER_JWT_EXPIRY_HOURS = 24
+TRAINER_AUDIO_PRESIGN_TTL_SECONDS = 259_200  # 3 days
+
+# Trainer-side audience claim — keeps the same JWT_SECRET_KEY but isolates
+# trainer tokens from student tokens via the `aud` field.
+TRAINER_JWT_AUDIENCE = "trainer"
+USER_JWT_AUDIENCE = "user"
+
+# ── Email delivery ────────────────────────────────────────────────────────────
+EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@englishfirm.local")
+EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL", "")  # optional Zapier/etc.
