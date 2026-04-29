@@ -201,12 +201,13 @@ def get_mock_info(db: Session) -> dict:
 
 def start_mock_test(db: Session, user_id: int, test_number: int = 1) -> dict:
     """Pick 65 questions (one set per task/section), create single PracticeAttempt."""
+    # Exclude questions already SUBMITTED (attempt_answers row); merely-shown
+    # but unanswered questions stay in the pool.
     practiced_ids = set(
-        row[0] for row in db.query(UserQuestionAttempt.question_id)
-        .filter(
-            UserQuestionAttempt.user_id == user_id,
-            UserQuestionAttempt.module.in_(["speaking", "writing", "reading", "listening"]),
-        ).all()
+        row[0] for row in db.query(AttemptAnswer.question_id)
+        .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
+        .filter(PracticeAttempt.user_id == user_id)
+        .all()
     ) if test_number != 0 else set()
 
     structure = _apply_mock_counts(db)
@@ -263,20 +264,8 @@ def start_mock_test(db: Session, user_id: int, test_number: int = 1) -> dict:
     if not selected:
         raise HTTPException(status_code=404, detail="No questions available for mock test")
 
-    # Mark as practiced
-    if test_number != 0:
-        seen = practiced_ids.copy()
-        new_attempts = []
-        for q in selected:
-            if q.question_id not in seen:
-                new_attempts.append(UserQuestionAttempt(
-                    user_id=user_id, question_id=q.question_id,
-                    question_type=q.question_type, module=q.module,
-                ))
-                seen.add(q.question_id)
-        if new_attempts:
-            db.add_all(new_attempts)
-            db.commit()
+    # Note: pool filter uses attempt_answers (submitted only), so we no longer
+    # pre-mark selected questions in user_question_attempts on session start.
 
     session_id = str(uuid.uuid4())
     attempt = PracticeAttempt(

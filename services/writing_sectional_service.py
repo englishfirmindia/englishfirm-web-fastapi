@@ -119,13 +119,14 @@ def get_writing_sectional_info() -> dict:
 
 def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) -> dict:
     """Select questions, create session + PracticeAttempt, return question list."""
+    # Exclude questions already SUBMITTED (attempt_answers row); merely-shown
+    # but unanswered questions stay in the pool.
+    from db.models import AttemptAnswer as _AA
     practiced_ids = set(
         row[0]
-        for row in db.query(UserQuestionAttempt.question_id)
-        .filter(
-            UserQuestionAttempt.user_id == user_id,
-            UserQuestionAttempt.module.in_(["writing", "listening"]),
-        )
+        for row in db.query(_AA.question_id)
+        .join(PracticeAttempt, _AA.attempt_id == PracticeAttempt.id)
+        .filter(PracticeAttempt.user_id == user_id)
         .all()
     )
 
@@ -173,21 +174,8 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
     if not selected_qs:
         raise HTTPException(status_code=404, detail="No writing questions available")
 
-    # Mark as attempted
-    seen = practiced_ids.copy()
-    new_attempts = []
-    for q in selected_qs:
-        if q.question_id not in seen:
-            new_attempts.append(UserQuestionAttempt(
-                user_id=user_id,
-                question_id=q.question_id,
-                question_type=q.question_type,
-                module=q.module,
-            ))
-            seen.add(q.question_id)
-    if new_attempts:
-        db.add_all(new_attempts)
-        db.commit()
+    # Note: pool filter uses attempt_answers (submitted only), so we no longer
+    # pre-mark selected questions in user_question_attempts on session start.
 
     session_id = str(uuid.uuid4())
 

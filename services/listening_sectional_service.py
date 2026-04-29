@@ -179,13 +179,13 @@ def get_listening_sectional_info() -> dict:
 
 def start_listening_sectional_exam(db: Session, user_id: int, test_number: int) -> dict:
     """Select questions, create session, return question list with presigned audio URLs."""
+    # Exclude questions already SUBMITTED (attempt_answers row); merely-shown
+    # but unanswered questions stay in the pool.
     practiced_ids = set(
         row[0]
-        for row in db.query(UserQuestionAttempt.question_id)
-        .filter(
-            UserQuestionAttempt.user_id == user_id,
-            UserQuestionAttempt.module.in_(["listening", "speaking"]),
-        )
+        for row in db.query(AttemptAnswer.question_id)
+        .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
+        .filter(PracticeAttempt.user_id == user_id)
         .all()
     )
 
@@ -233,21 +233,8 @@ def start_listening_sectional_exam(db: Session, user_id: int, test_number: int) 
     if not selected_qs:
         raise HTTPException(status_code=404, detail="No listening questions available")
 
-    # Mark as attempted
-    seen = practiced_ids.copy()
-    new_attempts = []
-    for q in selected_qs:
-        if q.question_id not in seen:
-            new_attempts.append(UserQuestionAttempt(
-                user_id=user_id,
-                question_id=q.question_id,
-                question_type=q.question_type,
-                module=q.module,
-            ))
-            seen.add(q.question_id)
-    if new_attempts:
-        db.add_all(new_attempts)
-        db.commit()
+    # Note: pool filter uses attempt_answers (submitted only), so we no longer
+    # pre-mark selected questions in user_question_attempts on session start.
 
     session_id = str(uuid.uuid4())
     task_timing = {t["task"]: t for t in LISTENING_STRUCTURE}

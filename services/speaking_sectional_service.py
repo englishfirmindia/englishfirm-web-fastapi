@@ -94,14 +94,15 @@ def get_speaking_sectional_info() -> dict:
 
 def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -> dict:
     """Select questions, create session + PracticeAttempt, return question list."""
-    # Exclude questions the user has already practiced
+    # Exclude questions the user has already SUBMITTED (an attempt_answers row).
+    # Using user_question_attempts here would also exclude questions merely
+    # shown but never answered (e.g. abandoned sectionals), exhausting the
+    # pool too aggressively.
     practiced_ids = set(
         row[0]
-        for row in db.query(UserQuestionAttempt.question_id)
-        .filter(
-            UserQuestionAttempt.user_id == user_id,
-            UserQuestionAttempt.module  == "speaking",
-        )
+        for row in db.query(AttemptAnswer.question_id)
+        .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
+        .filter(PracticeAttempt.user_id == user_id)
         .all()
     )
 
@@ -147,21 +148,9 @@ def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -
     if not selected_qs:
         raise HTTPException(status_code=404, detail="No speaking questions available")
 
-    # Mark all selected questions as attempted (deduplication guard)
-    seen = practiced_ids.copy()
-    new_attempts = []
-    for q in selected_qs:
-        if q.question_id not in seen:
-            new_attempts.append(UserQuestionAttempt(
-                user_id=user_id,
-                question_id=q.question_id,
-                question_type=q.question_type,
-                module="speaking",
-            ))
-            seen.add(q.question_id)
-    if new_attempts:
-        db.add_all(new_attempts)
-        db.commit()
+    # Note: deliberately not pre-marking selected questions in
+    # user_question_attempts. Pool filtering uses attempt_answers (submitted
+    # only) instead, so unanswered selections don't pollute the table.
 
     # Build question payload with presigned URLs
     task_timing = {t["task"]: t for t in SPEAKING_STRUCTURE}
