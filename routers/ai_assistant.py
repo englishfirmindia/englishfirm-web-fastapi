@@ -343,9 +343,12 @@ async def chat_stream(
     username  = current_user.username
     msg_count = conversation.message_count
 
+    log.info("[STREAM] >>> REQUEST  user=%s  msg=%r", username, request.message[:80])
+
     async def event_generator():
         full_text    = ""
         first_chunk  = True
+        chunk_count  = 0
         try:
             async for chunk in stream_ai_reply(
                 db=db,
@@ -362,18 +365,24 @@ async def chat_stream(
             ):
                 if first_chunk:
                     first_chunk = False
-                    log.info("[TTFT] %-30s %6.0f ms  ← FIRST PACKET TO CLIENT",
-                             "FIRST_CHUNK", (time.perf_counter() - t0) * 1000)
-                full_text += chunk
+                    log.info("[STREAM] --- FIRST CHUNK sent  %.0f ms", (time.perf_counter() - t0) * 1000)
+                full_text  += chunk
+                chunk_count += 1
+                if chunk_count % 10 == 0:
+                    log.info("[STREAM] --- chunk #%d  total_chars=%d", chunk_count, len(full_text))
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
 
+            log.info("[STREAM] --- LLM done  chunks=%d  total_chars=%d  %.0f ms",
+                     chunk_count, len(full_text), (time.perf_counter() - t0) * 1000)
+
         except Exception as e:
-            log.error("[STREAM_EP] error: %s", e)
+            log.error("[STREAM] !!! LLM ERROR: %s", e)
             err = "Sorry, I'm having trouble right now. Please try again shortly."
             full_text = err
             yield f"data: {json.dumps({'chunk': err})}\n\n"
 
         try:
+            log.info("[STREAM] --- saving assistant message to DB (%d chars)", len(full_text))
             assistant_message = Message(
                 conversation_id=conv_id,
                 role="assistant",
@@ -383,6 +392,7 @@ async def chat_stream(
             conversation.message_count = msg_count + 2
             conversation.last_message_at = func.now()
             db.commit()
+            log.info("[STREAM] --- DB saved OK")
 
             asyncio.create_task(_run_summary_if_needed(
                 conversation_id=conv_id,
@@ -391,10 +401,9 @@ async def chat_stream(
                 message_count=conversation.message_count,
                 db=db,
             ))
-            log.info("[TTFT] %-30s %6.0f ms  ← stream complete",
-                     "TOTAL_STREAM", (time.perf_counter() - t0) * 1000)
+            log.info("[STREAM] <<< DONE  total=%.0f ms", (time.perf_counter() - t0) * 1000)
         except Exception as e:
-            log.error("[STREAM_EP] DB save failed: %s", e)
+            log.error("[STREAM] !!! DB save failed: %s", e)
 
         yield "data: [DONE]\n\n"
 
