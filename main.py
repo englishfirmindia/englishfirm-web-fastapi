@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +19,14 @@ from routers.trainer.app import router as trainer_app_router
 from routers.student_share import router as student_share_router
 
 app = FastAPI(title="EnglishFirm Web API", version="1.0.0")
+
+
+@app.on_event("startup")
+async def _startup_migrations():
+    from db.database import engine
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS title TEXT"))
+        conn.commit()
 
 
 @app.exception_handler(Exception)

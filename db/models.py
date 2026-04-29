@@ -51,6 +51,7 @@ class Conversation(Base):
 
     status = Column(String(20), nullable=False, default="active")
     pinned_summary = Column(Text, nullable=True)
+    title = Column(Text, nullable=True)
 
     message_count = Column(Integer, nullable=False, default=0)
 
