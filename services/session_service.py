@@ -217,7 +217,12 @@ def get_session(session_id: str) -> dict:
         db.close()
 
 
-def mark_submitted(session_id: str, question_id: int, score: int) -> None:
+def mark_submitted(
+    session_id: str,
+    question_id: int,
+    score: int,
+    question_type: Optional[str] = None,
+) -> None:
     session = get_session(session_id)
     session["submitted_questions"].add(question_id)
     session["score"] = session.get("score", 0) + score
@@ -231,7 +236,7 @@ def mark_submitted(session_id: str, question_id: int, score: int) -> None:
             try:
                 user_id = session.get("user_id")
                 module = session.get("module", "")
-                q_type = session.get("question_type", "")
+                q_type = question_type or session.get("question_type", "")
                 if user_id:
                     exists = db.query(UserQuestionAttempt).filter_by(
                         user_id=user_id, question_id=question_id

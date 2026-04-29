@@ -130,7 +130,7 @@ def submit(
             "evaluation_json": question.evaluation.evaluation_json,
         },
     )
-    mark_submitted(session_id, question_id, result.pte_score)
+    mark_submitted(session_id, question_id, result.pte_score, question_type="reading_mcm")
     persist_answer_to_db(
         session=session, question_id=question_id, question_type="reading_mcm",
         user_answer_json={"selected_options": list(selected_options or [])},
