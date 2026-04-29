@@ -22,7 +22,7 @@ JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRY_DAYS = 30
 
 # ── Session defaults ──────────────────────────────────────────────────────────
-SESSION_QUESTION_LIMIT = 100
+SESSION_QUESTION_LIMIT = 20
 
 # ── PTE Score formula — max(PTE_FLOOR, min(PTE_CEILING, round(PTE_BASE + pct * PTE_SCALE))) ──
 PTE_FLOOR = 10
