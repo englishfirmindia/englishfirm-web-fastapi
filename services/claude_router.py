@@ -186,6 +186,7 @@ TOOL GUARDRAILS (mandatory):
 - Call get_last_attempt_breakdown at most 1× per turn.
 - Call get_milestones at most 1× per turn.
 - Call get_attempt_detail at most 1× per turn, only when the student asks about specific question performance.
+- Call get_recent_task_answers at most 1× per turn. Use this if get_attempt_detail returns "No completed attempts found" but the student insists they have practiced — this tool also surfaces in-progress practice sessions and individual practice answers.
 - Call save_student_info at most 1× per turn, only when the student reveals new personal info.
 - Never call a tool to retrieve information already present in this system prompt.
 - Never guess or ask for the student's user_id — it is injected by the system.

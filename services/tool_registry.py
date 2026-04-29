@@ -42,6 +42,7 @@ TOOL_CALL_LIMITS: dict[str, int] = {
     "get_milestones":            1,
     "save_student_info":         1,
     "get_attempt_detail":        1,
+    "get_recent_task_answers":   1,
 }
 
 
@@ -156,6 +157,40 @@ TOOL_REGISTRY: dict[str, dict] = {
                     }
                 },
                 "required": ["question_type"],
+            },
+        },
+    },
+
+    "get_recent_task_answers": {
+        "schema": {
+            "name": "get_recent_task_answers",
+            "description": (
+                "Get the student's most recent per-question answers for a specific "
+                "task type, across ALL flows (practice, sectional, mock). Unlike "
+                "get_attempt_detail, this surfaces in-progress practice sessions and "
+                "individual practice answers — use this when the student asks to "
+                "justify or explain a recent score and get_attempt_detail returned "
+                "nothing. Each row includes 'context' (practice/sectional/mock) and "
+                "'module' so you can tell the student exactly where the answer came "
+                "from. Default limit 10, max 50."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "task_type": {
+                        "type": "string",
+                        "description": (
+                            "The PTE task type to look up. Use the same slugs as "
+                            "get_attempt_detail (e.g. summarize_group_discussion, "
+                            "answer_short_question, write_essay, listening_wfd)."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of recent answers to return (default 10, max 50).",
+                    },
+                },
+                "required": ["task_type"],
             },
         },
     },
@@ -345,6 +380,48 @@ def _handle_get_attempt_detail(args: dict, ctx: ToolContext) -> str:
         return "Attempt detail unavailable."
 
 
+def _handle_get_recent_task_answers(args: dict, ctx: ToolContext) -> str:
+    qt = str(args.get("task_type", "")).strip()
+    if not qt:
+        return "No task_type provided."
+    try:
+        limit = int(args.get("limit", 10))
+    except (TypeError, ValueError):
+        limit = 10
+    try:
+        from mcp_server.tools import get_recent_task_answers
+        rows = get_recent_task_answers(ctx.user_id, qt, ctx.db, limit=limit)
+        if not rows:
+            return f"No answers found for task type: {qt}"
+
+        lines = [f"Recent {qt} answers (latest first):"]
+        for i, r in enumerate(rows, 1):
+            ctx_label = r.get("context") or "?"
+            mod = r.get("module") or "—"
+            when = (r.get("submitted_at") or "")[:19]
+            parts = [
+                f"#{i} [{ctx_label}/{mod}]",
+                f"qid={r.get('question_id')}",
+                f"score={r.get('score')}",
+            ]
+            for key in ("content", "fluency", "pronunciation"):
+                if r.get(key) is not None:
+                    parts.append(f"{key}={r[key]}")
+            for key in ("hits", "total", "maxScore", "earned_raw"):
+                if r.get(key) is not None:
+                    parts.append(f"{key}={r[key]}")
+            if r.get("scoring_status") not in (None, "complete", "scored"):
+                parts.append(f"[{r['scoring_status']}]")
+            if when:
+                parts.append(f"at={when}")
+            parts.append(f"attempt_id={r.get('attempt_id')}")
+            lines.append("  " + "  ".join(parts))
+        return "\n".join(lines)[:_MAX_RESULT_CHARS]
+    except Exception as e:
+        log.warning("[TOOL] get_recent_task_answers error: %s", e)
+        return "Recent answers unavailable."
+
+
 def _handle_save_student_info(args: dict, ctx: ToolContext) -> str:
     # Validate and sanitise before writing
     clean: dict = {}
@@ -392,6 +469,7 @@ _HANDLERS: dict[str, Any] = {
     "get_last_attempt_breakdown": _handle_get_last_attempt_breakdown,
     "get_milestones":             _handle_get_milestones,
     "get_attempt_detail":         _handle_get_attempt_detail,
+    "get_recent_task_answers":    _handle_get_recent_task_answers,
     "save_student_info":          _handle_save_student_info,
 }
 

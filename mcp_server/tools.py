@@ -514,6 +514,70 @@ def get_attempt_detail(user_id: int, question_type: str, db: Session) -> Optiona
     return result_standalone or result_umbrella
 
 
+# ── Tool: get_recent_task_answers ────────────────────────────────────────────
+
+def get_recent_task_answers(
+    user_id: int,
+    task_type: str,
+    db: Session,
+    limit: int = 10,
+) -> list[dict]:
+    """
+    Return the student's most recent per-question answers for a given task
+    type, across ALL flows (practice, sectional, mock).
+
+    Unlike get_attempt_detail, this tool:
+      • does NOT filter on PracticeAttempt.status — includes 'active' /
+        in-progress sessions (long practice runs that never reach 'complete')
+      • does NOT filter on PracticeAttempt.filter_type — includes practice
+        AND sectional AND mock answers
+      • returns one row per AttemptAnswer (not per attempt)
+
+    Each row includes 'context' (practice / sectional / mock) and 'module'
+    so the coach can disambiguate which flow each answer came from.
+    """
+    from db.models import AttemptAnswer, PracticeAttempt
+
+    rows = (
+        db.query(AttemptAnswer, PracticeAttempt)
+        .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
+        .filter(
+            PracticeAttempt.user_id == user_id,
+            AttemptAnswer.question_type == task_type,
+        )
+        .order_by(AttemptAnswer.submitted_at.desc())
+        .limit(min(max(int(limit or 10), 1), 50))
+        .all()
+    )
+
+    out: list[dict] = []
+    for ans, pa in rows:
+        rj = ans.result_json or {}
+        entry: dict = {
+            "question_id":    ans.question_id,
+            "score":          ans.score,
+            "scoring_status": ans.scoring_status,
+            "submitted_at":   ans.submitted_at.isoformat() if ans.submitted_at else None,
+            "context":        pa.filter_type,   # practice | sectional | mock
+            "module":         pa.module,        # speaking | listening | reading | writing | None (mock)
+            "attempt_id":     pa.id,
+        }
+        # Surface the most useful per-Q breakdown fields if present
+        for key in ("pte_score", "content", "fluency", "pronunciation",
+                    "hits", "total", "maxScore", "earned_raw", "task_type"):
+            if rj.get(key) is not None:
+                entry[key] = rj[key]
+        # Per-Q content/fluency/pronunciation from typed columns, if not in result_json
+        if entry.get("content") is None and ans.content_score is not None:
+            entry["content"] = round(ans.content_score, 2)
+        if entry.get("fluency") is None and ans.fluency_score is not None:
+            entry["fluency"] = round(ans.fluency_score, 2)
+        if entry.get("pronunciation") is None and ans.pronunciation_score is not None:
+            entry["pronunciation"] = round(ans.pronunciation_score, 2)
+        out.append(entry)
+    return out
+
+
 # ── Tool: award_milestone ────────────────────────────────────────────────────
 
 # All supported milestone keys and their human-readable labels
