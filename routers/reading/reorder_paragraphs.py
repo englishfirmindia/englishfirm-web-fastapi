@@ -130,13 +130,6 @@ def submit(
             "evaluation_json": question.evaluation.evaluation_json,
         },
     )
-    mark_submitted(session_id, question_id, result.pte_score)
-    persist_answer_to_db(
-        session=session, question_id=question_id, question_type="reorder_paragraphs",
-        user_answer_json={"user_sequence": list(user_sequence or [])},
-        correct_answer_json={}, result_json=result.breakdown or {}, score=result.pte_score,
-    )
-
     eval_json = question.evaluation.evaluation_json or {}
     correct_answers = eval_json.get("correctAnswers", {}) or {}
     correct_sequence = list(correct_answers.get("correctSequence", []) or [])
@@ -145,6 +138,20 @@ def submit(
     pair_results = list(breakdown.get("pair_results", []) or [])
     is_correct = bool(pair_results) and all(pair_results)
     total_score = session.get("score", 0)
+
+    mark_submitted(session_id, question_id, result.pte_score)
+    persist_answer_to_db(
+        session=session, question_id=question_id, question_type="reorder_paragraphs",
+        user_answer_json={"user_sequence": list(user_sequence or [])},
+        correct_answer_json={"correct_sequence": correct_sequence},
+        result_json={
+            **breakdown,
+            "correct_sequence": correct_sequence,
+            "pair_results": pair_results,
+            "is_correct": is_correct,
+        },
+        score=result.pte_score,
+    )
 
     return {
         "pte_score": result.pte_score,
