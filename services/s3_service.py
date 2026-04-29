@@ -1,5 +1,6 @@
 import boto3
 import os
+from typing import Optional
 from dotenv import load_dotenv
 
 import core.config as config
@@ -16,10 +17,13 @@ def _get_s3_client():
     )
 
 
-def generate_presigned_url(s3_url: str) -> str:
+def generate_presigned_url(s3_url: str, expires_in: Optional[int] = None) -> str:
     """
     Converts a raw private S3 URL into a time-limited presigned URL.
     Raises ValueError if the URL is not a valid S3 URL.
+
+    `expires_in` overrides the default PRESIGNED_READ_EXPIRY_SECONDS — used
+    for trainer-side audio review where we want a longer-lived URL.
     """
     try:
         without_scheme = s3_url.replace("https://", "").replace("http://", "")
@@ -31,11 +35,12 @@ def generate_presigned_url(s3_url: str) -> str:
     if not bucket or not key:
         raise ValueError(f"Could not parse bucket/key from URL: {s3_url}")
 
+    ttl = expires_in if expires_in is not None else config.PRESIGNED_READ_EXPIRY_SECONDS
     client = _get_s3_client()
     return client.generate_presigned_url(
         "get_object",
         Params={"Bucket": bucket, "Key": key},
-        ExpiresIn=config.PRESIGNED_READ_EXPIRY_SECONDS,
+        ExpiresIn=ttl,
     )
 
 
