@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from passlib.context import CryptContext
-from jose import jwt
+from jose import jwt, jwk as jose_jwk
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import requests as _requests
@@ -29,6 +29,10 @@ class SignupRequest(BaseModel):
 
 class GoogleAuthRequest(BaseModel):
     id_token: str
+
+
+class AppleAuthRequest(BaseModel):
+    identity_token: str
 
 
 def _make_token(user_id: int) -> str:
@@ -115,6 +119,78 @@ def google_auth(req: GoogleAuthRequest, db: Session = Depends(get_db)):
             username=name,
             email=email,
             hashed_password=_pwd.hash(token_info.get("sub", "")),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    return {"access_token": _make_token(user.id), "token_type": "bearer"}
+
+
+@router.post("/apple")
+def apple_auth(req: AppleAuthRequest, db: Session = Depends(get_db)):
+    """
+    Verify an Apple identity_token (RS256, signed by Apple) and return a JWT.
+    Creates the user if they don't exist. Audience is whitelisted against
+    APPLE_ALLOWED_AUDIENCES so only our own iOS + web apps are accepted.
+    """
+    try:
+        keys_resp = _requests.get(
+            "https://appleid.apple.com/auth/keys", timeout=10
+        )
+        keys_resp.raise_for_status()
+        jwks = keys_resp.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Could not fetch Apple public keys: {exc}"
+        )
+
+    try:
+        unverified_header = jwt.get_unverified_header(req.identity_token)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=401, detail=f"Malformed Apple identity token: {exc}"
+        )
+
+    kid = unverified_header.get("kid")
+    matching_key = next(
+        (k for k in jwks.get("keys", []) if k.get("kid") == kid), None
+    )
+    if not matching_key:
+        raise HTTPException(status_code=401, detail="Apple signing key not found")
+
+    try:
+        public_key = jose_jwk.construct(matching_key)
+        # Decode without aud check; we'll whitelist explicitly below.
+        claims = jwt.decode(
+            req.identity_token,
+            public_key,
+            algorithms=["RS256"],
+            options={"verify_aud": False},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=401, detail=f"Invalid Apple identity token: {exc}"
+        )
+
+    aud = claims.get("aud")
+    if aud not in config.APPLE_ALLOWED_AUDIENCES:
+        raise HTTPException(
+            status_code=401, detail="Apple token audience not allowed"
+        )
+
+    email = claims.get("email")
+    if not email:
+        raise HTTPException(status_code=401, detail="Apple token missing email")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        name = email.split("@")[0]
+        # `sub` is Apple's stable user ID — fine as a placeholder password seed.
+        user = User(
+            username=name,
+            email=email,
+            hashed_password=_pwd.hash(claims.get("sub", "")),
         )
         db.add(user)
         db.commit()

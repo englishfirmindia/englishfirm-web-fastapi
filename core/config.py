@@ -50,3 +50,16 @@ EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL", "")  # optional Zapier/etc.
 # ── Frontend (used to build links inside outbound emails) ─────────────────────
 # Override in production with the deployed web app URL, e.g. https://app.englishfirm.com
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080")
+
+# ── Apple Sign-In ─────────────────────────────────────────────────────────────
+# Comma-separated list of allowed `aud` values inside Apple identity_tokens.
+# Should include the iOS bundle ID and the web Apple Services ID.
+# Example: "com.englishfirm.assistant,com.englishfirm.web"
+APPLE_ALLOWED_AUDIENCES = [
+    a.strip()
+    for a in os.getenv(
+        "APPLE_ALLOWED_AUDIENCES",
+        "com.englishfirm.assistant,com.englishfirm.web",
+    ).split(",")
+    if a.strip()
+]
