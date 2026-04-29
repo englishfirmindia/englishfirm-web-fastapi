@@ -387,3 +387,91 @@ class StudentMilestone(Base):
         # Each milestone awarded at most once per user
         __import__('sqlalchemy').UniqueConstraint("user_id", "milestone_key", name="uq_user_milestone"),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Human Trainer Sharing  (admin-managed whitelist + per-attempt shares + notes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Trainer(Base):
+    """
+    Admin-managed whitelist of human trainers.
+    Trainers do NOT appear in the `users` table — they authenticate by
+    email + OTP and receive a separate JWT (audience='trainer').
+    """
+    __tablename__ = "trainers"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    email        = Column(String(255), unique=True, index=True, nullable=False)
+    display_name = Column(String(120), nullable=False)
+    is_active    = Column(Boolean, nullable=False, default=True)
+    created_at   = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at   = Column(DateTime(timezone=True), nullable=True)
+
+
+class TrainerOtp(Base):
+    """
+    One-time codes for trainer login. New rows on every request-otp call;
+    older unconsumed rows for the same email are invalidated when a new
+    code is issued.
+    """
+    __tablename__ = "trainer_otps"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    email         = Column(String(255), nullable=False, index=True)
+    code          = Column(String(6), nullable=False)
+    expires_at    = Column(DateTime(timezone=True), nullable=False)
+    consumed_at   = Column(DateTime(timezone=True), nullable=True)
+    attempts_left = Column(Integer, nullable=False, default=5)
+    created_at    = Column(DateTime(timezone=True), server_default=func.now())
+    ip            = Column(String(45), nullable=True)
+    user_agent    = Column(Text, nullable=True)
+
+
+class TrainerShare(Base):
+    """
+    A student-initiated share of one specific PracticeAttempt with one
+    specific trainer. Re-sharing after revoke creates a new row; the old
+    revoked row stays for audit.
+    """
+    __tablename__ = "trainer_shares"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    attempt_id      = Column(Integer, ForeignKey("practice_attempts.id", ondelete="CASCADE"), nullable=False, index=True)
+    student_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    trainer_id      = Column(Integer, ForeignKey("trainers.id", ondelete="CASCADE"), nullable=False, index=True)
+    shared_at       = Column(DateTime(timezone=True), server_default=func.now())
+    revoked_at      = Column(DateTime(timezone=True), nullable=True)
+    first_viewed_at = Column(DateTime(timezone=True), nullable=True)
+    last_viewed_at  = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        # Only one ACTIVE share per (attempt, trainer); revoked rows excluded.
+        __import__('sqlalchemy').Index(
+            "ix_trainer_shares_active",
+            "attempt_id",
+            "trainer_id",
+            unique=True,
+            postgresql_where=__import__('sqlalchemy').text("revoked_at IS NULL"),
+        ),
+    )
+
+
+class TrainerNote(Base):
+    """
+    Notes left by a trainer on a shared attempt (or specific question
+    inside that attempt). Persists even if the share is revoked — student
+    keeps full visibility forever.
+    """
+    __tablename__ = "trainer_notes"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    share_id    = Column(Integer, ForeignKey("trainer_shares.id", ondelete="CASCADE"), nullable=False, index=True)
+    attempt_id  = Column(Integer, ForeignKey("practice_attempts.id", ondelete="CASCADE"), nullable=False, index=True)
+    question_id = Column(Integer, nullable=True, index=True)  # null = attempt-level note
+    trainer_id  = Column(Integer, ForeignKey("trainers.id", ondelete="CASCADE"), nullable=False, index=True)
+    body        = Column(Text, nullable=False)
+    rating      = Column(Integer, nullable=True)  # optional 1-5 rubric
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at  = Column(DateTime(timezone=True), nullable=True)
+    deleted_at  = Column(DateTime(timezone=True), nullable=True)
