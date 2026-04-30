@@ -76,6 +76,41 @@ Then answer their question.""",
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Prompt helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fmt_speaking_task_breakdowns(data: Optional[dict]) -> str:
+    if not data or not data.get("tasks"):
+        return ""
+
+    source = (data.get("source") or "").upper()
+    attempt_id = data.get("attempt_id")
+    completed = (data.get("completed_at") or "")[:10]
+    header = f"\nLATEST {source} — PER-QUESTION SPEAKING SCORES (attempt #{attempt_id}, {completed}):"
+    lines = [header]
+
+    for task_type, answers in data["tasks"].items():
+        title = task_type.replace("_", " ").title()
+        lines.append(f"  {title} ({len(answers)} questions):")
+        for ans in answers[:5]:
+            parts = [f"q{ans['q']}: score={ans.get('score')}"]
+            if ans.get("max_score") is not None:
+                parts.append(f"max={ans['max_score']}")
+            if ans.get("content") is not None:
+                parts.append(f"content={ans['content']}")
+            if ans.get("fluency") is not None:
+                parts.append(f"fluency={ans['fluency']}")
+            if ans.get("pronunciation") is not None:
+                parts.append(f"pron={ans['pronunciation']}")
+            if ans.get("pte_score") is not None:
+                parts.append(f"pte={ans['pte_score']}")
+            lines.append("    • " + ", ".join(parts))
+        if len(answers) > 5:
+            lines.append(f"    • ...({len(answers) - 5} more)")
+    return "\n".join(lines) + "\n"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # System prompt builder
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -140,6 +175,11 @@ def _build_system_prompt(
             + "\nBe encouraging if improved, constructive if dropped.\n"
         )
 
+    # ── Speaking per-question breakdown (latest mock/sectional) ───────────────
+    speaking_tasks_block = _fmt_speaking_task_breakdowns(
+        context.get("speaking_task_breakdowns")
+    )
+
     # ── Phase instruction ─────────────────────────────────────────────────────
     phase_block = _PHASE_INSTRUCTIONS.get(phase, _PHASE_INSTRUCTIONS["coaching"])
 
@@ -173,7 +213,7 @@ Exam history:
 
 Weak areas (from practice data, worst first):
 {weak_lines}
-{summary_block}{proactive_block}
+{speaking_tasks_block}{summary_block}{proactive_block}
 {phase_block}
 {gaps_block}
 KNOWLEDGE BASE RULES (mandatory — no exceptions):

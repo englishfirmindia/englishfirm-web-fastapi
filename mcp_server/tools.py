@@ -319,14 +319,15 @@ def build_rich_context(user, user_id: int, db: Session) -> dict:
     Calls all MCP tools in parallel and assembles a rich context dict.
     """
     try:
-        # Run the 5 independent DB queries in parallel threads
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        # Run the 6 independent DB queries in parallel threads
+        with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
-                executor.submit(get_user_profile,   user, db):            "profile",
-                executor.submit(get_recent_scores,  user_id, db, 3):      "recent",
-                executor.submit(get_weak_areas,     user_id, db):         "weak_areas",
-                executor.submit(get_exam_history,   user_id, db):         "history",
-                executor.submit(get_speaking_detail, user_id, db):        "speaking",
+                executor.submit(get_user_profile,             user, db):       "profile",
+                executor.submit(get_recent_scores,            user_id, db, 3): "recent",
+                executor.submit(get_weak_areas,               user_id, db):    "weak_areas",
+                executor.submit(get_exam_history,             user_id, db):    "history",
+                executor.submit(get_speaking_detail,          user_id, db):    "speaking",
+                executor.submit(get_speaking_task_breakdowns, user_id, db):    "speaking_tasks",
             }
             results = {}
             for future in as_completed(futures):
@@ -340,10 +341,11 @@ def build_rich_context(user, user_id: int, db: Session) -> dict:
         profile = results.get("profile") or {}
         return {
             **profile,
-            "recent_scores":   results.get("recent") or [],
-            "weak_areas":      results.get("weak_areas") or [],
-            "exam_history":    results.get("history") or [],
-            "speaking_detail": results.get("speaking"),
+            "recent_scores":            results.get("recent") or [],
+            "weak_areas":               results.get("weak_areas") or [],
+            "exam_history":             results.get("history") or [],
+            "speaking_detail":          results.get("speaking"),
+            "speaking_task_breakdowns": results.get("speaking_tasks"),
         }
 
     except Exception as e:
@@ -404,6 +406,87 @@ def get_last_attempt_breakdown(user_id: int, db: Session) -> dict:
         result[qt] = entry
 
     return result
+
+# ── Tool: get_speaking_task_breakdowns ───────────────────────────────────────
+
+SPEAKING_TASK_TYPES = [
+    "read_aloud",
+    "repeat_sentence",
+    "describe_image",
+    "retell_lecture",
+    "answer_short_question",
+    "summarize_group_discussion",
+    "respond_to_situation",
+]
+
+
+def get_speaking_task_breakdowns(user_id: int, db: Session) -> Optional[dict]:
+    """
+    For the user's most recent completed mock or sectional attempt, returns
+    per-question speaking scores grouped by task type. Eagerly fetched in
+    build_rich_context so the coach can answer "how was my Read Aloud?" type
+    questions without a tool call roundtrip.
+    """
+    from db.models import PracticeAttempt, AttemptAnswer
+
+    umbrella = (
+        db.query(PracticeAttempt)
+        .filter(
+            PracticeAttempt.user_id == user_id,
+            PracticeAttempt.question_type.in_(["mock", "sectional"]),
+            PracticeAttempt.status == "complete",
+        )
+        .order_by(PracticeAttempt.id.desc())
+        .first()
+    )
+
+    if not umbrella:
+        return None
+
+    answers = (
+        db.query(AttemptAnswer)
+        .filter(
+            AttemptAnswer.attempt_id == umbrella.id,
+            AttemptAnswer.question_type.in_(SPEAKING_TASK_TYPES),
+        )
+        .order_by(AttemptAnswer.id.asc())
+        .all()
+    )
+
+    if not answers:
+        return None
+
+    grouped: dict[str, list] = {}
+    counters: dict[str, int] = {}
+    for a in answers:
+        rj = a.result_json or {}
+        counters[a.question_type] = counters.get(a.question_type, 0) + 1
+        row: dict = {
+            "q":              counters[a.question_type],
+            "question_id":    a.question_id,
+            "score":          a.score,
+            "scoring_status": a.scoring_status,
+        }
+        if rj.get("pte_score") is not None:
+            row["pte_score"] = rj["pte_score"]
+        if a.content_score is not None:
+            row["content"] = round(a.content_score, 2)
+        if a.fluency_score is not None:
+            row["fluency"] = round(a.fluency_score, 2)
+        if a.pronunciation_score is not None:
+            row["pronunciation"] = round(a.pronunciation_score, 2)
+        if rj.get("maxScore") is not None:
+            row["max_score"] = rj["maxScore"]
+        grouped.setdefault(a.question_type, []).append(row)
+
+    return {
+        "attempt_id":   umbrella.id,
+        "source":       umbrella.question_type,
+        "completed_at": umbrella.completed_at.isoformat() if umbrella.completed_at else None,
+        "total_score":  umbrella.total_score,
+        "tasks":        grouped,
+    }
+
 
 # ── Tool: get_attempt_detail ──────────────────────────────────────────────────
 
