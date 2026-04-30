@@ -909,7 +909,7 @@ def _build_mock_score_args(task_type, payload, content_json, eval_json, question
     if task_type == "reading_drag_and_drop":
         raw = payload.get("user_answers", {})
         ua = {str(i + 1): v for i, v in enumerate(raw)} if isinstance(raw, list) else raw
-        return "reading_fib_drop_down", {"user_answers": ua, "evaluation_json": eval_json}, "reading_fib_drop_down", {"user_answers": ua}
+        return "reading_fib_drop_down", {"user_answers": ua, "evaluation_json": eval_json}, task_type, {"user_answers": ua}
 
     if task_type in ("mcq_single", "listening_mcq_single", "listening_hcs", "listening_smw"):
         ids = payload.get("selected_option_ids", [])
