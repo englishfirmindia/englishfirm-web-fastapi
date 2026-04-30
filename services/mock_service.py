@@ -583,7 +583,9 @@ def _resolve_score_max(a, max_pts_map: dict) -> tuple:
     rj = a.result_json or {}
     if qt in _ASYNC_TYPES:
         max_pts = float(rj.get("maxScore") or max_pts_map.get(qt, 1))
-        return ((float(a.score or 0) - 10.0) / 80.0) * max_pts, max_pts
+        # Floor at 0 — score=0 is the no-speech / scoring-failed sentinel
+        # (legitimate scored answers floor at PTE 10). Matches sectional.
+        return max(0.0, ((float(a.score or 0) - 10.0) / 80.0) * max_pts), max_pts
     if _RULE_SCORED_KEYS & rj.keys():
         return _extract_score_and_max(rj, qt)
     # AI-scored sync: trust stored score and maxScore
