@@ -1,3 +1,14 @@
+"""
+Reading FIB Dropdown router.
+
+NAMING NOTE — historical: the file/URL/tag say "fib-drag-drop" but this
+router actually serves the dropdown variant (`reading_fib_drop_down`).
+The web frontend's `app_config.dart` is wired to POST dropdown practice
+answers here, so the URL is locked in as a public contract.
+True drag-and-drop questions (`reading_drag_and_drop`) are served by
+`fill_in_blanks.py`.
+"""
+
 import math
 from typing import Optional
 from fastapi import APIRouter, Depends, Body, HTTPException, Query

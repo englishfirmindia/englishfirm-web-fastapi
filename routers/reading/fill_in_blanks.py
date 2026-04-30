@@ -1,3 +1,13 @@
+"""
+Reading FIB Drag-and-Drop router.
+
+NAMING NOTE — historical: the file/URL/tag say "fill-in-blanks" but this
+router actually serves the drag-and-drop variant (`reading_drag_and_drop`).
+The iOS app and other consumers are wired to POST drag-drop answers here,
+so the URL is locked in as a public contract.
+The dropdown variant (`reading_fib_drop_down`) is served by `fib_drag_drop.py`.
+"""
+
 import math
 from typing import Optional
 from fastapi import APIRouter, Depends, Body, HTTPException, Query
