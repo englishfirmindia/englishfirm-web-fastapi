@@ -408,6 +408,9 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
     )
 
     if existing:
+        prior_tb = existing.task_breakdown or {}
+        if "test_number" in prior_tb:
+            task_breakdown["test_number"] = prior_tb["test_number"]
         existing.total_score        = scaled
         existing.questions_answered = len(submitted)
         existing.status             = "complete"

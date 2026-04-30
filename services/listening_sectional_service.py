@@ -550,6 +550,9 @@ def _aggregate_bg(
         # ── 6. Write back to DB ────────────────────────────────────────────────
         attempt = bg_db.query(PracticeAttempt).filter_by(id=attempt_id).first()
         if attempt:
+            prior_tb = attempt.task_breakdown or {}
+            if "test_number" in prior_tb:
+                task_breakdown["test_number"] = prior_tb["test_number"]
             attempt.total_score        = scaled
             attempt.questions_answered = len(answered_by_qid)
             attempt.status             = "complete"

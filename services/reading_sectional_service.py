@@ -463,6 +463,9 @@ def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict
         min(config.PTE_CEILING, round(config.PTE_BASE + normalised_pct * config.PTE_SCALE)),
     )
 
+    prior_tb = existing.task_breakdown or {}
+    if "test_number" in prior_tb:
+        task_breakdown["test_number"] = prior_tb["test_number"]
     existing.total_score        = scaled
     existing.questions_answered = len(answered_by_qid)
     existing.status             = "complete"
