@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import set_committed_value
 
 from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt, AttemptAnswer
-from services.session_service import ACTIVE_SESSIONS, mark_submitted, persist_answer_to_db
+from services.session_service import ACTIVE_SESSIONS, mark_submitted, persist_answer_to_db, enrich_content_json
 from services.s3_service import generate_presigned_url
 from services.scoring import get_scorer
 from services.scoring.base import to_pte_score
@@ -381,7 +381,7 @@ def get_mock_part(db: Session, session_id: str, part: int) -> dict:
             "prep_seconds":        meta.get("prep_seconds", 0),
             "rec_seconds":         meta.get("rec_seconds",  0),
             "time_seconds":        meta.get("time_seconds", 0),
-            "content_json":        q.content_json,
+            "content_json":        enrich_content_json(q),
             "submit_path":         _SUBMIT_PATHS.get(canonical_type, ""),
             "session_id":          session_id,
             "is_prediction":       q.is_prediction,

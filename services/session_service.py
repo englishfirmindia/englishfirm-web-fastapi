@@ -17,7 +17,7 @@ ACTIVE_SESSIONS: Dict[str, dict] = {}
 _SCORE_STORE: Dict[tuple, dict] = {}
 
 
-def _enrich_content_json(q) -> dict:
+def enrich_content_json(q) -> dict:
     """Merge evaluation transcript / expected answer into content_json.
 
     Per question type, `correctAnswers` stores the model answer in different
@@ -37,7 +37,7 @@ def _enrich_content_json(q) -> dict:
     if q.question_type == "ptea_respond_situation":
         transcript = correct.get("transcript", "") or ""
         if transcript:
-            base.setdefault("situation_text", transcript)
+            base["situation_text"] = transcript
         return base
 
     if q.question_type == "answer_short_question":
@@ -144,7 +144,7 @@ def start_session(
                 "question_type": q.question_type,
                 "difficulty_level": q.difficulty_level,
                 "time_limit_seconds": q.time_limit_seconds,
-                "content_json": _enrich_content_json(q),
+                "content_json": enrich_content_json(q),
             }
             for q in questions
         ],

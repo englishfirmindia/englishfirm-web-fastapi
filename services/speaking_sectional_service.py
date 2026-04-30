@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session, joinedload
 from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt, AttemptAnswer
 from db.database import SessionLocal
 from sqlalchemy.orm.attributes import flag_modified
-from services.session_service import ACTIVE_SESSIONS
+from services.session_service import ACTIVE_SESSIONS, enrich_content_json
 from services.s3_service import generate_presigned_url
 from services.speaking_scorer import kick_off_scoring
 import core.config as config
@@ -184,7 +184,7 @@ def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -
             "task_type":           q.question_type,
             "prep_seconds":        timing["prep_seconds"],
             "rec_seconds":         timing["rec_seconds"],
-            "content_json":        q.content_json,
+            "content_json":        enrich_content_json(q),
             "presigned_url":       presigned_url,
             "presigned_image_url": presigned_image_url,
             "difficulty_level":    q.difficulty_level,
@@ -330,7 +330,7 @@ def resume_speaking_sectional_exam(session_id: str, user_id: int, db: Session) -
             "task_type":           q.question_type,
             "prep_seconds":        timing["prep_seconds"],
             "rec_seconds":         timing["rec_seconds"],
-            "content_json":        q.content_json,
+            "content_json":        enrich_content_json(q),
             "presigned_url":       presigned_url,
             "presigned_image_url": presigned_image_url,
             "difficulty_level":    q.difficulty_level,
