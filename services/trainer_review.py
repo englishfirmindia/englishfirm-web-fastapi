@@ -53,6 +53,30 @@ def _maybe_presign(url: Optional[str]) -> Optional[str]:
         return url
 
 
+# Keys in content_json/user_answer_json that hold S3 object URLs the trainer
+# needs to play/view. Matches what's stored across all 22 question types:
+# audio_url for every listening + speaking-stimulus type, image_url for
+# describe_image. Recursive walk handles future nesting safely.
+_STIMULUS_URL_KEYS = ("audio_url", "image_url")
+
+
+def _presign_in_place(node: Any) -> Any:
+    """Walk a JSON-shaped value and presign any URL value held under
+    _STIMULUS_URL_KEYS. Returns a new structure with presigned URLs; safe
+    to call on None or primitives."""
+    if isinstance(node, dict):
+        out: Dict[str, Any] = {}
+        for k, v in node.items():
+            if k in _STIMULUS_URL_KEYS and isinstance(v, str):
+                out[k] = _maybe_presign(v)
+            else:
+                out[k] = _presign_in_place(v)
+        return out
+    if isinstance(node, list):
+        return [_presign_in_place(item) for item in node]
+    return node
+
+
 def _serialize_attempt(a: PracticeAttempt) -> Dict[str, Any]:
     return {
         "id": a.id,
@@ -93,7 +117,10 @@ def _serialize_question(
         "title": q.title,
         "module": q.module,
         "question_type": q.question_type,
-        "content_json": q.content_json,
+        # Presign any S3 URLs (audio_url / image_url) inside content_json so
+        # the trainer can actually hear listening stimuli and see DI images.
+        # Without this, the browser hits raw S3 and 403s.
+        "content_json": _presign_in_place(q.content_json),
         "evaluation_json": eval_json,
     }
 
