@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from passlib.context import CryptContext
-from jose import jwt, jwk as jose_jwk
+from jose import jwt, jwk as jose_jwk, JWTError
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import requests as _requests
@@ -12,6 +12,7 @@ import requests as _requests
 import core.config as config
 from db.database import get_db
 from db.models import User
+from services.email import send_password_reset
 from services.zapier import send_signup_webhook
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -35,12 +36,48 @@ class AppleAuthRequest(BaseModel):
     identity_token: str
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
 def _make_token(user_id: int) -> str:
     payload = {
         "sub": str(user_id),
         "exp": datetime.utcnow() + timedelta(days=config.JWT_EXPIRY_DAYS),
     }
     return jwt.encode(payload, config.JWT_SECRET_KEY, algorithm=config.JWT_ALGORITHM)
+
+
+def _make_password_reset_token(user_id: int) -> str:
+    payload = {
+        "sub": str(user_id),
+        "purpose": config.PASSWORD_RESET_TOKEN_PURPOSE,
+        "exp": datetime.utcnow()
+        + timedelta(minutes=config.PASSWORD_RESET_TOKEN_EXPIRY_MINUTES),
+    }
+    return jwt.encode(payload, config.JWT_SECRET_KEY, algorithm=config.JWT_ALGORITHM)
+
+
+def _verify_password_reset_token(token: str) -> int:
+    """Returns the user_id encoded in the token, or raises HTTPException 400."""
+    try:
+        claims = jwt.decode(
+            token, config.JWT_SECRET_KEY, algorithms=[config.JWT_ALGORITHM]
+        )
+    except JWTError:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
+    if claims.get("purpose") != config.PASSWORD_RESET_TOKEN_PURPOSE:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
+    sub = claims.get("sub")
+    try:
+        return int(sub)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
 
 
 def _parse_exam_date(exam_date_str: Optional[str]) -> Optional[date]:
@@ -87,6 +124,59 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
             detail="Invalid email or password",
         )
     return {"access_token": _make_token(user.id), "token_type": "bearer"}
+
+
+@router.post("/forgot-password")
+def forgot_password(
+    req: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Always returns 200 to avoid email enumeration. If the email is registered,
+    a short-lived reset link is sent out-of-band.
+    """
+    generic_response = {
+        "message": "If that email is registered, a reset link is on its way.",
+        "expires_in_minutes": config.PASSWORD_RESET_TOKEN_EXPIRY_MINUTES,
+    }
+    email = (req.email or "").strip().lower()
+    if "@" not in email:
+        return generic_response
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        return generic_response
+
+    token = _make_password_reset_token(user.id)
+    link = (
+        f"{config.FRONTEND_URL.rstrip('/')}"
+        f"/#/reset-password?token={token}"
+    )
+    background_tasks.add_task(
+        send_password_reset,
+        to=user.email,
+        link=link,
+        expires_in_minutes=config.PASSWORD_RESET_TOKEN_EXPIRY_MINUTES,
+    )
+    return generic_response
+
+
+@router.post("/reset-password")
+def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Verify a password-reset JWT and overwrite the user's password."""
+    if not req.new_password or len(req.new_password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 6 characters",
+        )
+    user_id = _verify_password_reset_token(req.token)
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
+    user.hashed_password = _pwd.hash(req.new_password)
+    db.commit()
+    return {"message": "Password updated. You can now sign in."}
 
 
 @router.post("/google")

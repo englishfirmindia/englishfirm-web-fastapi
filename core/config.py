@@ -51,6 +51,10 @@ EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL", "")  # optional Zapier/etc.
 # Override in production with the deployed web app URL, e.g. https://app.englishfirm.com
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080")
 
+# ── Password reset (stateless, JWT-based) ─────────────────────────────────────
+PASSWORD_RESET_TOKEN_EXPIRY_MINUTES = 15
+PASSWORD_RESET_TOKEN_PURPOSE = "password_reset"
+
 # ── Apple Sign-In ─────────────────────────────────────────────────────────────
 # Comma-separated list of allowed `aud` values inside Apple identity_tokens.
 # Should include the iOS bundle ID and the web Apple Services ID.

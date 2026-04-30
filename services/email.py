@@ -52,6 +52,18 @@ def send_email(to: str, subject: str, body: str) -> None:
     _post_webhook(to, subject, body)
 
 
+def send_password_reset(to: str, link: str, expires_in_minutes: int) -> None:
+    subject = "Reset your EnglishFirm password"
+    body = (
+        f"We received a request to reset your password.\n\n"
+        f"Open this link to set a new one (expires in {expires_in_minutes} minutes):\n"
+        f"{link}\n\n"
+        f"If you did not request this, you can ignore this email — your password "
+        f"will stay the same.\n"
+    )
+    send_email(to, subject, body)
+
+
 def send_trainer_otp(to: str, code: str, expires_in_minutes: int) -> None:
     subject = "Your EnglishFirm trainer sign-in code"
     body = (
