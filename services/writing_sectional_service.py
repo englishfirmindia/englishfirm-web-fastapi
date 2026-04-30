@@ -377,7 +377,7 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
 
     # Weighted aggregation
     weighted_sum   = 0.0
-    present_weight = 0
+    present_weight = sum(_WRITING_WEIGHTS.values())
     task_breakdown: dict = {}
 
     for task_type, bucket in task_buckets.items():
@@ -387,8 +387,7 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
         task_pct     = (bucket["earned_pct_sum"] / total) if total > 0 else 0.0
         contribution = task_pct * weight
 
-        weighted_sum   += contribution
-        present_weight += weight
+        weighted_sum += contribution
 
         task_breakdown[task_type] = {
             "display_name":       _display_name(task_type),

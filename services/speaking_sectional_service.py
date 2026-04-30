@@ -436,7 +436,7 @@ def _speaking_aggregate_bg(
 
         # 5. Weighted PTE score
         weighted_sum   = 0.0
-        present_weight = 0
+        present_weight = sum(_SPEAKING_WEIGHTS.values())
         task_breakdown: dict = {}
 
         for task_type, bucket in task_buckets.items():
@@ -445,8 +445,7 @@ def _speaking_aggregate_bg(
             answered     = bucket["answered"]
             task_pct     = bucket["earned_pct_sum"] / total if total > 0 else 0.0
             contribution = task_pct * weight
-            weighted_sum   += contribution
-            present_weight += weight
+            weighted_sum += contribution
             task_breakdown[task_type] = {
                 "display_name":       _display_name(task_type),
                 "total_questions":    total,
