@@ -63,7 +63,13 @@ _STIMULUS_URL_KEYS = ("audio_url", "image_url")
 def _presign_in_place(node: Any) -> Any:
     """Walk a JSON-shaped value and presign any URL value held under
     _STIMULUS_URL_KEYS. Returns a new structure with presigned URLs; safe
-    to call on None or primitives."""
+    to call on None or primitives.
+
+    Some legacy describe_image rows store the image path under `s3_url`
+    instead of `image_url` — see routers/speaking/describe_image.py
+    image_url_by_id which already handles both shapes for the practice
+    flow. Normalize here so the trainer payload always exposes a
+    presigned `image_url`."""
     if isinstance(node, dict):
         out: Dict[str, Any] = {}
         for k, v in node.items():
@@ -71,6 +77,8 @@ def _presign_in_place(node: Any) -> Any:
                 out[k] = _maybe_presign(v)
             else:
                 out[k] = _presign_in_place(v)
+        if "image_url" not in out and isinstance(node.get("s3_url"), str):
+            out["image_url"] = _maybe_presign(node["s3_url"])
         return out
     if isinstance(node, list):
         return [_presign_in_place(item) for item in node]
