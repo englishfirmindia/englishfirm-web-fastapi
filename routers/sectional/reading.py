@@ -166,6 +166,7 @@ def submit_answer(
     session.setdefault("question_score_maxes", {})[question_id] = q_max
     session.setdefault("submitted_questions", set()).add(question_id)
     session["score"] = session.get("score", 0) + result.pte_score
+    ACTIVE_SESSIONS.save(session_id)
 
     attempt_id = session.get("attempt_id")
     if attempt_id:

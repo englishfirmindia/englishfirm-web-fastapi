@@ -109,6 +109,7 @@ def start(
     # Override stored question_type so UserQuestionAttempt uses "listening_hiw"
     # (the value that fetchAnsweredQuestionIds queries for)
     ACTIVE_SESSIONS[result["session_id"]]["question_type"] = "listening_hiw"
+    ACTIVE_SESSIONS.save(result["session_id"])
     return result
 
 

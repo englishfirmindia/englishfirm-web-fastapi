@@ -1,15 +1,28 @@
 """
-In-memory session store + DB persistence for practice answers.
+Postgres-backed session store with in-process write-through cache.
+
+Session state is persisted to the ``practice_session_states`` table on each
+write so the data survives process restart and (best-effort) is visible across
+worker processes. ORM ``QuestionFromApeuni`` instances cannot be JSON-encoded,
+so on serialize they are replaced with the list of question IDs and re-fetched
+in a single batch query on load.
+
+Existing call sites can mutate the returned dict in place (sets, nested dicts)
+as before, but those mutations are only persisted when callers either
+re-assign via ``ACTIVE_SESSIONS[sid] = session`` or explicitly call
+``ACTIVE_SESSIONS.save(sid)``.
 """
 import uuid
 import time
 import threading
-from typing import Optional, Dict
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any
 
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm.attributes import flag_modified
 from fastapi import HTTPException, status
 
-from db.models import QuestionFromApeuni, PracticeAttempt, AttemptAnswer, UserQuestionAttempt
+from db.models import QuestionFromApeuni, PracticeAttempt, AttemptAnswer, UserQuestionAttempt, PracticeSessionState
 from db.database import SessionLocal
 import core.config as config
 
@@ -18,7 +31,154 @@ from core.logging_config import get_logger
 log = get_logger(__name__)
 
 
-ACTIVE_SESSIONS: Dict[str, dict] = {}
+_SESSION_TTL_SECONDS = 24 * 3600
+
+
+def _serialize_session(value: dict) -> dict:
+    """Strip non-JSON-serializable bits (ORM instances, sets) for Postgres storage."""
+    out: Dict[str, Any] = {}
+    for k, v in value.items():
+        if k == "questions":
+            if isinstance(v, dict):
+                out["__question_ids"] = list(v.keys())
+            continue
+        if isinstance(v, set):
+            out[k] = list(v)
+        elif isinstance(v, dict):
+            out[k] = {str(kk) if isinstance(kk, int) else kk: vv for kk, vv in v.items()}
+        else:
+            out[k] = v
+    return out
+
+
+_SET_KEYS = {"submitted_questions"}
+_INT_KEY_DICTS = {
+    "questions",
+    "submitted_audio",
+    "question_scores",
+    "question_score_maxes",
+}
+
+
+def _deserialize_session(payload: dict, db: Session) -> dict:
+    out: Dict[str, Any] = dict(payload)
+    qids = out.pop("__question_ids", []) or []
+
+    questions: Dict[int, QuestionFromApeuni] = {}
+    if qids:
+        rows = (
+            db.query(QuestionFromApeuni)
+            .options(joinedload(QuestionFromApeuni.evaluation))
+            .filter(QuestionFromApeuni.question_id.in_(qids))
+            .all()
+        )
+        questions = {q.question_id: q for q in rows}
+    out["questions"] = questions
+
+    for key in _SET_KEYS:
+        if key in out and isinstance(out[key], list):
+            out[key] = set(out[key])
+
+    for key in _INT_KEY_DICTS:
+        if key in out and isinstance(out[key], dict):
+            out[key] = {
+                (int(k) if isinstance(k, str) and k.lstrip("-").isdigit() else k): v
+                for k, v in out[key].items()
+            }
+    return out
+
+
+class SessionStore:
+    """Dict-like Postgres-backed session store with in-process cache."""
+
+    def __init__(self) -> None:
+        self._cache: Dict[str, dict] = {}
+
+    def __setitem__(self, session_id: str, value: dict) -> None:
+        self._cache[session_id] = value
+        self._persist(session_id, value)
+
+    def __getitem__(self, session_id: str) -> dict:
+        v = self.get(session_id)
+        if v is None:
+            raise KeyError(session_id)
+        return v
+
+    def __contains__(self, session_id: str) -> bool:
+        return self.get(session_id) is not None
+
+    def get(self, session_id: str, default: Any = None) -> Any:
+        if session_id in self._cache:
+            return self._cache[session_id]
+        loaded = self._load(session_id)
+        if loaded is None:
+            return default
+        self._cache[session_id] = loaded
+        return loaded
+
+    def save(self, session_id: str) -> None:
+        """Re-persist the cached session after callers mutated it in place."""
+        if session_id in self._cache:
+            self._persist(session_id, self._cache[session_id])
+
+    def pop(self, session_id: str, default: Any = None) -> Any:
+        v = self._cache.pop(session_id, default)
+        db = SessionLocal()
+        try:
+            db.query(PracticeSessionState).filter_by(session_id=session_id).delete()
+            db.commit()
+        except Exception as e:
+            log.error(f"[SessionStore] pop failed sid={session_id}: {e}")
+            db.rollback()
+        finally:
+            db.close()
+        return v
+
+    def _persist(self, session_id: str, value: dict) -> None:
+        payload = _serialize_session(value)
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=_SESSION_TTL_SECONDS)
+        user_id = value.get("user_id") or 0
+        db = SessionLocal()
+        try:
+            row = db.query(PracticeSessionState).filter_by(session_id=session_id).first()
+            if row:
+                row.data = payload
+                row.expires_at = expires_at
+                row.user_id = user_id
+                flag_modified(row, "data")
+            else:
+                db.add(PracticeSessionState(
+                    session_id=session_id,
+                    user_id=user_id,
+                    data=payload,
+                    expires_at=expires_at,
+                ))
+            db.commit()
+        except Exception as e:
+            log.error(f"[SessionStore] persist failed sid={session_id}: {e}")
+            db.rollback()
+        finally:
+            db.close()
+
+    def _load(self, session_id: str) -> Optional[dict]:
+        db = SessionLocal()
+        try:
+            row = db.query(PracticeSessionState).filter_by(session_id=session_id).first()
+            if not row:
+                return None
+            if row.expires_at and row.expires_at < datetime.now(timezone.utc):
+                db.delete(row)
+                db.commit()
+                return None
+            return _deserialize_session(row.data or {}, db)
+        except Exception as e:
+            log.error(f"[SessionStore] load failed sid={session_id}: {e}")
+            return None
+        finally:
+            db.close()
+
+
+ACTIVE_SESSIONS = SessionStore()
 _SCORE_STORE: Dict[tuple, dict] = {}
 
 
@@ -232,6 +392,7 @@ def mark_submitted(
     session["submitted_questions"].add(question_id)
     session["score"] = session.get("score", 0) + score
     session.setdefault("question_scores", {})[question_id] = score
+    ACTIVE_SESSIONS.save(session_id)
 
     # Record attempt in user_question_attempts for deduplication
     def _record():

@@ -414,6 +414,7 @@ def update_mock_progress(db: Session, session_id: str, current_part: int, timer_
     session["current_part"] = current_part
     if timer_remaining is not None:
         session["part_timer_remaining"][current_part] = timer_remaining
+    ACTIVE_SESSIONS.save(session_id)
 
     # Persist snapshot to PracticeAttempt.task_breakdown for crash recovery / resume
     attempt = db.query(PracticeAttempt).filter_by(session_id=session_id).first()

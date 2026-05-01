@@ -22,6 +22,14 @@ from routers.student_share import router as student_share_router
 
 app = FastAPI(title="EnglishFirm Web API", version="1.0.0")
 
+# Rate limiter — shared instance defined in core.rate_limit
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from core.rate_limit import limiter
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 @app.on_event("startup")
 async def _startup_migrations():

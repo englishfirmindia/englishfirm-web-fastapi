@@ -99,6 +99,7 @@ def submit_audio(
 
     session.setdefault("submitted_audio", {})[question_id] = audio_url
     session.setdefault("submitted_questions", set()).add(question_id)
+    ACTIVE_SESSIONS.save(session_id)
 
     # Write pending AttemptAnswer to RDS + kick off Azure scoring immediately
     q = session.get("questions", {}).get(question_id)
