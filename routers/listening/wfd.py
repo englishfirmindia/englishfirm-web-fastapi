@@ -10,6 +10,7 @@ from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url
+from schemas.submit_requests import TextSubmitRequest
 
 router = APIRouter(prefix="/listening/wfd", tags=["Listening - Write from Dictation"])
 
@@ -109,13 +110,13 @@ def start(
 
 @router.post("/submit")
 def submit(
-    payload: dict = Body(...),
+    req: TextSubmitRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    session_id = payload["session_id"]
-    question_id = int(payload["question_id"])
-    user_text = payload.get("user_text") or payload.get("text", "")
+    session_id = req.session_id
+    question_id = req.question_id
+    user_text = req.resolved_text()
 
     session = get_session(session_id)
     question = session["questions"].get(question_id)

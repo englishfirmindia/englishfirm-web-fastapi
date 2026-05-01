@@ -11,6 +11,7 @@ from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db, ACTIVE_SESSIONS
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url
+from schemas.submit_requests import HIWSubmitRequest
 
 router = APIRouter(prefix="/listening/hiw", tags=["Listening - Highlight Incorrect Words"])
 
@@ -115,24 +116,24 @@ def start(
 
 @router.post("/submit")
 def submit(
-    payload: dict = Body(...),
+    req: HIWSubmitRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    session_id = payload["session_id"]
-    question_id = int(payload["question_id"])
+    session_id = req.session_id
+    question_id = req.question_id
     session = get_session(session_id)
     question = session["questions"].get(question_id)
     if not question or not question.evaluation:
         raise HTTPException(status_code=404, detail="Question not found")
 
     # Accept word strings or convert from 0-based word indices
-    highlighted_words = payload.get("highlighted_words")
+    highlighted_words = req.highlighted_words
     content = question.content_json or {}
     words = content.get("words") or (content.get("transcript") or content.get("passage") or content.get("text") or "").split()
 
     if highlighted_words is None:
-        indices = payload.get("highlighted_indices", [])
+        indices = req.highlighted_indices or []
         highlighted_words = [words[i] for i in indices if isinstance(i, int) and i < len(words)]
 
     eval_json = question.evaluation.evaluation_json or {}

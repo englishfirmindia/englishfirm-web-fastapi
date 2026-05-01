@@ -20,6 +20,7 @@ from db.models import User, QuestionFromApeuni, UserQuestionAttempt
 from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
 from services.scoring import get_scorer
+from schemas.submit_requests import AnswersDictSubmitRequest
 
 router = APIRouter(prefix="/reading/fib-drag-drop", tags=["Reading - FIB Drag & Drop"])
 
@@ -119,13 +120,13 @@ def start(
 
 @router.post("/submit")
 def submit(
-    payload: dict = Body(...),
+    req: AnswersDictSubmitRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    session_id = payload["session_id"]
-    question_id = int(payload["question_id"])
-    raw = payload.get("user_answers") or payload.get("answers", {})
+    session_id = req.session_id
+    question_id = req.question_id
+    raw = req.resolved_raw()
     if isinstance(raw, list):
         user_answers = {f"blank_{i + 1}": v for i, v in enumerate(raw)}
     elif isinstance(raw, dict):

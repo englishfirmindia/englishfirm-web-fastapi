@@ -9,6 +9,7 @@ from db.models import User, QuestionFromApeuni, UserQuestionAttempt
 from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
 from services.scoring import get_scorer
+from schemas.submit_requests import SingleOptionSubmitRequest
 
 router = APIRouter(prefix="/reading/mcs", tags=["Reading - MCS"])
 
@@ -108,14 +109,13 @@ def start(
 
 @router.post("/submit")
 def submit(
-    payload: dict = Body(...),
+    req: SingleOptionSubmitRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    session_id = payload["session_id"]
-    question_id = int(payload["question_id"])
-    ids = payload.get("selected_option_ids", [])
-    selected_option = payload.get("selected_option") or (ids[0] if ids else "")
+    session_id = req.session_id
+    question_id = req.question_id
+    selected_option = req.resolved_option()
 
     session = get_session(session_id)
     question = session["questions"].get(question_id)
