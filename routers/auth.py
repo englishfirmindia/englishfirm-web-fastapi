@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, date
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from jose import jwt, jwk as jose_jwk, JWTError
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 import requests as _requests
 
 import core.config as config
+from core.rate_limit import limiter
 from db.database import get_db
 from db.models import User
 from services.email import send_password_reset
@@ -92,7 +93,8 @@ def _parse_exam_date(exam_date_str: Optional[str]) -> Optional[date]:
 
 
 @router.post("/signup", status_code=201)
-def signup(req: SignupRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def signup(request: Request, req: SignupRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == req.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
     parsed_exam_date = _parse_exam_date(req.exam_date)
@@ -116,7 +118,8 @@ def signup(req: SignupRequest, background_tasks: BackgroundTasks, db: Session = 
 
 
 @router.post("/login")
-def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == form.username).first()
     if not user or not _pwd.verify(form.password, user.hashed_password):
         raise HTTPException(
@@ -127,7 +130,9 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 
 
 @router.post("/forgot-password")
+@limiter.limit("3/minute")
 def forgot_password(
+    request: Request,
     req: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -163,7 +168,8 @@ def forgot_password(
 
 
 @router.post("/reset-password")
-def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def reset_password(request: Request, req: ResetPasswordRequest, db: Session = Depends(get_db)):
     """Verify a password-reset JWT and overwrite the user's password."""
     if not req.new_password or len(req.new_password) < 6:
         raise HTTPException(
@@ -180,7 +186,8 @@ def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/google")
-def google_auth(req: GoogleAuthRequest, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def google_auth(request: Request, req: GoogleAuthRequest, db: Session = Depends(get_db)):
     """Verify a Google id_token and return a JWT. Creates the user if they don't exist."""
     try:
         resp = _requests.get(
@@ -218,7 +225,8 @@ def google_auth(req: GoogleAuthRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/apple")
-def apple_auth(req: AppleAuthRequest, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def apple_auth(request: Request, req: AppleAuthRequest, db: Session = Depends(get_db)):
     """
     Verify an Apple identity_token (RS256, signed by Apple) and return a JWT.
     Creates the user if they don't exist. Audience is whitelisted against
