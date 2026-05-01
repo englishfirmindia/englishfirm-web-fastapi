@@ -73,7 +73,9 @@ def send_trainer_share_received(
 ) -> None:
     subject = f"{student_name} shared a {test_label} test with you"
     next_path = f"/trainer/shared/{share_id}"
-    link = f"{config.FRONTEND_URL.rstrip('/')}/trainer/login?next={next_path}"
+    # Trainer login is now a mode of the unified /login screen.
+    # The legacy /trainer/login path still works via a frontend redirect.
+    link = f"{config.FRONTEND_URL.rstrip('/')}/login?role=trainer&next={next_path}"
     body = (
         f"{student_name} just shared a {test_label} test with you on EnglishFirm.\n\n"
         f"Open the test: {link}\n\n"
