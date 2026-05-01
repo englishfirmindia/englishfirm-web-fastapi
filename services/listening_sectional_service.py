@@ -26,13 +26,12 @@ PTE formula (CLAUDE.md guardrail):
 """
 
 import random
-import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt, AttemptAnswer
@@ -565,10 +564,15 @@ def _aggregate_bg(
         bg_db.close()
 
 
-def finish_listening_sectional(session_id: str, user_id: int, db: Session) -> dict:
+def finish_listening_sectional(
+    session_id: str,
+    user_id: int,
+    db: Session,
+    background_tasks: BackgroundTasks,
+) -> dict:
     """
     Kick off RDS-based background scoring and return immediately with scoring_status='pending'.
-    The background thread reads all answered rows from attempt_answers, waits for speaking
+    The background task reads all answered rows from attempt_answers, waits for speaking
     scores to land in RDS, and computes the final weighted listening score.
     Does not depend on in-memory ACTIVE_SESSIONS — resilient to server restarts.
     """
@@ -593,16 +597,13 @@ def finish_listening_sectional(session_id: str, user_id: int, db: Session) -> di
 
     log.info(f"[ListeningFinish] session={session_id} user={user_id} " f"attempt={attempt.id} questions={len(all_question_ids)}")
 
-    threading.Thread(
-        target=_aggregate_bg,
-        kwargs=dict(
-            attempt_id       = attempt.id,
-            session_id       = session_id,
-            user_id          = user_id,
-            all_question_ids = all_question_ids,
-        ),
-        daemon=True,
-    ).start()
+    background_tasks.add_task(
+        _aggregate_bg,
+        attempt_id       = attempt.id,
+        session_id       = session_id,
+        user_id          = user_id,
+        all_question_ids = all_question_ids,
+    )
 
     return {
         "attempt_id":     attempt.id,

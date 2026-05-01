@@ -15,11 +15,10 @@ PTE formula (CLAUDE.md guardrail):
 import random
 import time
 import uuid
-import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt, AttemptAnswer
@@ -471,7 +470,12 @@ def _speaking_aggregate_bg(
         bg_db.close()
 
 
-def finish_speaking_sectional(session_id: str, user_id: int, db: Session) -> dict:
+def finish_speaking_sectional(
+    session_id: str,
+    user_id: int,
+    db: Session,
+    background_tasks: BackgroundTasks,
+) -> dict:
     """
     Start RDS-based background aggregation and return immediately with scoring_status='pending'.
     Azure scoring is already kicked off per-question at /submit-audio time.
@@ -522,16 +526,13 @@ def finish_speaking_sectional(session_id: str, user_id: int, db: Session) -> dic
 
     log.info(f"[SpeakingFinish] session={session_id} user={user_id} " f"attempt={attempt.id} questions={len(all_question_ids)} rekicked={rekicked}")
 
-    threading.Thread(
-        target=_speaking_aggregate_bg,
-        kwargs=dict(
-            attempt_id       = attempt.id,
-            session_id       = session_id,
-            user_id          = user_id,
-            all_question_ids = all_question_ids,
-        ),
-        daemon=True,
-    ).start()
+    background_tasks.add_task(
+        _speaking_aggregate_bg,
+        attempt_id       = attempt.id,
+        session_id       = session_id,
+        user_id          = user_id,
+        all_question_ids = all_question_ids,
+    )
 
     return {
         "attempt_id":     attempt.id,

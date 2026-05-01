@@ -9,7 +9,7 @@ Endpoints:
   GET  /sectional/speaking/results/{sid}     → poll scoring status + final score
 """
 
-from fastapi import APIRouter, Depends, Body, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from db.database import get_db
@@ -113,6 +113,7 @@ def submit_audio(
 
 @router.post("/finish")
 def finish_exam(
+    background_tasks: BackgroundTasks,
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -145,7 +146,10 @@ def finish_exam(
             )
 
     result = finish_speaking_sectional(
-        session_id=session_id, user_id=current_user.id, db=db
+        session_id=session_id,
+        user_id=current_user.id,
+        db=db,
+        background_tasks=background_tasks,
     )
     if pending_failed:
         result["pending_questions"] = pending_failed

@@ -29,7 +29,7 @@ Submit payload shapes per task_type:
     { session_id, question_id, user_answer: str }
 """
 
-from fastapi import APIRouter, Depends, Body, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from db.database import get_db
@@ -79,8 +79,9 @@ _SCORER_ALIAS = {
 }
 
 
-def _build_answer(question_type: str, payload: dict) -> dict:
+def _build_answer(question, payload: dict) -> dict:
     """Build the answer dict expected by each scorer."""
+    question_type = question.question_type
     if question_type == "listening_wfd":
         return {"user_text": payload.get("user_text", "")}
     if question_type == "listening_fib":
@@ -92,7 +93,11 @@ def _build_answer(question_type: str, payload: dict) -> dict:
     if question_type in ("highlight_incorrect_words", "listening_hiw"):
         return {"highlighted_words": payload.get("highlighted_words", [])}
     if question_type in ("summarize_spoken_text", "listening_sst"):
-        return {"text": payload.get("user_answer", ""), "prompt": ""}
+        from services.transcription_service import get_or_create_sst_transcript
+        return {
+            "text": payload.get("user_answer", ""),
+            "prompt": get_or_create_sst_transcript(question),
+        }
     return {}
 
 
@@ -158,7 +163,7 @@ def submit_answer(
     if not question:
         raise HTTPException(status_code=404, detail="Question not found in session")
 
-    answer = _build_answer(question.question_type, payload)
+    answer = _build_answer(question, payload)
 
     # SST uses AI scorer — needs no evaluation_json; others need it
     if question.question_type not in ("listening_sst", "summarize_spoken_text"):
@@ -230,6 +235,7 @@ def submit_answer(
 
 @router.post("/finish")
 def finish_exam(
+    background_tasks: BackgroundTasks,
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -262,7 +268,10 @@ def finish_exam(
             )
 
     result = finish_listening_sectional(
-        session_id=session_id, user_id=current_user.id, db=db
+        session_id=session_id,
+        user_id=current_user.id,
+        db=db,
+        background_tasks=background_tasks,
     )
     if pending_failed:
         result["pending_questions"] = pending_failed
