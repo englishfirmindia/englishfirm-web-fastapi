@@ -898,8 +898,9 @@ def _build_mock_score_args(task_type, payload, content_json, eval_json, question
         return task_type, {"text": text, "prompt": prompt}, task_type, {"text": text}
 
     if task_type == "summarize_spoken_text":
+        from services.transcription_service import get_or_create_sst_transcript
         text = payload.get("user_text", "")
-        prompt = content_json.get("transcript") or content_json.get("audio_url", "")
+        prompt = get_or_create_sst_transcript(question)
         return "listening_sst", {"text": text, "prompt": prompt}, "summarize_spoken_text", {"text": text}
 
     if task_type == "listening_wfd":

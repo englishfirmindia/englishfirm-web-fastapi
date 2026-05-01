@@ -41,13 +41,26 @@ _SCORER_ALIAS = {
 def _build_answer(question, payload: dict) -> dict:
     """Build the answer dict expected by each scorer."""
     qt = question.question_type
-    if qt in ("summarize_written_text", "write_essay"):
+    if qt == "summarize_written_text":
         content_json = question.content_json or {}
         prompt = content_json.get("passage", content_json.get("text", ""))
         return {"text": payload.get("user_answer", ""), "prompt": prompt}
+    if qt == "write_essay":
+        # WE essay topics live under content_json.prompt in
+        # questions_from_apeuni. Mirror practice's lookup chain.
+        content_json = question.content_json or {}
+        prompt = (
+            content_json.get("topic")
+            or content_json.get("prompt")
+            or content_json.get("text", "")
+        )
+        return {"text": payload.get("user_answer", ""), "prompt": prompt}
     if qt == "summarize_spoken_text":
-        # No content prompt available (audio source) — heuristic-only path
-        return {"text": payload.get("user_answer", ""), "prompt": ""}
+        from services.transcription_service import get_or_create_sst_transcript
+        return {
+            "text": payload.get("user_answer", ""),
+            "prompt": get_or_create_sst_transcript(question),
+        }
     if qt == "listening_wfd":
         return {
             "user_text": payload.get("user_text", ""),

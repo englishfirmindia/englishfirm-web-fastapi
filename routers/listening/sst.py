@@ -129,8 +129,8 @@ def submit(
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    content_json = question.content_json or {}
-    prompt = content_json.get("transcript", content_json.get("audio_url", ""))
+    from services.transcription_service import get_or_create_sst_transcript
+    prompt = get_or_create_sst_transcript(question)
 
     scorer = get_scorer("listening_sst")
     try:
