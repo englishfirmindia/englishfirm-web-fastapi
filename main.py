@@ -48,11 +48,14 @@ app.include_router(trainer_auth_router, prefix="/api/v1")
 app.include_router(trainer_app_router, prefix="/api/v1")
 app.include_router(student_share_router, prefix="/api/v1")
 
+import core.config as _config
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_config.CORS_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
 # Speaking

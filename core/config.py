@@ -51,6 +51,18 @@ EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL", "")  # optional Zapier/etc.
 # Override in production with the deployed web app URL, e.g. https://app.englishfirm.com
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080")
 
+# ── CORS allowlist ────────────────────────────────────────────────────────────
+# Comma-separated origins allowed to call the API. Defaults to FRONTEND_URL plus
+# common local-dev hosts. Override in production.
+CORS_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        f"{FRONTEND_URL},http://localhost:8080,http://127.0.0.1:8080",
+    ).split(",")
+    if o.strip()
+]
+
 # ── Password reset (stateless, JWT-based) ─────────────────────────────────────
 PASSWORD_RESET_TOKEN_EXPIRY_MINUTES = 15
 PASSWORD_RESET_TOKEN_PURPOSE = "password_reset"
