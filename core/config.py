@@ -13,8 +13,8 @@ AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "australiaeast")
 
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-DB_POOL_SIZE = 5
-DB_MAX_OVERFLOW = 10
+DB_POOL_SIZE = 20
+DB_MAX_OVERFLOW = 40
 
 # ── Auth (JWT) ────────────────────────────────────────────────────────────────
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
