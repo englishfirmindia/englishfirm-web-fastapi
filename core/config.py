@@ -21,6 +21,24 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRY_DAYS = 30
 
+# ── Auth (web session cookie) ─────────────────────────────────────────────────
+# Web clients use an httpOnly cookie holding the same JWT, so the token is not
+# reachable from JavaScript. The iOS client keeps using `Authorization: Bearer`
+# and ignores Set-Cookie — both transports are accepted by get_current_user.
+SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "ef_session")
+# Secure=True is required for cross-site cookie use over HTTPS. Localhost is
+# treated as secure by modern browsers, so this default is safe for dev too.
+# Override with COOKIE_SECURE=false only if you know what you're doing.
+SESSION_COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
+# Lax (not Strict): Strict breaks the post-Google/Apple OAuth top-level redirect
+# back to our origin. Lax still blocks the common cross-site CSRF cases.
+SESSION_COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax")
+# Optional cookie domain — set for cross-subdomain auth (e.g. ".englishfirm.com"
+# so api.englishfirm.com sets a cookie readable from app.englishfirm.com).
+# Leave empty in dev (cookie defaults to host-only).
+SESSION_COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN", "") or None
+SESSION_COOKIE_MAX_AGE_SECONDS = JWT_EXPIRY_DAYS * 24 * 60 * 60
+
 # ── Session defaults ──────────────────────────────────────────────────────────
 SESSION_QUESTION_LIMIT = 20
 

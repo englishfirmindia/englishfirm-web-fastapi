@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, date
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from jose import jwt, jwk as jose_jwk, JWTError
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 import requests as _requests
 
 import core.config as config
+from core.dependencies import get_current_user
 from core.rate_limit import limiter
 from db.database import get_db
 from db.models import User
@@ -52,6 +53,32 @@ def _make_token(user_id: int) -> str:
         "exp": datetime.utcnow() + timedelta(days=config.JWT_EXPIRY_DAYS),
     }
     return jwt.encode(payload, config.JWT_SECRET_KEY, algorithm=config.JWT_ALGORITHM)
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    """
+    Set the httpOnly session cookie alongside the JSON `access_token`.
+    Web clients (Flutter web with withCredentials) read this on subsequent
+    requests; iOS ignores Set-Cookie and keeps using `Authorization: Bearer`.
+    """
+    response.set_cookie(
+        key=config.SESSION_COOKIE_NAME,
+        value=token,
+        max_age=config.SESSION_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=config.SESSION_COOKIE_SECURE,
+        samesite=config.SESSION_COOKIE_SAMESITE,
+        domain=config.SESSION_COOKIE_DOMAIN,
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=config.SESSION_COOKIE_NAME,
+        path="/",
+        domain=config.SESSION_COOKIE_DOMAIN,
+    )
 
 
 def _make_password_reset_token(user_id: int) -> str:
@@ -119,14 +146,21 @@ def signup(request: Request, req: SignupRequest, background_tasks: BackgroundTas
 
 @router.post("/login")
 @limiter.limit("10/minute")
-def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(
+    request: Request,
+    response: Response,
+    form: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
     user = db.query(User).filter(User.email == form.username).first()
     if not user or not _pwd.verify(form.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
-    return {"access_token": _make_token(user.id), "token_type": "bearer"}
+    token = _make_token(user.id)
+    _set_session_cookie(response, token)
+    return {"access_token": token, "token_type": "bearer"}
 
 
 @router.post("/forgot-password")
@@ -187,7 +221,12 @@ def reset_password(request: Request, req: ResetPasswordRequest, db: Session = De
 
 @router.post("/google")
 @limiter.limit("10/minute")
-def google_auth(request: Request, req: GoogleAuthRequest, db: Session = Depends(get_db)):
+def google_auth(
+    request: Request,
+    response: Response,
+    req: GoogleAuthRequest,
+    db: Session = Depends(get_db),
+):
     """Verify a Google id_token and return a JWT. Creates the user if they don't exist."""
     try:
         resp = _requests.get(
@@ -221,12 +260,19 @@ def google_auth(request: Request, req: GoogleAuthRequest, db: Session = Depends(
         db.commit()
         db.refresh(user)
 
-    return {"access_token": _make_token(user.id), "token_type": "bearer"}
+    token = _make_token(user.id)
+    _set_session_cookie(response, token)
+    return {"access_token": token, "token_type": "bearer"}
 
 
 @router.post("/apple")
 @limiter.limit("10/minute")
-def apple_auth(request: Request, req: AppleAuthRequest, db: Session = Depends(get_db)):
+def apple_auth(
+    request: Request,
+    response: Response,
+    req: AppleAuthRequest,
+    db: Session = Depends(get_db),
+):
     """
     Verify an Apple identity_token (RS256, signed by Apple) and return a JWT.
     Creates the user if they don't exist. Audience is whitelisted against
@@ -294,4 +340,29 @@ def apple_auth(request: Request, req: AppleAuthRequest, db: Session = Depends(ge
         db.commit()
         db.refresh(user)
 
-    return {"access_token": _make_token(user.id), "token_type": "bearer"}
+    token = _make_token(user.id)
+    _set_session_cookie(response, token)
+    return {"access_token": token, "token_type": "bearer"}
+
+
+@router.get("/me")
+def me(user: User = Depends(get_current_user)):
+    """
+    Lightweight session check used by the web client at boot to decide whether
+    the user is logged in (cookie present + valid). Reused by iOS too.
+    """
+    return {
+        "id": user.id,
+        "email": user.email,
+        "username": user.username,
+    }
+
+
+@router.post("/logout")
+def logout(response: Response):
+    """
+    Clear the session cookie. Safe to call without auth — no-op for clients
+    that aren't using the cookie (iOS bearer flow ignores Set-Cookie).
+    """
+    _clear_session_cookie(response)
+    return {"message": "Logged out"}
