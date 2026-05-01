@@ -7,14 +7,14 @@ import core.config as config
 
 load_dotenv()
 
-
-def _get_s3_client():
-    return boto3.client(
-        "s3",
-        region_name=config.AWS_REGION,
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-    )
+# Module-level singleton — boto3 clients are thread-safe and designed to be
+# reused. Re-creating per request causes a fresh TLS handshake every time.
+_S3_CLIENT = boto3.client(
+    "s3",
+    region_name=config.AWS_REGION,
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+)
 
 
 def generate_presigned_url(s3_url: str, expires_in: Optional[int] = None) -> str:
@@ -36,20 +36,10 @@ def generate_presigned_url(s3_url: str, expires_in: Optional[int] = None) -> str
         raise ValueError(f"Could not parse bucket/key from URL: {s3_url}")
 
     ttl = expires_in if expires_in is not None else config.PRESIGNED_READ_EXPIRY_SECONDS
-    client = _get_s3_client()
-    return client.generate_presigned_url(
+    return _S3_CLIENT.generate_presigned_url(
         "get_object",
         Params={"Bucket": bucket, "Key": key},
         ExpiresIn=ttl,
-    )
-
-
-def _get_s3_upload_client():
-    return boto3.client(
-        "s3",
-        region_name=config.AWS_REGION,
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     )
 
 
@@ -59,9 +49,7 @@ def generate_presigned_upload_url(key: str) -> dict:
     Returns { upload_url, s3_url }.
     """
     bucket = config.S3_RECORDINGS_BUCKET
-    client = _get_s3_upload_client()
-
-    upload_url = client.generate_presigned_url(
+    upload_url = _S3_CLIENT.generate_presigned_url(
         "put_object",
         Params={"Bucket": bucket, "Key": key, "ContentType": "audio/aac"},
         ExpiresIn=config.PRESIGNED_UPLOAD_EXPIRY_SECONDS,
