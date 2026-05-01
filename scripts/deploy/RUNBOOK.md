@@ -116,6 +116,8 @@ Secrets Manager:       englishfirm-web-fastapi/prod
 ACM cert (Sydney):     arn:aws:acm:ap-southeast-2:549209747198:certificate/5964d28e-21c3-4ff6-a05b-4b32401900cd
 ACM cert (us-east-1):  arn:aws:acm:us-east-1:549209747198:certificate/c4c9ebf7-7a1c-4df7-a4f1-407ae8278105
 S3 bucket (frontend):  englishfirm-web-flutter
+CloudFront distro:     E2JXAOH26OS3MK (d3msnux4tulesc.cloudfront.net)
+CloudFront OAC:        E3JN7D3RVTHI29
 RDS instance:          database-1
 DB shared with:        mobile backend (englishfirm-app-fastapi)
 RDS snapshot (safety): pre-ecs-deployment-2026-05-01
