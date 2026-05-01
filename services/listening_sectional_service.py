@@ -40,6 +40,11 @@ from services.session_service import ACTIVE_SESSIONS
 from services.s3_service import generate_presigned_url
 import core.config as config
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
+
 # ─── Sectional structure ──────────────────────────────────────────────────────
 # Speaking tasks come first (PTE exam ordering).
 LISTENING_STRUCTURE = [
@@ -209,11 +214,7 @@ def start_listening_sectional_exam(db: Session, user_id: int, test_number: int) 
         )
         pool = fresh
         if len(fresh) < count:
-            print(
-                f"[Listening Sectional] Not enough fresh questions for {task_type} "
-                f"(need {count}, have {len(fresh)}) — falling back to full pool",
-                flush=True,
-            )
+            log.info(f"[Listening Sectional] Not enough fresh questions for {task_type} " f"(need {count}, have {len(fresh)}) — falling back to full pool")
             pool = (
                 db.query(QuestionFromApeuni)
                 .options(*opts)
@@ -226,7 +227,7 @@ def start_listening_sectional_exam(db: Session, user_id: int, test_number: int) 
 
         n = min(count, len(pool))
         if n == 0:
-            print(f"[Listening Sectional] No questions for {task_type} — skipping", flush=True)
+            log.info(f"[Listening Sectional] No questions for {task_type} — skipping")
             continue
         selected_qs.extend(random.sample(pool, n))
 
@@ -311,11 +312,7 @@ def start_listening_sectional_exam(db: Session, user_id: int, test_number: int) 
         "question_type":        "sectional",
     }
 
-    print(
-        f"[Listening Sectional] Started session={session_id} user={user_id} "
-        f"questions={len(selected_qs)}",
-        flush=True,
-    )
+    log.info(f"[Listening Sectional] Started session={session_id} user={user_id} " f"questions={len(selected_qs)}")
 
     return {
         "session_id":      session_id,
@@ -405,11 +402,7 @@ def resume_listening_sectional_exam(session_id: str, user_id: int, db: Session) 
             "is_submitted":  qid in submitted,
         })
 
-    print(
-        f"[Listening Sectional] Resumed session={session_id} user={user_id} "
-        f"submitted={len(submitted)}/{len(qid_order)}",
-        flush=True,
-    )
+    log.info(f"[Listening Sectional] Resumed session={session_id} user={user_id} " f"submitted={len(submitted)}/{len(qid_order)}")
     return {
         "session_id":      session_id,
         "attempt_id":      attempt.id,
@@ -441,7 +434,7 @@ def _wait_for_speaking_in_rds(
         return
     from db.models import AttemptAnswer
     deadline = time.time() + timeout
-    print(f"[ListeningBG] Waiting for {len(speaking_qids)} speaking scores in RDS…", flush=True)
+    log.info(f"[ListeningBG] Waiting for {len(speaking_qids)} speaking scores in RDS…")
     while time.time() < deadline:
         pending = (
             bg_db.query(AttemptAnswer)
@@ -455,7 +448,7 @@ def _wait_for_speaking_in_rds(
         if pending == 0:
             return
         time.sleep(3)
-    print(f"[ListeningBG] ⏱  Speaking scoring timed out after {timeout}s for attempt={attempt_id}", flush=True)
+    log.warning(f"[ListeningBG] ⏱ Speaking scoring timed out after {timeout}s for attempt={attempt_id}")
 
 
 def _aggregate_bg(
@@ -560,18 +553,13 @@ def _aggregate_bg(
             attempt.completed_at       = datetime.now(timezone.utc)
             flag_modified(attempt, "task_breakdown")
             bg_db.commit()
-            print(
-                f"[ListeningBG] ✅ user={user_id} session={session_id} "
-                f"score={scaled} norm_pct={round(normalised_pct * 100, 1)}% "
-                f"answered={len(answered_by_qid)}/{len(all_question_ids)}",
-                flush=True,
-            )
+            log.info(f"[ListeningBG] ✅ user={user_id} session={session_id} " f"score={scaled} norm_pct={round(normalised_pct * 100, 1)}% " f"answered={len(answered_by_qid)}/{len(all_question_ids)}")
         else:
-            print(f"[ListeningBG] ❌ attempt_id={attempt_id} not found in DB", flush=True)
+            log.error(f"[ListeningBG] ❌ attempt_id={attempt_id} not found in DB")
 
     except Exception as e:
         import traceback
-        print(f"[ListeningBG] ❌ Failed session={session_id}: {e}", flush=True)
+        log.error(f"[ListeningBG] ❌ Failed session={session_id}: {e}")
         traceback.print_exc()
     finally:
         bg_db.close()
@@ -603,11 +591,7 @@ def finish_listening_sectional(session_id: str, user_id: int, db: Session) -> di
     if not all_question_ids:
         raise HTTPException(status_code=400, detail="No questions found for this session")
 
-    print(
-        f"[ListeningFinish] session={session_id} user={user_id} "
-        f"attempt={attempt.id} questions={len(all_question_ids)}",
-        flush=True,
-    )
+    log.info(f"[ListeningFinish] session={session_id} user={user_id} " f"attempt={attempt.id} questions={len(all_question_ids)}")
 
     threading.Thread(
         target=_aggregate_bg,

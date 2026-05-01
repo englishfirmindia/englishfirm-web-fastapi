@@ -22,6 +22,7 @@ from db.database import get_db
 from db.models import User
 from core.dependencies import get_current_user
 from services.mock_service import (
+
     get_mock_info,
     start_mock_test,
     get_mock_part,
@@ -32,6 +33,11 @@ from services.mock_service import (
     resume_mock_test,
     submit_mock_answer,
 )
+
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
 
 router = APIRouter(tags=["Mock Test"])
 
@@ -112,10 +118,7 @@ def mock_finish(
                 payload={**inner, "session_id": session_id, "question_id": qid},
             )
         except Exception as e:
-            print(
-                f"[Mock] pending_submit failed q={qid}: {e}",
-                flush=True,
-            )
+            log.error(f"[Mock] pending_submit failed q={qid}: {e}")
             pending_failed.append(
                 {"question_id": qid, "error": str(e)[:200]}
             )

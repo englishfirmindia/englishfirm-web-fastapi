@@ -31,6 +31,10 @@ from services.session_service import ACTIVE_SESSIONS
 from services.s3_service import generate_presigned_url
 import core.config as config
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
 
 def _maybe_presigned_url(q) -> Optional[str]:
     """Return a presigned audio URL for SST/WFD, None otherwise."""
@@ -150,11 +154,7 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
         )
         pool = fresh
         if len(fresh) < count:
-            print(
-                f"[Writing Sectional] Not enough fresh questions for {task_type} "
-                f"(need {count}, have {len(fresh)}) — falling back to full pool",
-                flush=True,
-            )
+            log.info(f"[Writing Sectional] Not enough fresh questions for {task_type} " f"(need {count}, have {len(fresh)}) — falling back to full pool")
             pool = (
                 db.query(QuestionFromApeuni)
                 .options(*opts)
@@ -167,7 +167,7 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
 
         n = min(count, len(pool))
         if n == 0:
-            print(f"[Writing Sectional] No questions for {task_type} — skipping", flush=True)
+            log.info(f"[Writing Sectional] No questions for {task_type} — skipping")
             continue
         selected_qs.extend(random.sample(pool, n))
 
@@ -232,11 +232,7 @@ def start_writing_sectional_exam(db: Session, user_id: int, test_number: int) ->
         "attempt_id":           attempt.id,
     }
 
-    print(
-        f"[Writing Sectional] Started session={session_id} user={user_id} "
-        f"questions={len(selected_qs)}",
-        flush=True,
-    )
+    log.info(f"[Writing Sectional] Started session={session_id} user={user_id} " f"questions={len(selected_qs)}")
 
     return {
         "session_id":      session_id,
@@ -310,11 +306,7 @@ def resume_writing_sectional_exam(session_id: str, user_id: int, db: Session) ->
             "is_submitted":  qid in submitted,
         })
 
-    print(
-        f"[Writing Sectional] Resumed session={session_id} user={user_id} "
-        f"submitted={len(submitted)}/{len(qid_order)}",
-        flush=True,
-    )
+    log.info(f"[Writing Sectional] Resumed session={session_id} user={user_id} " f"submitted={len(submitted)}/{len(qid_order)}")
     return {
         "session_id":      session_id,
         "attempt_id":      attempt.id,
@@ -436,11 +428,7 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
     db.commit()
     db.refresh(attempt)
 
-    print(
-        f"[Writing Sectional] Finished session={session_id} score={scaled} "
-        f"answered={len(submitted)}/{len(questions)}",
-        flush=True,
-    )
+    log.info(f"[Writing Sectional] Finished session={session_id} score={scaled} " f"answered={len(submitted)}/{len(questions)}")
 
     return {
         "attempt_id":     attempt.id,

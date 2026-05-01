@@ -13,6 +13,11 @@ from core.dependencies import get_current_user
 from db.models import User
 from services.azure_speech_service import assess_pronunciation
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
+
 router = APIRouter(tags=["Mic Check"])
 
 _TEST_PHRASE   = "The quick brown fox"
@@ -35,7 +40,7 @@ def _mean_volume_db(audio_bytes: bytes) -> float:
         m = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", r.stderr)
         import shutil
         shutil.copy(path, _LAST_MIC_CHECK_PATH)
-        print(f"[mic-check] saved → {_LAST_MIC_CHECK_PATH}  mean_db={float(m.group(1)) if m else -91.0:.1f}")
+        log.info(f"[mic-check] saved → {_LAST_MIC_CHECK_PATH} mean_db={float(m.group(1)) if m else -91.0:.1f}")
         return float(m.group(1)) if m else -91.0
     finally:
         os.unlink(path)

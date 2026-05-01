@@ -10,6 +10,10 @@ import requests
 from typing import Optional
 from datetime import date
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
 
 ZAPIER_WEBHOOK_URL = os.getenv("ZAPIER_WEBHOOK_URL")
 
@@ -42,4 +46,4 @@ def send_signup_webhook(
         response.raise_for_status()
     except requests.RequestException as e:
         # Do NOT crash signup if webhook fails
-        print(f"[Zapier webhook error] {e}")
+        log.error(f"[Zapier webhook error] {e}")

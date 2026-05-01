@@ -18,12 +18,18 @@ from core.dependencies import get_current_user
 from services.session_service import ACTIVE_SESSIONS, persist_speaking_answer_pending
 from services.speaking_scorer import kick_off_scoring
 from services.speaking_sectional_service import (
+
     get_speaking_sectional_info,
     start_speaking_sectional_exam,
     resume_speaking_sectional_exam,
     finish_speaking_sectional,
     get_speaking_sectional_results,
 )
+
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
 
 router = APIRouter(prefix="/sectional/speaking", tags=["Sectional - Speaking"])
 
@@ -133,10 +139,7 @@ def finish_exam(
                 current_user=current_user,
             )
         except Exception as e:
-            print(
-                f"[Speaking Sectional] pending_submit failed q={qid}: {e}",
-                flush=True,
-            )
+            log.error(f"[Speaking Sectional] pending_submit failed q={qid}: {e}")
             pending_failed.append(
                 {"question_id": qid, "error": str(e)[:200]}
             )

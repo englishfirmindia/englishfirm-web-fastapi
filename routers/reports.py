@@ -19,6 +19,11 @@ from db.database import get_db, Base, engine
 from db.models import User
 from core.dependencies import get_current_user
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
+
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
 
@@ -40,7 +45,7 @@ class QuestionReport(Base):
 try:
     QuestionReport.__table__.create(bind=engine, checkfirst=True)
 except Exception as e:
-    print(f"[reports] table create skipped: {e}", flush=True)
+    log.info(f"[reports] table create skipped: {e}")
 
 
 # ── S3 upload URL for screenshots ─────────────────────────────────────────────
@@ -117,5 +122,5 @@ def submit_question_report(
     db.commit()
     db.refresh(report)
 
-    print(f"[reports] user={current_user.id} q={qid_int} type={question_type} → id={report.id}", flush=True)
+    log.info(f"[reports] user={current_user.id} q={qid_int} type={question_type} → id={report.id}")
     return {"id": report.id, "status": report.status}

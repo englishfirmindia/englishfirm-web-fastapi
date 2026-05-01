@@ -13,6 +13,11 @@ from db.models import QuestionFromApeuni, PracticeAttempt, AttemptAnswer, UserQu
 from db.database import SessionLocal
 import core.config as config
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
+
 ACTIVE_SESSIONS: Dict[str, dict] = {}
 _SCORE_STORE: Dict[tuple, dict] = {}
 
@@ -116,7 +121,7 @@ def start_session(
         db.refresh(attempt)
         attempt_id = attempt.id
     except Exception as e:
-        print(f"[SESSION] DB attempt creation failed: {e}", flush=True)
+        log.error(f"[SESSION] DB attempt creation failed: {e}")
         db.rollback()
         attempt_id = None
 
@@ -260,13 +265,13 @@ def mark_submitted(
                 return
             except Exception as e:
                 last_exc = e
-                print(f"[MARK_SUBMITTED] DB error attempt={attempt}/3: {e}", flush=True)
+                log.error(f"[MARK_SUBMITTED] DB error attempt={attempt}/3: {e}")
                 db.rollback()
                 if attempt < 3:
                     time.sleep(attempt)
             finally:
                 db.close()
-        print(f"[MARK_SUBMITTED] failed after 3 attempts: {last_exc}", flush=True)
+        log.error(f"[MARK_SUBMITTED] failed after 3 attempts: {last_exc}")
 
     threading.Thread(target=_record, daemon=True).start()
 
@@ -327,13 +332,13 @@ def persist_answer_to_db(
                 return
             except Exception as e:
                 last_exc = e
-                print(f"[PERSIST_ANSWER] DB error attempt={attempt}/3 q={question_id}: {e}", flush=True)
+                log.error(f"[PERSIST_ANSWER] DB error attempt={attempt}/3 q={question_id}: {e}")
                 db.rollback()
                 if attempt < 3:
                     time.sleep(attempt)
             finally:
                 db.close()
-        print(f"[PERSIST_ANSWER] failed after 3 attempts q={question_id}: {last_exc}", flush=True)
+        log.error(f"[PERSIST_ANSWER] failed after 3 attempts q={question_id}: {last_exc}")
 
     threading.Thread(target=_write, daemon=True).start()
 
@@ -373,13 +378,13 @@ def persist_speaking_answer_pending(
                 return
             except Exception as e:
                 last_exc = e
-                print(f"[PERSIST_SPEAKING] DB error attempt={attempt}/3 q={question_id}: {e}", flush=True)
+                log.error(f"[PERSIST_SPEAKING] DB error attempt={attempt}/3 q={question_id}: {e}")
                 db.rollback()
                 if attempt < 3:
                     time.sleep(attempt)
             finally:
                 db.close()
-        print(f"[PERSIST_SPEAKING] failed after 3 attempts q={question_id}: {last_exc}", flush=True)
+        log.error(f"[PERSIST_SPEAKING] failed after 3 attempts q={question_id}: {last_exc}")
 
     threading.Thread(target=_write, daemon=True).start()
 
@@ -446,13 +451,13 @@ def update_speaking_score_in_db(
                 return
             except Exception as e:
                 last_exc = e
-                print(f"[UPDATE_SCORE] DB error attempt={attempt}/3 q={question_id}: {e}", flush=True)
+                log.error(f"[UPDATE_SCORE] DB error attempt={attempt}/3 q={question_id}: {e}")
                 db.rollback()
                 if attempt < 3:
                     time.sleep(attempt)
             finally:
                 db.close()
-        print(f"[UPDATE_SCORE] failed after 3 attempts q={question_id}: {last_exc}", flush=True)
+        log.error(f"[UPDATE_SCORE] failed after 3 attempts q={question_id}: {last_exc}")
 
     threading.Thread(target=_update, daemon=True).start()
 

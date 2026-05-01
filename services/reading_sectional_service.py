@@ -33,6 +33,10 @@ from services.s3_service import generate_presigned_url
 from services.scoring.base import to_pte_score
 import core.config as config
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
 
 def _earned_pct_from_answer(score: int) -> float:
     """Convert a stored pte_score (10–90) to a 0.0–1.0 fraction for weighted aggregation.
@@ -181,11 +185,7 @@ def start_reading_sectional_exam(db: Session, user_id: int, test_number: int) ->
         )
         pool = fresh
         if len(fresh) < count:
-            print(
-                f"[Reading Sectional] Not enough fresh questions for {task_type} "
-                f"(need {count}, have {len(fresh)}) — falling back to full pool",
-                flush=True,
-            )
+            log.info(f"[Reading Sectional] Not enough fresh questions for {task_type} " f"(need {count}, have {len(fresh)}) — falling back to full pool")
             pool = (
                 db.query(QuestionFromApeuni)
                 .options(*opts)
@@ -198,7 +198,7 @@ def start_reading_sectional_exam(db: Session, user_id: int, test_number: int) ->
 
         n = min(count, len(pool))
         if n == 0:
-            print(f"[Reading Sectional] No questions for {task_type} — skipping", flush=True)
+            log.info(f"[Reading Sectional] No questions for {task_type} — skipping")
             continue
         selected_qs.extend(random.sample(pool, n))
 
@@ -267,11 +267,7 @@ def start_reading_sectional_exam(db: Session, user_id: int, test_number: int) ->
         "attempt_id":           attempt.id,
     }
 
-    print(
-        f"[Reading Sectional] Started session={session_id} user={user_id} "
-        f"questions={len(selected_qs)}",
-        flush=True,
-    )
+    log.info(f"[Reading Sectional] Started session={session_id} user={user_id} " f"questions={len(selected_qs)}")
 
     return {
         "session_id":      session_id,
@@ -348,11 +344,7 @@ def resume_reading_sectional_exam(session_id: str, user_id: int, db: Session) ->
                     entry["presigned_url"] = audio_url
         questions_payload.append(entry)
 
-    print(
-        f"[Reading Sectional] Resumed session={session_id} user={user_id} "
-        f"submitted={len(submitted)}/{len(qid_order)}",
-        flush=True,
-    )
+    log.info(f"[Reading Sectional] Resumed session={session_id} user={user_id} " f"submitted={len(submitted)}/{len(qid_order)}")
     return {
         "session_id":      session_id,
         "attempt_id":      attempt.id,
@@ -474,12 +466,7 @@ def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict
     db.commit()
     db.refresh(existing)
 
-    print(
-        f"[Reading Sectional] Finished session={session_id} score={scaled} "
-        f"norm_pct={round(normalised_pct * 100, 1)}% "
-        f"answered={len(answered_by_qid)}/{len(qid_order)}",
-        flush=True,
-    )
+    log.info(f"[Reading Sectional] Finished session={session_id} score={scaled} " f"norm_pct={round(normalised_pct * 100, 1)}% " f"answered={len(answered_by_qid)}/{len(qid_order)}")
 
     return {
         "attempt_id":     existing.id,

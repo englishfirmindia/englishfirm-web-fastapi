@@ -30,6 +30,11 @@ from services.s3_service import generate_presigned_url
 from services.speaking_scorer import kick_off_scoring
 import core.config as config
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
+
 # ─── Sectional structure ──────────────────────────────────────────────────────
 SPEAKING_STRUCTURE = [
     {"task": "read_aloud",                 "count": 6,  "prep_seconds": 35, "rec_seconds": 40},
@@ -124,11 +129,7 @@ def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -
         )
         pool = fresh
         if len(fresh) < count:
-            print(
-                f"[Speaking Sectional] Not enough fresh questions for {task_type} "
-                f"(need {count}, have {len(fresh)}) — falling back to full pool",
-                flush=True,
-            )
+            log.info(f"[Speaking Sectional] Not enough fresh questions for {task_type} " f"(need {count}, have {len(fresh)}) — falling back to full pool")
             pool = (
                 db.query(QuestionFromApeuni)
                 .options(joinedload(QuestionFromApeuni.evaluation))
@@ -141,7 +142,7 @@ def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -
 
         n = min(count, len(pool))
         if n == 0:
-            print(f"[Speaking Sectional] No questions for {task_type} — skipping", flush=True)
+            log.info(f"[Speaking Sectional] No questions for {task_type} — skipping")
             continue
         selected_qs.extend(random.sample(pool, n))
 
@@ -219,11 +220,7 @@ def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -
     db.commit()
     db.refresh(attempt)
 
-    print(
-        f"[Speaking Sectional] Created attempt={attempt.id} session={session_id} "
-        f"user={user_id} questions={len(selected_qs)}",
-        flush=True,
-    )
+    log.info(f"[Speaking Sectional] Created attempt={attempt.id} session={session_id} " f"user={user_id} questions={len(selected_qs)}")
 
     # Store session in memory
     ACTIVE_SESSIONS[session_id] = {
@@ -337,11 +334,7 @@ def resume_speaking_sectional_exam(session_id: str, user_id: int, db: Session) -
             "is_submitted":        qid in submitted_ids,
         })
 
-    print(
-        f"[Speaking Sectional] Resumed session={session_id} user={user_id} "
-        f"submitted={len(submitted_ids)}/{len(qid_order)}",
-        flush=True,
-    )
+    log.info(f"[Speaking Sectional] Resumed session={session_id} user={user_id} " f"submitted={len(submitted_ids)}/{len(qid_order)}")
     return {
         "session_id":      session_id,
         "attempt_id":      attempt.id,
@@ -382,11 +375,7 @@ def _speaking_aggregate_bg(
 
         # 2. Wait for all answers to have scoring_status='complete' (max 300 s)
         deadline = time.time() + 300
-        print(
-            f"[SpeakingBG] Waiting for {len(all_question_ids)} scores in RDS "
-            f"attempt={attempt_id}…",
-            flush=True,
-        )
+        log.info(f"[SpeakingBG] Waiting for {len(all_question_ids)} scores in RDS " f"attempt={attempt_id}…")
         while time.time() < deadline:
             pending = (
                 bg_db.query(AttemptAnswer)
@@ -401,11 +390,7 @@ def _speaking_aggregate_bg(
                 break
             time.sleep(3)
         else:
-            print(
-                f"[SpeakingBG] ⏱ Timed out after 300 s for attempt={attempt_id} — "
-                "computing with available scores",
-                flush=True,
-            )
+            log.warning(f"[SpeakingBG] ⏱ Timed out after 300 s for attempt={attempt_id} — " "computing with available scores")
 
         bg_db.expire_all()
 
@@ -475,17 +460,12 @@ def _speaking_aggregate_bg(
             attempt.completed_at       = datetime.now(timezone.utc)
             flag_modified(attempt, "task_breakdown")
             bg_db.commit()
-            print(
-                f"[SpeakingBG] ✅ user={user_id} session={session_id} "
-                f"score={scaled} norm_pct={round(normalised_pct * 100, 1)}% "
-                f"answered={len(answered_by_qid)}/{len(all_question_ids)}",
-                flush=True,
-            )
+            log.info(f"[SpeakingBG] ✅ user={user_id} session={session_id} " f"score={scaled} norm_pct={round(normalised_pct * 100, 1)}% " f"answered={len(answered_by_qid)}/{len(all_question_ids)}")
         else:
-            print(f"[SpeakingBG] ❌ attempt_id={attempt_id} not found in DB", flush=True)
+            log.error(f"[SpeakingBG] ❌ attempt_id={attempt_id} not found in DB")
 
     except Exception as e:
-        print(f"[SpeakingBG] ❌ Failed session={session_id}: {e}", flush=True)
+        log.error(f"[SpeakingBG] ❌ Failed session={session_id}: {e}")
         traceback.print_exc()
     finally:
         bg_db.close()
@@ -540,11 +520,7 @@ def finish_speaking_sectional(session_id: str, user_id: int, db: Session) -> dic
     attempt.completed_at = datetime.now(timezone.utc)
     db.commit()
 
-    print(
-        f"[SpeakingFinish] session={session_id} user={user_id} "
-        f"attempt={attempt.id} questions={len(all_question_ids)} rekicked={rekicked}",
-        flush=True,
-    )
+    log.info(f"[SpeakingFinish] session={session_id} user={user_id} " f"attempt={attempt.id} questions={len(all_question_ids)} rekicked={rekicked}")
 
     threading.Thread(
         target=_speaking_aggregate_bg,

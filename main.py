@@ -1,13 +1,15 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-import logging
+from core.logging_config import setup_logging, get_logger
+setup_logging()
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 from routers.auth import router as auth_router
 from routers.user import router as user_router

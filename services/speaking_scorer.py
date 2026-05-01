@@ -15,6 +15,10 @@ from services.s3_service import generate_presigned_url
 from services.session_service import store_score, update_speaking_score_in_db
 from services.scoring.azure_scorer import _compute_question_score
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
 
 def _pte_score(pct: float) -> int:
     return max(config.PTE_FLOOR, min(config.PTE_CEILING, round(config.PTE_BASE + pct * config.PTE_SCALE)))
@@ -32,7 +36,7 @@ def _get_stimulus_key_points(question_type: str, audio_url: str) -> list:
         if transcript:
             return extract_key_points(transcript, question_type)
     except Exception as e:
-        print(f"[SCORER] Stimulus key-point extraction failed ({question_type}): {e}", flush=True)
+        log.error(f"[SCORER] Stimulus key-point extraction failed ({question_type}): {e}")
     return []
 
 
@@ -166,14 +170,9 @@ def _run_scoring(
             transcript=transcript,
             word_scores=word_scores,
         )
-        print(f"[SCORER] q={question_id} type={question_type} content={content:.1f} "
-              f"fluency={fluency} pronunciation={pronunciation} pte={pte}", flush=True)
+        log.info(f"[SCORER] q={question_id} type={question_type} content={content:.1f} " f"fluency={fluency} pronunciation={pronunciation} pte={pte}")
         if question_type == "answer_short_question":
-            print(f"[ASQ] q={question_id} "
-                  f"user_said={transcript!r} "
-                  f"expected={expected_answers!r} "
-                  f"is_correct={extra.get('is_correct')} "
-                  f"pte={pte}", flush=True)
+            log.info(f"[ASQ] q={question_id} " f"user_said={transcript!r} " f"expected={expected_answers!r} " f"is_correct={extra.get('is_correct')} " f"pte={pte}")
 
     except Exception as e:
         store_score(user_id, question_id, {"scoring": "error", "error": str(e)})

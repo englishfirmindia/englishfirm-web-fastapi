@@ -11,15 +11,15 @@ Swap `_post_webhook` with a real provider (boto3 SES / SendGrid SDK)
 when the project gets one.
 """
 
-import logging
 from typing import Optional
 
 import requests
 
 import core.config as config
 
+from core.logging_config import get_logger
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 def _post_webhook(to: str, subject: str, body: str) -> None:
@@ -42,13 +42,7 @@ def _post_webhook(to: str, subject: str, body: str) -> None:
 
 def send_email(to: str, subject: str, body: str) -> None:
     """Fire-and-forget email send. Never raises."""
-    print(
-        f"\n[EMAIL] to={to}\n"
-        f"        from={config.EMAIL_FROM}\n"
-        f"        subject={subject}\n"
-        f"        body=\n{body}\n",
-        flush=True,
-    )
+    log.info(f"\n[EMAIL] to={to}\n" f" from={config.EMAIL_FROM}\n" f" subject={subject}\n" f" body=\n{body}\n")
     _post_webhook(to, subject, body)
 
 

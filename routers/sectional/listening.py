@@ -38,6 +38,7 @@ from core.dependencies import get_current_user
 from services.session_service import ACTIVE_SESSIONS
 from services.scoring import get_scorer
 from services.listening_sectional_service import (
+
     get_listening_sectional_info,
     start_listening_sectional_exam,
     resume_listening_sectional_exam,
@@ -45,6 +46,11 @@ from services.listening_sectional_service import (
     get_listening_sectional_results,
     _question_max,
 )
+
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
 
 router = APIRouter(prefix="/sectional/listening", tags=["Sectional - Listening"])
 
@@ -250,10 +256,7 @@ def finish_exam(
                 payload=submit_payload, db=db, current_user=current_user
             )
         except Exception as e:
-            print(
-                f"[Listening Sectional] pending_submit failed q={qid}: {e}",
-                flush=True,
-            )
+            log.error(f"[Listening Sectional] pending_submit failed q={qid}: {e}")
             pending_failed.append(
                 {"question_id": qid, "error": str(e)[:200]}
             )

@@ -38,6 +38,11 @@ from services.s3_service import generate_presigned_url
 from services.scoring import get_scorer
 from services.scoring.base import to_pte_score
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
+
 # ─── Task metadata ────────────────────────────────────────────────────────────
 # Each task tagged with section (for scoring) and part (for runner ordering).
 # `module` = DB column in question_from_apeuni used to fetch the question row.
@@ -257,7 +262,7 @@ def start_mock_test(db: Session, user_id: int, test_number: int = 1) -> dict:
 
         n = min(count, len(pool))
         if n == 0:
-            print(f"[Mock] WARNING: no questions available for {task_type}", flush=True)
+            log.warning(f"[Mock] WARNING: no questions available for {task_type}")
             continue
         selected.extend(random.sample(pool, n))
 
@@ -312,7 +317,7 @@ def start_mock_test(db: Session, user_id: int, test_number: int = 1) -> dict:
         "part_timer_remaining": {1: None, 2: PART_BLOCK_TIMERS[2], 3: PART_BLOCK_TIMERS[3]},
     }
 
-    print(f"[Mock] Started session={session_id} attempt={attempt.id} total_q={len(selected)}", flush=True)
+    log.info(f"[Mock] Started session={session_id} attempt={attempt.id} total_q={len(selected)}")
 
     return {
         "session_id":      session_id,
@@ -637,7 +642,7 @@ def finish_mock_test(db: Session, session_id: str, user_id: int) -> dict:
     db.commit()
     db.refresh(attempt)
 
-    print(f"[Mock] Finished session={session_id} scores S={speaking['score']} W={writing['score']} R={reading['score']} L={listening['score']} O={overall}", flush=True)
+    log.info(f"[Mock] Finished session={session_id} scores S={speaking['score']} W={writing['score']} R={reading['score']} L={listening['score']} O={overall}")
 
     return _format_results(attempt)
 

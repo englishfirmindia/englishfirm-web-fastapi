@@ -19,6 +19,11 @@ import requests
 import urllib.parse
 from typing import Optional
 
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
+
+
 logger = logging.getLogger(__name__)
 
 AZURE_SPEECH_KEY    = os.getenv("AZURE_SPEECH_KEY", "")
@@ -166,7 +171,6 @@ def assess_pronunciation(
     raise last_exc
 
 
-
 def transcribe_and_score_free(audio_bytes: bytes) -> dict:
     """
     Free-form STT + fluency/pronunciation scoring (no reference text).
@@ -229,7 +233,7 @@ def score_read_aloud(audio_bytes: bytes, reference_text: str) -> dict:
     fluency_score  = azure_result.get("FluencyScore",  0)
     recognized     = azure_result.get("recognized_text", "")
 
-    print(f"[AZURE] AccuracyScore={accuracy_score} FluencyScore={fluency_score} text='{recognized[:60]}'", flush=True)
+    log.info(f"[AZURE] AccuracyScore={accuracy_score} FluencyScore={fluency_score} text='{recognized[:60]}'")
 
     pronunciation = round(float(accuracy_score), 1)
     fluency       = round(float(fluency_score), 1)
