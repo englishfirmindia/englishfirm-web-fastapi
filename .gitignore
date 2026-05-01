@@ -1,0 +1,21 @@
+# Secrets — never commit
+.env
+.env.*
+*.keystore
+google-services.json
+GoogleService-Info.plist
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Tooling
+.claude/hooks/
