@@ -11,6 +11,7 @@ from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, get_score_from_store, persist_speaking_answer_pending, store_score
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url, generate_presigned_upload_url
+from core.security_helpers import safe_question_id, assert_audio_url_owned
 
 router = APIRouter(prefix="/speaking/answer-short-question", tags=["Speaking - Answer Short Question"])
 
@@ -117,9 +118,10 @@ def start(
 @router.post("/get-upload-url")
 def get_upload_url(
     payload: dict = Body(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    question_id = payload.get("question_id", "unknown")
+    question_id = safe_question_id(payload, db)
     key = f"recordings/{current_user.id}/answer_short_question/{question_id}/{uuid.uuid4()}.aac"
     return generate_presigned_upload_url(key)
 
@@ -131,8 +133,9 @@ def submit(
     current_user: User = Depends(get_current_user),
 ):
     session_id = payload["session_id"]
-    question_id = int(payload["question_id"])
+    question_id = safe_question_id(payload, db)
     audio_url = payload["audio_url"]
+    assert_audio_url_owned(audio_url, current_user.id)
 
     session = get_session(session_id)
     q_obj = session["questions"].get(question_id)

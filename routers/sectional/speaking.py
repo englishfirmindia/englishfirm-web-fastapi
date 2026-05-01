@@ -17,6 +17,7 @@ from db.models import User, PracticeAttempt
 from core.dependencies import get_current_user
 from services.session_service import ACTIVE_SESSIONS, persist_speaking_answer_pending
 from services.speaking_scorer import kick_off_scoring
+from core.security_helpers import safe_question_id, assert_audio_url_owned
 from services.speaking_sectional_service import (
 
     get_speaking_sectional_info,
@@ -77,6 +78,7 @@ def resume_exam(
 @router.post("/submit-audio")
 def submit_audio(
     payload: dict = Body(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -85,8 +87,9 @@ def submit_audio(
     Does NOT kick off scoring — that happens at /finish.
     """
     session_id  = payload["session_id"]
-    question_id = int(payload["question_id"])
+    question_id = safe_question_id(payload, db)
     audio_url   = payload["audio_url"]
+    assert_audio_url_owned(audio_url, current_user.id)
 
     session = ACTIVE_SESSIONS.get(session_id)
     if not session:
@@ -137,6 +140,7 @@ def finish_exam(
                     "session_id": session_id,
                     "question_id": qid,
                 },
+                db=db,
                 current_user=current_user,
             )
         except Exception as e:
