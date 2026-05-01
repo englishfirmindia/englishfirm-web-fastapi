@@ -76,7 +76,9 @@ CORS_ALLOWED_ORIGINS = [
     o.strip()
     for o in os.getenv(
         "CORS_ALLOWED_ORIGINS",
-        f"{FRONTEND_URL},http://localhost:8080,http://127.0.0.1:8080",
+        f"{FRONTEND_URL},"
+        "http://localhost:8080,http://127.0.0.1:8080,"
+        "http://localhost:5000,http://127.0.0.1:5000",
     ).split(",")
     if o.strip()
 ]
