@@ -32,7 +32,6 @@ aws ecr get-login-password --profile "$PROFILE" --region "$REGION" \
 
 docker buildx build --platform linux/amd64 \
   -t "${ECR_URI}:${SHA}" \
-  -t "${ECR_URI}:latest" \
   --push .
 
 echo "→ Updating task definition image to :${SHA}"
