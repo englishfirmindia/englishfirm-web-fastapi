@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Body, HTTPException
 from sqlalchemy.orm import Session
 
 from db.database import get_db
-from db.models import User
+from db.models import PracticeAttempt, User
 from core.dependencies import get_current_user
 from services.mock_service import (
 
@@ -54,8 +54,17 @@ def mock_start(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Picks 65 questions and creates a PracticeAttempt(module='mock')."""
+    """Picks 65 questions and creates a PracticeAttempt(module='mock').
+
+    test_number identifies which of the 40 numbered mock slots the user
+    chose; 0 is reserved for debug (re-uses already-submitted questions).
+    """
     test_number = int(payload.get("test_number", 1))
+    if test_number != 0 and not (1 <= test_number <= 40):
+        raise HTTPException(
+            status_code=400,
+            detail="test_number must be between 1 and 40",
+        )
     return start_mock_test(db=db, user_id=current_user.id, test_number=test_number)
 
 
@@ -173,3 +182,46 @@ def mock_resume(
 ):
     """Restores a pending mock session with saved part + remaining timer."""
     return resume_mock_test(session_id=session_id, user_id=current_user.id, db=db)
+
+
+@router.get("/mock/attempted-tests")
+def mock_attempted_tests(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Returns completed mocks for the current user, deduped by test_number,
+    keeping the most-recent completion date and the best overall_score seen.
+    """
+    attempts = (
+        db.query(PracticeAttempt)
+        .filter(
+            PracticeAttempt.user_id == current_user.id,
+            PracticeAttempt.module == "mock",
+            PracticeAttempt.status == "complete",
+        )
+        .order_by(PracticeAttempt.completed_at.desc())
+        .all()
+    )
+    seen: dict[int, dict] = {}
+    for a in attempts:
+        tb = a.task_breakdown or {}
+        tn = tb.get("test_number")
+        if not isinstance(tn, int) or not (1 <= tn <= 40):
+            continue
+        completed_at = a.completed_at.isoformat() if a.completed_at else None
+        overall = tb.get("overall_score", a.total_score)
+        existing = seen.get(tn)
+        if existing is None:
+            seen[tn] = {
+                "test_number": tn,
+                "completed_at": completed_at,
+                "best_score": overall,
+            }
+        else:
+            if overall is not None and (
+                existing["best_score"] is None or overall > existing["best_score"]
+            ):
+                existing["best_score"] = overall
+    return {
+        "attempted_tests": [seen[tn] for tn in sorted(seen.keys())]
+    }

@@ -42,6 +42,9 @@ def _test_label(attempt: PracticeAttempt) -> str:
     qtype = (attempt.question_type or "").lower()
     module = (attempt.module or "").lower()
     if qtype == "mock" or module == "mock":
+        tn = (attempt.task_breakdown or {}).get("test_number")
+        if isinstance(tn, int) and 1 <= tn <= 40:
+            return f"Mock {tn}"
         return "Mock"
     if qtype == "sectional":
         return f"{_module_title(module)} Sectional"

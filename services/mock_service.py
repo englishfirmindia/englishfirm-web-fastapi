@@ -285,7 +285,11 @@ def start_mock_test(db: Session, user_id: int, test_number: int = 1) -> dict:
         status                = "pending",
         scoring_status        = "pending",
         selected_question_ids = [q.question_id for q in selected],
-        task_breakdown        = {"current_part": 1, "part_timer_remaining": {}},
+        task_breakdown        = {
+            "current_part": 1,
+            "part_timer_remaining": {},
+            "test_number": test_number,
+        },
     )
     db.add(attempt)
     db.commit()
@@ -653,6 +657,7 @@ def _format_results(attempt: PracticeAttempt) -> dict:
     return {
         "attempt_id":         attempt.id,
         "session_id":         attempt.session_id,
+        "test_number":        tb.get("test_number"),
         "scoring_status":     attempt.scoring_status or "complete",
         "overall_score":      tb.get("overall_score", attempt.total_score),
         "speaking_score":     (tb.get("speaking") or {}).get("score"),
