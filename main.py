@@ -22,6 +22,12 @@ from routers.student_share import router as student_share_router
 
 app = FastAPI(title="EnglishFirm Web API", version="1.0.0")
 
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 # Rate limiter — shared instance defined in core.rate_limit
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
