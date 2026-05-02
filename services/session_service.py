@@ -454,6 +454,15 @@ def persist_answer_to_db(
     if not attempt_id and not session_id:
         return
 
+    # Display floor: when the scorer has produced a final PTE score (10–90),
+    # store that in `score` so any view reading the column shows the floored
+    # value instead of raw hits/earned (which can be 0). Pending rows (no
+    # pte_score yet) keep whatever the caller passed.
+    if isinstance(result_json, dict):
+        _pte = result_json.get("pte_score")
+        if isinstance(_pte, int) and _pte > 0:
+            score = _pte
+
     def _write():
         nonlocal attempt_id
         last_exc: Exception = RuntimeError("_write: no attempts made")
@@ -580,15 +589,20 @@ def update_speaking_score_in_db(
                     .first()
                 )
                 if answer:
+                    # Display floor: PTE score never shown below PTE_FLOOR (10)
+                    # even when scoring failed/returned 0. The raw azure
+                    # subscores stay as-is.
+                    floored = max(int(round(total)), config.PTE_FLOOR)
                     answer.content_score = content
                     answer.fluency_score = fluency
                     answer.pronunciation_score = pronunciation
-                    answer.score = int(round(total))
+                    answer.score = floored
                     answer.result_json = {
                         "content": content,
                         "pronunciation": pronunciation,
                         "fluency": fluency,
                         "total": total,
+                        "pte_score": floored,
                         "transcript": transcript,
                         "word_scores": word_scores or [],
                     }
