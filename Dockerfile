@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq-dev \
         ca-certificates \
         curl \
+        ffmpeg \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
