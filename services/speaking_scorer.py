@@ -24,7 +24,7 @@ def _pte_score(pct: float) -> int:
     return max(config.PTE_FLOOR, min(config.PTE_CEILING, round(config.PTE_BASE + pct * config.PTE_SCALE)))
 
 
-_WPM_RULE_TYPES = {
+_PENALTY_RULE_TYPES = {
     'read_aloud',
     'repeat_sentence',
     'describe_image',
@@ -35,7 +35,44 @@ _WPM_RULE_TYPES = {
 }
 
 
-def _maybe_apply_wpm_rule_speaking(
+def _silence_ratio_pct(seg) -> float:
+    """
+    Return the within-speech silence ratio as a percentage [0, 100].
+    Excludes leading and trailing silence (those aren't pauses, just dead air
+    before/after the user spoke). Uses pydub silence detection at -30 dBFS,
+    minimum 300 ms — same parameters used in our diagnostic ffmpeg path.
+    """
+    try:
+        from pydub.silence import detect_silence
+    except Exception:
+        return 0.0
+    total_ms = len(seg)
+    if total_ms <= 0:
+        return 0.0
+    # detect_silence returns [start_ms, end_ms] for each silent stretch
+    silences = detect_silence(seg, min_silence_len=300, silence_thresh=-30)
+    if not silences:
+        return 0.0
+    total_silence_ms = sum(end - start for start, end in silences)
+    # leading: silence at the very start (within 100 ms)
+    leading_ms = (silences[0][1] - silences[0][0]) if silences[0][0] <= 100 else 0
+    # if a near-continuous second silence follows the leading one (gap < 50 ms), include it too
+    if (
+        len(silences) >= 2
+        and silences[0][0] <= 100
+        and silences[1][0] - silences[0][1] < 50
+    ):
+        leading_ms += silences[1][1] - silences[1][0]
+    # trailing: silence ending within 100 ms of audio end
+    trailing_ms = (silences[-1][1] - silences[-1][0]) if (total_ms - silences[-1][1]) <= 100 else 0
+    within_ms = total_silence_ms - leading_ms - trailing_ms
+    speech_window_ms = total_ms - leading_ms - trailing_ms
+    if speech_window_ms <= 0:
+        return 0.0
+    return max(0.0, min(100.0, within_ms / speech_window_ms * 100.0))
+
+
+def _apply_speaking_penalties(
     user_id: int,
     question_id: int,
     question_type: str,
@@ -46,19 +83,23 @@ def _maybe_apply_wpm_rule_speaking(
     pronunciation: float,
 ):
     """
-    Apply wpm_scoring_rules to speaking subscores for the question types in
-    _WPM_RULE_TYPES. Covers practice + sectional + mock uniformly — there is
-    no parent-attempt gate; the rule applies any time one of these question
-    types is scored.
+    Apply WPM + silence-ratio rules to speaking subscores.
 
-    Words counted: word_scores entries where error_type is neither
-    'Omission' nor 'Insertion'. Fail-open on any error.
+    Penalty model:
+      - Both rules contribute a penalty on FLUENCY only.
+      - Total fluency penalty = wpm_penalty + silence_penalty.
+      - If the total exceeds raw fluency, the OVERFLOW is subtracted from
+        pronunciation (capped at 0).
+      - Content is never affected.
+      - If EITHER rule returns mode='zero_out', all three subscores → 0
+        (kill switch — non-response equivalent).
 
-    answer_short_question is excluded — its scoring is binary (correct/
-    incorrect content only) and has no fluency/pronunciation dimension to
-    penalise.
+    Coverage: types in _PENALTY_RULE_TYPES, across practice + sectional + mock.
+    answer_short_question is excluded (binary content, no fluency dimension).
+
+    Fail-open on any internal error — original c/f/p returned, error logged.
     """
-    if question_type not in _WPM_RULE_TYPES:
+    if question_type not in _PENALTY_RULE_TYPES:
         return content, fluency, pronunciation
     try:
         from db.database import SessionLocal
@@ -79,10 +120,11 @@ def _maybe_apply_wpm_rule_speaking(
             return content, fluency, pronunciation
 
         wpm = words_spoken * 60.0 / duration_sec
+        silence_pct = _silence_ratio_pct(seg)
 
         db = SessionLocal()
         try:
-            row = db.execute(sql_text("""
+            wpm_row = db.execute(sql_text("""
                 SELECT id, mode, penalty, label
                 FROM wpm_scoring_rules
                 WHERE (min_wpm IS NULL OR :wpm >= min_wpm)
@@ -90,35 +132,51 @@ def _maybe_apply_wpm_rule_speaking(
                 ORDER BY id
                 LIMIT 1
             """), {"wpm": wpm}).first()
+            sil_row = db.execute(sql_text("""
+                SELECT id, mode, penalty, label
+                FROM silence_ratio_rules
+                WHERE (min_pct IS NULL OR :pct >= min_pct)
+                  AND (max_pct IS NULL OR :pct <  max_pct)
+                ORDER BY id
+                LIMIT 1
+            """), {"pct": silence_pct}).first()
         finally:
             db.close()
 
-        if row is None:
-            return content, fluency, pronunciation
+        wpm_mode = wpm_row.mode if wpm_row else None
+        wpm_pen = float(wpm_row.penalty) if wpm_row else 0.0
+        wpm_label = wpm_row.label if wpm_row else 'no-rule'
+        sil_mode = sil_row.mode if sil_row else None
+        sil_pen = float(sil_row.penalty) if sil_row else 0.0
+        sil_label = sil_row.label if sil_row else 'no-rule'
+
+        # Kill switch — either rule's zero_out wipes all three.
+        if wpm_mode == 'zero_out' or sil_mode == 'zero_out':
+            log.info(
+                "[PENALTY] q=%s type=%s user=%s wpm=%.1f sil=%.1f%% → zero_out (wpm=%s, sil=%s)",
+                question_id, question_type, user_id, wpm, silence_pct, wpm_label, sil_label,
+            )
+            return 0.0, 0.0, 0.0
+
+        # Sum fluency penalties; overflow spills to pronunciation.
+        total_pen = wpm_pen + sil_pen
+        f_in = float(fluency)
+        new_fluency = max(0.0, f_in - total_pen)
+        overflow = max(0.0, total_pen - f_in)
+        new_pronunciation = max(0.0, float(pronunciation) - overflow)
 
         log.info(
-            "[WPM] q=%s type=%s user=%s words=%s dur=%.2fs wpm=%.1f rule=%s(%s) mode=%s penalty=%s",
-            question_id, question_type, user_id, words_spoken, duration_sec, wpm,
-            row.id, row.label, row.mode, row.penalty,
+            "[PENALTY] q=%s type=%s user=%s words=%s dur=%.2fs wpm=%.1f sil=%.1f%% "
+            "wpm_band=%s(p=%s) sil_band=%s(p=%s) total=%s f:%.0f→%.0f overflow=%s p:%.0f→%.0f",
+            question_id, question_type, user_id, words_spoken, duration_sec,
+            wpm, silence_pct,
+            wpm_label, wpm_pen, sil_label, sil_pen, total_pen,
+            f_in, new_fluency, overflow, float(pronunciation), new_pronunciation,
         )
 
-        if row.mode == 'zero_out':
-            # Kill switch — wipes all three. <80 WPM is treated as a
-            # non-response equivalent.
-            return 0.0, 0.0, 0.0
-        if row.mode == 'subtract':
-            # Only fluency is penalised. Content (did she say the right
-            # words) and pronunciation (how each word was articulated)
-            # are independent dimensions and not affected by pace.
-            p = float(row.penalty)
-            return (
-                float(content),
-                max(0.0, float(fluency) - p),
-                float(pronunciation),
-            )
-        return content, fluency, pronunciation
+        return float(content), new_fluency, new_pronunciation
     except Exception as e:
-        log.error("[WPM] rule application failed (fail-open): %s", e)
+        log.error("[PENALTY] rule application failed (fail-open): %s", e)
         return content, fluency, pronunciation
 
 
@@ -238,9 +296,10 @@ def _run_scoring(
                 target = _targets.get(question_type, 40)
                 content = min(len(transcript.split()) / target, 1.0) * 50.0 if transcript else 0.0
 
-        # WPM rule: applies to RA / RS / DI / RL / RTS / SGD across practice +
-        # sectional + mock. No-op for ASQ. See _WPM_RULE_TYPES + wpm_scoring_rules.
-        content, fluency, pronunciation = _maybe_apply_wpm_rule_speaking(
+        # Speaking penalty rules (WPM + silence ratio with overflow) apply to
+        # RA / RS / DI / RL / RTS / SGD across practice + sectional + mock.
+        # No-op for ASQ. See _PENALTY_RULE_TYPES + wpm_scoring_rules + silence_ratio_rules.
+        content, fluency, pronunciation = _apply_speaking_penalties(
             user_id=user_id,
             question_id=question_id,
             question_type=question_type,
