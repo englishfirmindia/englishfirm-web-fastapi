@@ -103,13 +103,18 @@ def _maybe_apply_wpm_rule_speaking(
         )
 
         if row.mode == 'zero_out':
+            # Kill switch — wipes all three. <80 WPM is treated as a
+            # non-response equivalent.
             return 0.0, 0.0, 0.0
         if row.mode == 'subtract':
+            # Only fluency is penalised. Content (did she say the right
+            # words) and pronunciation (how each word was articulated)
+            # are independent dimensions and not affected by pace.
             p = float(row.penalty)
             return (
-                max(0.0, float(content) - p),
+                float(content),
                 max(0.0, float(fluency) - p),
-                max(0.0, float(pronunciation) - p),
+                float(pronunciation),
             )
         return content, fluency, pronunciation
     except Exception as e:
