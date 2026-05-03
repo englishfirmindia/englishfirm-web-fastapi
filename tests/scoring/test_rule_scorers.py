@@ -311,11 +311,51 @@ class TestWFDScorer:
         assert result.pte_score == 10
 
     def test_partial_match(self):
-        # 2 of 4 words correct at same positions
         answer = self._answer('the quick red cat', 'the quick brown fox')
         result = self.scorer.score(1, 'sess', answer)
         assert result.raw_score == 0.5
         assert result.pte_score == to_pte_score(0.5)
+        assert result.breakdown['hits'] == 2
+        assert result.breakdown['total'] == 4
+        assert sorted(result.breakdown['extras']) == ['cat', 'red']
+
+    def test_reorder_full_credit(self):
+        answer = self._answer('fox brown quick the', 'the quick brown fox')
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.pte_score == 90
+        assert result.breakdown['hits'] == 4
+        assert result.breakdown['extras'] == []
+
+    def test_extras_do_not_penalise(self):
+        answer = self._answer('the quick brown red fox', 'the quick brown fox')
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.pte_score == 90
+        assert result.breakdown['hits'] == 4
+        assert result.breakdown['extras'] == ['red']
+
+    def test_multiset_caps_repeats(self):
+        answer = self._answer('the the cat', 'the cat sat')
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.breakdown['hits'] == 2
+        assert result.breakdown['total'] == 3
+        assert result.breakdown['extras'] == ['the']
+
+    def test_strict_spelling(self):
+        answer = self._answer('developments play', 'development plays')
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.breakdown['hits'] == 0
+        assert sorted(result.breakdown['extras']) == ['developments', 'play']
+
+    def test_report_62_regression(self):
+        answer = self._answer(
+            'Agricultural developments play plays a vital role in poor and rural areas area.',
+            'Agricultural development plays a vital role in poor and rural areas.',
+        )
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.breakdown['hits'] == 10
+        assert result.breakdown['total'] == 11
+        assert result.pte_score == 83
+        assert sorted(result.breakdown['extras']) == ['area', 'developments', 'play']
 
     def test_punctuation_stripped(self):
         answer = self._answer('Hello, world!', 'Hello world')
@@ -331,6 +371,15 @@ class TestWFDScorer:
         answer = self._answer('some text', '')
         result = self.scorer.score(1, 'sess', answer)
         assert result.pte_score == 10
+
+    def test_word_results_shape_unchanged(self):
+        answer = self._answer('the quick red cat', 'the quick brown fox')
+        wr = self.scorer.score(1, 'sess', answer).breakdown['word_results']
+        assert set(wr.keys()) == {'0', '1', '2', '3'}
+        assert wr['0'] == {'correct': 'the', 'user': 'the', 'match': True}
+        assert wr['1'] == {'correct': 'quick', 'user': 'quick', 'match': True}
+        assert wr['2'] == {'correct': 'brown', 'user': '', 'match': False}
+        assert wr['3'] == {'correct': 'fox', 'user': '', 'match': False}
 
     def test_is_async_false(self):
         assert WFDScorer().is_async is False

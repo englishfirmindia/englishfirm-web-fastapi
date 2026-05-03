@@ -11,6 +11,7 @@ passed in by the caller — scorers never touch the DB themselves.
 """
 
 import re
+from collections import Counter
 from typing import List
 
 from .base import ScoringResult, ScoringStrategy, to_pte_score
@@ -304,9 +305,11 @@ class WFDScorer(ScoringStrategy):
       evaluation_json: dict
       user_text: str
 
-    Scoring: position-based word match (same index in both lists).
-    Per task spec: order-insensitive count is also acceptable for web.
-    This implementation uses position-based matching (faithful to mobile backend).
+    Scoring: each correctly-spelled reference word the student typed earns
+    one point, regardless of position. Multiset-aware (a reference word
+    appearing twice must be typed twice to earn both points). Extra words
+    the student typed that aren't in the reference do not subtract — this
+    matches the official PTE WFD rubric.
     """
 
     @property
@@ -319,25 +322,34 @@ class WFDScorer(ScoringStrategy):
 
         transcript = evaluation_json.get('correctAnswers', {}).get('transcript', '')
 
-        correct_words = [_normalise_word(w) for w in transcript.split() if w.strip()]
-        user_words = [_normalise_word(w) for w in user_text.split() if w.strip()]
+        correct_words = [w for w in (_normalise_word(t) for t in transcript.split()) if w]
+        user_words = [w for w in (_normalise_word(t) for t in user_text.split()) if w]
 
         if not correct_words:
             return ScoringResult(
                 pte_score=to_pte_score(0.0),
                 raw_score=0.0,
                 is_async=False,
-                breakdown={'hits': 0, 'total': 0},
+                breakdown={'hits': 0, 'total': 0, 'word_results': {}, 'extras': []},
             )
 
+        remaining_user = Counter(user_words)
         hits = 0
-        word_results = {}
+        word_results: dict = {}
         for i, cw in enumerate(correct_words):
-            uw = user_words[i] if i < len(user_words) else ''
-            match = cw == uw and cw != ''
-            word_results[str(i)] = {'correct': cw, 'user': uw, 'match': match}
-            if match:
+            if remaining_user[cw] > 0:
+                remaining_user[cw] -= 1
                 hits += 1
+                word_results[str(i)] = {'correct': cw, 'user': cw, 'match': True}
+            else:
+                word_results[str(i)] = {'correct': cw, 'user': '', 'match': False}
+
+        leftover = Counter(remaining_user)
+        extras: List[str] = []
+        for w in user_words:
+            if leftover[w] > 0:
+                extras.append(w)
+                leftover[w] -= 1
 
         raw_score = hits / len(correct_words)
 
@@ -349,6 +361,7 @@ class WFDScorer(ScoringStrategy):
                 'hits': hits,
                 'total': len(correct_words),
                 'word_results': word_results,
+                'extras': extras,
             },
         )
 
