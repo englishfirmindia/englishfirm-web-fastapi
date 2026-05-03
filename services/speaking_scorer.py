@@ -24,6 +24,95 @@ def _pte_score(pct: float) -> int:
     return max(config.PTE_FLOOR, min(config.PTE_CEILING, round(config.PTE_BASE + pct * config.PTE_SCALE)))
 
 
+def _maybe_apply_wpm_rule_practice_ra(
+    user_id: int,
+    question_id: int,
+    question_type: str,
+    audio_bytes: bytes,
+    word_scores: list,
+    content: float,
+    fluency: float,
+    pronunciation: float,
+):
+    """
+    Practice Read Aloud only: look up wpm_scoring_rules and adjust
+    (content, fluency, pronunciation) per the matched band.
+
+    Skipped for: any other question_type, sectional attempts, mock attempts.
+    Words counted: word_scores entries where error_type is neither 'Omission'
+    nor 'Insertion'. Fail-open on any error.
+    """
+    if question_type != "read_aloud":
+        return content, fluency, pronunciation
+    try:
+        from db.database import SessionLocal
+        from db.models import PracticeAttempt, AttemptAnswer
+        from sqlalchemy import text as sql_text
+        from pydub import AudioSegment
+        import io
+
+        db = SessionLocal()
+        try:
+            pa = (db.query(PracticeAttempt)
+                  .join(AttemptAnswer, AttemptAnswer.attempt_id == PracticeAttempt.id)
+                  .filter(
+                      PracticeAttempt.user_id == user_id,
+                      AttemptAnswer.question_id == question_id,
+                      AttemptAnswer.scoring_status == 'pending',
+                  )
+                  .order_by(AttemptAnswer.submitted_at.desc())
+                  .first())
+            if not pa or pa.question_type != 'read_aloud':
+                return content, fluency, pronunciation
+
+            words_spoken = sum(
+                1 for w in (word_scores or [])
+                if isinstance(w, dict) and w.get('error_type') not in ('Omission', 'Insertion')
+            )
+            if words_spoken <= 0:
+                return content, fluency, pronunciation
+
+            seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
+            duration_sec = seg.duration_seconds
+            if duration_sec <= 0:
+                return content, fluency, pronunciation
+
+            wpm = words_spoken * 60.0 / duration_sec
+
+            row = db.execute(sql_text("""
+                SELECT id, mode, penalty, label
+                FROM wpm_scoring_rules
+                WHERE (min_wpm IS NULL OR :wpm >= min_wpm)
+                  AND (max_wpm IS NULL OR :wpm <  max_wpm)
+                ORDER BY id
+                LIMIT 1
+            """), {"wpm": wpm}).first()
+            if row is None:
+                return content, fluency, pronunciation
+
+            log.info(
+                "[WPM] q=%s user=%s words=%s dur=%.2fs wpm=%.1f rule=%s(%s) mode=%s penalty=%s",
+                question_id, user_id, words_spoken, duration_sec, wpm,
+                row.id, row.label, row.mode, row.penalty,
+            )
+
+            if row.mode == 'zero_out':
+                return 0.0, 0.0, 0.0
+            if row.mode == 'subtract':
+                p = float(row.penalty)
+                return (
+                    max(0.0, float(content) - p),
+                    max(0.0, float(fluency) - p),
+                    max(0.0, float(pronunciation) - p),
+                )
+            return content, fluency, pronunciation
+        finally:
+            db.close()
+    except Exception as e:
+        log.error("[WPM] rule application failed (fail-open): %s", e)
+        return content, fluency, pronunciation
+
+
 def _get_stimulus_key_points(question_type: str, audio_url: str) -> list:
     """Transcribe stimulus audio + GPT-extract key points for RL/RTS/SGD."""
     try:
@@ -78,6 +167,18 @@ def _run_scoring(
             pronunciation = raw["pronunciation"]
             transcript    = raw.get("transcript", "")
             word_scores   = raw.get("word_scores", [])
+
+            # WPM rule: applies to PRACTICE Read Aloud only. No-op for RS, sectional, mock.
+            content, fluency, pronunciation = _maybe_apply_wpm_rule_practice_ra(
+                user_id=user_id,
+                question_id=question_id,
+                question_type=question_type,
+                audio_bytes=audio_bytes,
+                word_scores=word_scores,
+                content=content,
+                fluency=fluency,
+                pronunciation=pronunciation,
+            )
 
         elif question_type == "answer_short_question":
             raw = transcribe_and_score_free(audio_bytes)
