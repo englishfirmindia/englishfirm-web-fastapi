@@ -175,6 +175,69 @@ def _apply_speaking_fluency_formula(
         return content, fluency, pronunciation
 
 
+def _transcribe_azure_with_whisper_parallel(audio_bytes: bytes) -> dict:
+    """
+    Run Azure transcribe_and_score_free + Whisper transcription concurrently.
+    Returns Azure's full result dict, with 'transcript' replaced by Whisper's
+    output when available. Adds audit fields:
+      - 'azure_transcript':   raw Azure transcript
+      - 'whisper_transcript': raw Whisper transcript ('' if failed)
+      - 'transcript_source':  'whisper' | 'azure_fallback' | 'none'
+
+    Whisper runs in a daemon thread that joins after Azure's longer call
+    returns. Net latency is max(Azure, Whisper) instead of sum.
+
+    Used by the LLM-content-scored branches (DI, RL, RTS, ptea_RTS, SGD)
+    where Azure's en-US ASR mishears domain vocabulary. Whisper's broader
+    language model handles technical PTE terms (Radiata, chipper, fallout)
+    and accented English better.
+    """
+    from services.azure_speech_service import transcribe_and_score_free
+
+    holder = {}
+
+    def _whisper_worker():
+        try:
+            from services.whisper_service import transcribe_with_whisper
+            holder['whisper'] = transcribe_with_whisper(audio_bytes)
+        except Exception as e:
+            log.error("[WHISPER] worker thread failed: %s", e)
+            holder['whisper'] = ""
+
+    t = threading.Thread(target=_whisper_worker, daemon=True)
+    t.start()
+
+    azure_result = transcribe_and_score_free(audio_bytes)
+    azure_transcript = azure_result.get('transcript', '') if isinstance(azure_result, dict) else ''
+
+    # Cap Whisper wait at 15s in case the API hangs.
+    t.join(timeout=15.0)
+    whisper_transcript = holder.get('whisper', '')
+
+    if whisper_transcript:
+        chosen = whisper_transcript
+        source = 'whisper'
+    elif azure_transcript:
+        chosen = azure_transcript
+        source = 'azure_fallback'
+    else:
+        chosen = ''
+        source = 'none'
+
+    log.info(
+        "[WHISPER] azure_len=%d whisper_len=%d source=%s",
+        len(azure_transcript), len(whisper_transcript), source,
+    )
+
+    return {
+        **(azure_result if isinstance(azure_result, dict) else {}),
+        'transcript': chosen,
+        'azure_transcript': azure_transcript,
+        'whisper_transcript': whisper_transcript,
+        'transcript_source': source,
+    }
+
+
 def _get_stimulus_key_points(question_type: str, audio_url: str) -> list:
     """Transcribe stimulus audio + GPT-extract key points for RL/RTS/SGD."""
     try:
@@ -257,7 +320,10 @@ def _run_scoring(
             extra = {"is_correct": is_correct}
 
         elif question_type == "describe_image":
-            raw = transcribe_and_score_free(audio_bytes)
+            # Whisper transcribes in parallel with Azure for better content
+            # scoring on PTE-specific vocab + accented English. Azure still
+            # provides word_scores, fluency, pronunciation as before.
+            raw = _transcribe_azure_with_whisper_parallel(audio_bytes)
             transcript    = raw.get("transcript", "")
             fluency       = raw.get("fluency", 0)
             pronunciation = raw.get("pronunciation", 0)
@@ -270,8 +336,8 @@ def _run_scoring(
                 content = min(len(transcript.split()) / 40, 1.0) * 50.0 if transcript else 0.0
 
         else:
-            # RL, RTS, SGD
-            raw = transcribe_and_score_free(audio_bytes)
+            # RL, RTS, ptea_RTS, SGD — Whisper-parallel transcription too.
+            raw = _transcribe_azure_with_whisper_parallel(audio_bytes)
             transcript    = raw.get("transcript", "")
             fluency       = raw.get("fluency", 0)
             pronunciation = raw.get("pronunciation", 0)
