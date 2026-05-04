@@ -88,6 +88,22 @@ def _silence_ratio_pct(seg) -> tuple:
     return ratio, len(within_pauses)
 
 
+def _cross_multiplier(score: float) -> float:
+    """
+    Soft cross-penalty multiplier. Returns 1.0 when the dimension is healthy
+    (>= 20), 0.5 when it bottomed out (0), and a linear interpolation in
+    between. This replaces the rev-13 binary halving (fluency==0 → halve).
+
+    The full-strength penalty zone is 0–20; any score >= 20 contributes no
+    penalty to the other dimensions.
+    """
+    if score >= 20.0:
+        return 1.0
+    if score <= 0.0:
+        return 0.5
+    return 0.5 + 0.025 * score   # equivalently 0.5 + 0.5 * (score / 20)
+
+
 def _count_sentences(text: str) -> int:
     """
     Count sentences via terminal punctuation. Used to gate the silence rule:
@@ -242,38 +258,45 @@ def _apply_speaking_fluency_formula(
             "duration_sec": round(duration_sec, 2),
         }
 
-        # Cross-penalty: if any one of {fluency, pronunciation} hits 0, halve
-        # the other two dimensions before downstream rubric math. Sequential
-        # cascade — if BOTH fluency and pron are 0, content gets halved twice
-        # (→ c/4). Content is never zeroed by this rule on its own; the
-        # existing _CONTENT_ZERO_* rules in azure_scorer handle content==0.
+        # Cross-penalty (Option B — symmetric soft ramp). Each dimension's
+        # multiplier (0.5 → 1.0 over the 0–20 score range) is applied to
+        # the OTHER two dimensions before downstream rubric math. Replaces
+        # the rev-13 binary halving and stops the harsh f==0 → halve cliff:
+        # a low-but-nonzero score now produces proportional penalty instead
+        # of zero penalty.
+        #
+        # Content==0 still hits its hard zero-out rule in azure_scorer
+        # (_CONTENT_ZERO_TASKS / _CONTENT_ZERO_LLM_TASKS) — that rule fires
+        # downstream and short-circuits to all-zeros, so any halving here at
+        # the c=0 boundary is harmless / overridden.
         before_c = float(content)
         before_f = new_fluency
         before_p = float(pronunciation)
-        new_content = before_c
-        new_pronunciation = before_p
-        cross_triggers = []
 
-        if new_fluency == 0:
-            cross_triggers.append("fluency_zero")
-            new_content = new_content / 2.0
-            new_pronunciation = new_pronunciation / 2.0
+        mC = _cross_multiplier(before_c)
+        mF = _cross_multiplier(before_f)
+        mP = _cross_multiplier(before_p)
 
-        if new_pronunciation == 0:
-            cross_triggers.append("pronunciation_zero")
-            new_content = new_content / 2.0
-            new_fluency = new_fluency / 2.0
+        new_content       = before_c * mF * mP    # F and P drag C
+        new_fluency       = before_f * mC * mP    # C and P drag F
+        new_pronunciation = before_p * mC * mF    # C and F drag P
 
-        if cross_triggers:
+        # Log only when at least one dimension is in the penalty zone
+        # (otherwise all three multipliers are 1.0 and there is nothing to log).
+        if mC < 1.0 or mF < 1.0 or mP < 1.0:
             log.info(
-                "[CROSS_PENALTY] q=%s type=%s user=%s triggers=%s "
+                "[CROSS_PENALTY] q=%s type=%s user=%s mC=%.3f mF=%.3f mP=%.3f "
                 "before c/f/p=%.1f/%.1f/%.1f → after c/f/p=%.1f/%.1f/%.1f",
-                question_id, question_type, user_id, ",".join(cross_triggers),
+                question_id, question_type, user_id,
+                mC, mF, mP,
                 before_c, before_f, before_p,
                 new_content, new_fluency, new_pronunciation,
             )
-        if cross_triggers:
-            fluency_metrics["cross_penalty_triggers"] = cross_triggers
+            fluency_metrics["cross_multipliers"] = {
+                "mC": round(mC, 3),
+                "mF": round(mF, 3),
+                "mP": round(mP, 3),
+            }
 
         return new_content, new_fluency, new_pronunciation, fluency_metrics
     except Exception as e:
