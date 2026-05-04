@@ -533,6 +533,7 @@ def _run_scoring(
             total=pte,
             transcript=transcript,
             word_scores=word_scores,
+            fluency_metrics=fluency_metrics,
         )
         log.info(f"[SCORER] q={question_id} type={question_type} content={content:.1f} " f"fluency={fluency} pronunciation={pronunciation} pte={pte}")
         if question_type == "answer_short_question":

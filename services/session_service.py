@@ -568,8 +568,15 @@ def update_speaking_score_in_db(
     total: float,
     transcript: str = "",
     word_scores: list = None,
+    fluency_metrics: dict = None,
 ) -> None:
-    """Update AttemptAnswer with Azure scores after async scoring completes."""
+    """Update AttemptAnswer with Azure scores after async scoring completes.
+
+    fluency_metrics: optional dict produced by _apply_speaking_fluency_formula —
+    persisted into result_json under the same key for audit (wpm, silence_pct,
+    pause_count, sentence_count, silence_rule_applied, duration_sec, and
+    cross_multipliers when in penalty zone). Empty/None is omitted.
+    """
     def _update():
         from sqlalchemy import func
         last_exc: Exception = RuntimeError("_update: no attempts made")
@@ -597,7 +604,7 @@ def update_speaking_score_in_db(
                     answer.fluency_score = fluency
                     answer.pronunciation_score = pronunciation
                     answer.score = floored
-                    answer.result_json = {
+                    rj = {
                         "content": content,
                         "pronunciation": pronunciation,
                         "fluency": fluency,
@@ -606,6 +613,9 @@ def update_speaking_score_in_db(
                         "transcript": transcript,
                         "word_scores": word_scores or [],
                     }
+                    if fluency_metrics:
+                        rj["fluency_metrics"] = fluency_metrics
+                    answer.result_json = rj
                     answer.scoring_status = "complete"
                     db.flush()
                     # For sectional attempts the background aggregation thread owns
