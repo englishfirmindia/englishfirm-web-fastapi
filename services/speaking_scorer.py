@@ -24,7 +24,7 @@ def _pte_score(pct: float) -> int:
     return max(config.PTE_FLOOR, min(config.PTE_CEILING, round(config.PTE_BASE + pct * config.PTE_SCALE)))
 
 
-_PENALTY_RULE_TYPES = {
+_FLUENCY_FORMULA_TYPES = {
     'read_aloud',
     'repeat_sentence',
     'describe_image',
@@ -72,7 +72,7 @@ def _silence_ratio_pct(seg) -> float:
     return max(0.0, min(100.0, within_ms / speech_window_ms * 100.0))
 
 
-def _apply_speaking_penalties(
+def _apply_speaking_fluency_formula(
     user_id: int,
     question_id: int,
     question_type: str,
@@ -83,27 +83,37 @@ def _apply_speaking_penalties(
     pronunciation: float,
 ):
     """
-    Apply WPM + silence-ratio rules to speaking subscores.
+    Replace Azure's FluencyScore with a deterministic formula based on WPM
+    and within-speech silence ratio. Content (CompletenessScore) and
+    pronunciation (AccuracyScore) pass through Azure-as-is.
 
-    Penalty model:
-      - Both rules contribute a penalty on FLUENCY only.
-      - Total fluency penalty = wpm_penalty + silence_penalty.
-      - If the total exceeds raw fluency, the OVERFLOW is subtracted from
-        pronunciation (capped at 0).
-      - Content is never affected.
-      - If EITHER rule returns mode='zero_out', all three subscores → 0
-        (kill switch — non-response equivalent).
+    Formula:
+        if silence_pct > 20  OR  wpm < 100  OR  wpm > 200:
+            fluency = 0
+        else:
+            wpm_score      = 100 - 2.5 * (140 - wpm)   if 100 <= wpm < 140
+                             100                        if 140 <= wpm <= 180
+                             100 - 5 * (wpm - 180)      if 180 < wpm <= 200
+            silence_score  = 5 * (20 - silence_pct)
+            fluency        = min(wpm_score, silence_score)
 
-    Coverage: types in _PENALTY_RULE_TYPES, across practice + sectional + mock.
-    answer_short_question is excluded (binary content, no fluency dimension).
+    Words counted for WPM: word_scores entries where error_type is neither
+    'Omission' nor 'Insertion'. Same rule as before.
 
-    Fail-open on any internal error — original c/f/p returned, error logged.
+    Silence ratio: within-speech (excludes leading/trailing dead air) via
+    pydub.silence.detect_silence at -30 dBFS, min 300 ms. Same as before.
+
+    Coverage: types in _FLUENCY_FORMULA_TYPES, across practice + sectional + mock.
+    answer_short_question is excluded.
+
+    NOTE: wpm_scoring_rules and silence_ratio_rules tables are no longer
+    queried by this code path. They are kept in DB for easy revert.
+
+    Fail-open: any error keeps Azure's original c/f/p (logged).
     """
-    if question_type not in _PENALTY_RULE_TYPES:
+    if question_type not in _FLUENCY_FORMULA_TYPES:
         return content, fluency, pronunciation
     try:
-        from db.database import SessionLocal
-        from sqlalchemy import text as sql_text
         from pydub import AudioSegment
         import io
 
@@ -122,61 +132,46 @@ def _apply_speaking_penalties(
         wpm = words_spoken * 60.0 / duration_sec
         silence_pct = _silence_ratio_pct(seg)
 
-        db = SessionLocal()
-        try:
-            wpm_row = db.execute(sql_text("""
-                SELECT id, mode, penalty, label
-                FROM wpm_scoring_rules
-                WHERE (min_wpm IS NULL OR :wpm >= min_wpm)
-                  AND (max_wpm IS NULL OR :wpm <  max_wpm)
-                ORDER BY id
-                LIMIT 1
-            """), {"wpm": wpm}).first()
-            sil_row = db.execute(sql_text("""
-                SELECT id, mode, penalty, label
-                FROM silence_ratio_rules
-                WHERE (min_pct IS NULL OR :pct >= min_pct)
-                  AND (max_pct IS NULL OR :pct <  max_pct)
-                ORDER BY id
-                LIMIT 1
-            """), {"pct": silence_pct}).first()
-        finally:
-            db.close()
+        # Hard-fail conditions
+        if silence_pct > 20.0 or wpm < 100.0 or wpm > 200.0:
+            new_fluency = 0.0
+            wpm_score_str = "-"
+            sil_score_str = "-"
+            reason_parts = []
+            if silence_pct > 20.0:
+                reason_parts.append(f"sil>{silence_pct:.1f}%")
+            if wpm < 100.0:
+                reason_parts.append(f"wpm<100({wpm:.1f})")
+            if wpm > 200.0:
+                reason_parts.append(f"wpm>200({wpm:.1f})")
+            reason = ",".join(reason_parts)
+        else:
+            if wpm < 140.0:
+                wpm_score = 100.0 - 2.5 * (140.0 - wpm)
+            elif wpm <= 180.0:
+                wpm_score = 100.0
+            else:  # 180 < wpm <= 200
+                wpm_score = 100.0 - 5.0 * (wpm - 180.0)
 
-        wpm_mode = wpm_row.mode if wpm_row else None
-        wpm_pen = float(wpm_row.penalty) if wpm_row else 0.0
-        wpm_label = wpm_row.label if wpm_row else 'no-rule'
-        sil_mode = sil_row.mode if sil_row else None
-        sil_pen = float(sil_row.penalty) if sil_row else 0.0
-        sil_label = sil_row.label if sil_row else 'no-rule'
-
-        # Kill switch — either rule's zero_out wipes all three.
-        if wpm_mode == 'zero_out' or sil_mode == 'zero_out':
-            log.info(
-                "[PENALTY] q=%s type=%s user=%s wpm=%.1f sil=%.1f%% → zero_out (wpm=%s, sil=%s)",
-                question_id, question_type, user_id, wpm, silence_pct, wpm_label, sil_label,
-            )
-            return 0.0, 0.0, 0.0
-
-        # Sum fluency penalties; overflow spills to pronunciation.
-        total_pen = wpm_pen + sil_pen
-        f_in = float(fluency)
-        new_fluency = max(0.0, f_in - total_pen)
-        overflow = max(0.0, total_pen - f_in)
-        new_pronunciation = max(0.0, float(pronunciation) - overflow)
+            silence_score = 5.0 * (20.0 - silence_pct)
+            new_fluency = min(wpm_score, silence_score)
+            new_fluency = max(0.0, min(100.0, new_fluency))
+            wpm_score_str = f"{wpm_score:.1f}"
+            sil_score_str = f"{silence_score:.1f}"
+            reason = "ok"
 
         log.info(
-            "[PENALTY] q=%s type=%s user=%s words=%s dur=%.2fs wpm=%.1f sil=%.1f%% "
-            "wpm_band=%s(p=%s) sil_band=%s(p=%s) total=%s f:%.0f→%.0f overflow=%s p:%.0f→%.0f",
+            "[FLUENCY_FORMULA] q=%s type=%s user=%s words=%s dur=%.2fs "
+            "wpm=%.1f sil=%.1f%% wpm_score=%s sil_score=%s "
+            "azure_f=%.1f → new_f=%.1f reason=%s",
             question_id, question_type, user_id, words_spoken, duration_sec,
-            wpm, silence_pct,
-            wpm_label, wpm_pen, sil_label, sil_pen, total_pen,
-            f_in, new_fluency, overflow, float(pronunciation), new_pronunciation,
+            wpm, silence_pct, wpm_score_str, sil_score_str,
+            float(fluency), new_fluency, reason,
         )
 
-        return float(content), new_fluency, new_pronunciation
+        return float(content), new_fluency, float(pronunciation)
     except Exception as e:
-        log.error("[PENALTY] rule application failed (fail-open): %s", e)
+        log.error("[FLUENCY_FORMULA] application failed (fail-open, keeping azure fluency): %s", e)
         return content, fluency, pronunciation
 
 
@@ -296,10 +291,11 @@ def _run_scoring(
                 target = _targets.get(question_type, 40)
                 content = min(len(transcript.split()) / target, 1.0) * 50.0 if transcript else 0.0
 
-        # Speaking penalty rules (WPM + silence ratio with overflow) apply to
-        # RA / RS / DI / RL / RTS / SGD across practice + sectional + mock.
-        # No-op for ASQ. See _PENALTY_RULE_TYPES + wpm_scoring_rules + silence_ratio_rules.
-        content, fluency, pronunciation = _apply_speaking_penalties(
+        # Speaking fluency formula replaces Azure's FluencyScore for the
+        # 7 types in _FLUENCY_FORMULA_TYPES across practice + sectional + mock.
+        # Content (CompletenessScore) and pronunciation (AccuracyScore) pass
+        # through Azure-as-is. ASQ is excluded.
+        content, fluency, pronunciation = _apply_speaking_fluency_formula(
             user_id=user_id,
             question_id=question_id,
             question_type=question_type,

@@ -1,0 +1,34 @@
+-- Migration: replace WPM + silence-ratio rule tables with deterministic fluency formula
+-- Date: 2026-05-04
+-- Applied to: postgres database on database-1 (ap-southeast-2)
+--
+-- This is a CODE-ONLY migration. The two rule tables are NOT dropped here —
+-- they remain in the DB but are no longer queried by services/speaking_scorer.py.
+-- Keeping them makes it easy to revert by re-enabling the old code path.
+--
+-- The new formula in code (services/speaking_scorer.py:_apply_speaking_fluency_formula):
+--
+--   if silence_pct > 20  OR  wpm < 100  OR  wpm > 200:
+--       fluency = 0
+--   else:
+--       wpm_score      = 100 - 2.5 * (140 - wpm)   if 100 <= wpm < 140
+--                        100                       if 140 <= wpm <= 180
+--                        100 - 5 * (wpm - 180)     if 180 < wpm <= 200
+--       silence_score  = 5 * (20 - silence_pct)
+--       fluency        = min(wpm_score, silence_score)
+--
+-- Replaces Azure's FluencyScore for the 7 covered question types (RA, RS, DI,
+-- RL, RTS, ptea_RTS, SGD). Content (CompletenessScore) and pronunciation
+-- (AccuracyScore) remain Azure-as-is. No further penalty stacking.
+--
+-- To revert:
+--   1. Roll task definition back to revision 9 (prior image), AND
+--   2. wpm_scoring_rules + silence_ratio_rules are still populated and
+--      will be queried by the rev 9 code path.
+--
+-- To fully clean up later (when confident):
+--   DROP TABLE wpm_scoring_rules;
+--   DROP TABLE silence_ratio_rules;
+
+-- No SQL operations needed — code-only change.
+SELECT 'fluency formula migration is code-only; no DB changes' AS note;
