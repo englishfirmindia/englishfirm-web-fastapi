@@ -40,7 +40,8 @@ _CONTENT_ZERO_TASKS = {'read_aloud', 'repeat_sentence'}
 
 # Tasks where content_zero applies only when LLM explicitly scored 0
 _CONTENT_ZERO_LLM_TASKS = {
-    'describe_image', 'retell_lecture', 'respond_to_situation',
+    'describe_image', 'retell_lecture',
+    'respond_to_situation', 'ptea_respond_situation',
     'summarize_group_discussion',
 }
 

@@ -169,7 +169,38 @@ def _apply_speaking_fluency_formula(
             float(fluency), new_fluency, reason,
         )
 
-        return float(content), new_fluency, float(pronunciation)
+        # Cross-penalty: if any one of {fluency, pronunciation} hits 0, halve
+        # the other two dimensions before downstream rubric math. Sequential
+        # cascade — if BOTH fluency and pron are 0, content gets halved twice
+        # (→ c/4). Content is never zeroed by this rule on its own; the
+        # existing _CONTENT_ZERO_* rules in azure_scorer handle content==0.
+        before_c = float(content)
+        before_f = new_fluency
+        before_p = float(pronunciation)
+        new_content = before_c
+        new_pronunciation = before_p
+        cross_triggers = []
+
+        if new_fluency == 0:
+            cross_triggers.append("fluency_zero")
+            new_content = new_content / 2.0
+            new_pronunciation = new_pronunciation / 2.0
+
+        if new_pronunciation == 0:
+            cross_triggers.append("pronunciation_zero")
+            new_content = new_content / 2.0
+            new_fluency = new_fluency / 2.0
+
+        if cross_triggers:
+            log.info(
+                "[CROSS_PENALTY] q=%s type=%s user=%s triggers=%s "
+                "before c/f/p=%.1f/%.1f/%.1f → after c/f/p=%.1f/%.1f/%.1f",
+                question_id, question_type, user_id, ",".join(cross_triggers),
+                before_c, before_f, before_p,
+                new_content, new_fluency, new_pronunciation,
+            )
+
+        return new_content, new_fluency, new_pronunciation
     except Exception as e:
         log.error("[FLUENCY_FORMULA] application failed (fail-open, keeping azure fluency): %s", e)
         return content, fluency, pronunciation
