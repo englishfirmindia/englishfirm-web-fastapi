@@ -35,41 +35,74 @@ _FLUENCY_FORMULA_TYPES = {
 }
 
 
-def _silence_ratio_pct(seg) -> float:
+# Pause / silence tuning constants. Bumping pause_min_ms from 300 → 600 means
+# only true breaks count as pauses; sub-600 ms gaps are treated as natural
+# in-sentence hesitations. Trailing tolerance widened from 100 → 200 ms so
+# small mouth-noise/clicks at the recorder cut don't count as a final pause.
+_PAUSE_MIN_MS = 600
+_LEADING_TOLERANCE_MS = 200
+_TRAILING_TOLERANCE_MS = 200
+_SILENCE_THRESH_DBFS = -30
+
+
+def _silence_ratio_pct(seg) -> tuple:
     """
-    Return the within-speech silence ratio as a percentage [0, 100].
-    Excludes leading and trailing silence (those aren't pauses, just dead air
-    before/after the user spoke). Uses pydub silence detection at -30 dBFS,
-    minimum 300 ms — same parameters used in our diagnostic ffmpeg path.
+    Return (silence_ratio_pct, pause_count) for the within-speech window.
+
+    silence_ratio_pct: total within-speech silence (>= _PAUSE_MIN_MS) as a
+    percentage [0, 100] of the speech window (audio - leading - trailing).
+    pause_count: number of within-speech silence segments (excludes leading
+    and trailing).
+
+    Uses pydub silence detection at -30 dBFS, min 600 ms.
     """
     try:
         from pydub.silence import detect_silence
     except Exception:
-        return 0.0
+        return 0.0, 0
     total_ms = len(seg)
     if total_ms <= 0:
-        return 0.0
-    # detect_silence returns [start_ms, end_ms] for each silent stretch
-    silences = detect_silence(seg, min_silence_len=300, silence_thresh=-30)
+        return 0.0, 0
+    silences = detect_silence(
+        seg, min_silence_len=_PAUSE_MIN_MS, silence_thresh=_SILENCE_THRESH_DBFS
+    )
     if not silences:
-        return 0.0
-    total_silence_ms = sum(end - start for start, end in silences)
-    # leading: silence at the very start (within 100 ms)
-    leading_ms = (silences[0][1] - silences[0][0]) if silences[0][0] <= 100 else 0
-    # if a near-continuous second silence follows the leading one (gap < 50 ms), include it too
-    if (
-        len(silences) >= 2
-        and silences[0][0] <= 100
-        and silences[1][0] - silences[0][1] < 50
-    ):
-        leading_ms += silences[1][1] - silences[1][0]
-    # trailing: silence ending within 100 ms of audio end
-    trailing_ms = (silences[-1][1] - silences[-1][0]) if (total_ms - silences[-1][1]) <= 100 else 0
-    within_ms = total_silence_ms - leading_ms - trailing_ms
+        return 0.0, 0
+
+    leading_ms = 0
+    trailing_ms = 0
+    within_pauses = []
+    for s, e in silences:
+        if s <= _LEADING_TOLERANCE_MS and leading_ms == 0:
+            leading_ms = e - s
+        elif (total_ms - e) <= _TRAILING_TOLERANCE_MS:
+            trailing_ms = e - s
+        else:
+            within_pauses.append((s, e))
+
     speech_window_ms = total_ms - leading_ms - trailing_ms
     if speech_window_ms <= 0:
-        return 0.0
-    return max(0.0, min(100.0, within_ms / speech_window_ms * 100.0))
+        return 0.0, len(within_pauses)
+    within_ms = sum(e - s for s, e in within_pauses)
+    ratio = max(0.0, min(100.0, within_ms / speech_window_ms * 100.0))
+    return ratio, len(within_pauses)
+
+
+def _count_sentences(text: str) -> int:
+    """
+    Count sentences via terminal punctuation. Used to gate the silence rule:
+    one pause per sentence boundary is natural, so silence only penalises
+    fluency when pause_count > sentence_count.
+
+    For RA / RS this is the reference passage; for DI / RL / RTS / SGD / ASQ
+    this is the user's transcript (Whisper or Azure).
+    Minimum 1 — never gate against zero.
+    """
+    if not text:
+        return 1
+    # Split on . ! ? — treat each non-empty fragment as a sentence.
+    parts = [p.strip() for p in re.split(r'[.!?]+', text) if p.strip()]
+    return max(1, len(parts))
 
 
 def _apply_speaking_fluency_formula(
@@ -81,38 +114,49 @@ def _apply_speaking_fluency_formula(
     content: float,
     fluency: float,
     pronunciation: float,
+    reference_text: str = "",
+    transcript: str = "",
 ):
     """
     Replace Azure's FluencyScore with a deterministic formula based on WPM
-    and within-speech silence ratio. Content (CompletenessScore) and
-    pronunciation (AccuracyScore) pass through Azure-as-is.
+    and within-speech silence. Content (CompletenessScore) and pronunciation
+    (AccuracyScore) pass through Azure-as-is.
+
+    Pauses are silence segments >= 600 ms within the speech window. The
+    silence side of the formula only fires when pause_count > sentence_count
+    (one natural pause per sentence is not penalised — only excess hesitation
+    is). Sentence count: reference passage for RA/RS, user transcript for the
+    free-form types.
 
     Formula:
-        if silence_pct > 20  OR  wpm < 100  OR  wpm > 200:
+        sentences  = sentence count (passage for RA/RS, transcript otherwise)
+        pauses     = within-speech silence segments >= 600 ms
+        sil_rule   = pauses > sentences
+
+        if wpm < 100  OR  wpm > 200:
+            fluency = 0
+        elif sil_rule and silence_pct > 20:
             fluency = 0
         else:
-            wpm_score      = 100 - 2.5 * (140 - wpm)   if 100 <= wpm < 140
-                             100                        if 140 <= wpm <= 180
-                             100 - 5 * (wpm - 180)      if 180 < wpm <= 200
-            silence_score  = 5 * (20 - silence_pct)
-            fluency        = min(wpm_score, silence_score)
+            wpm_score = 100 - 2.5 * (140 - wpm)   if 100 <= wpm < 140
+                        100                        if 140 <= wpm <= 180
+                        100 - 5 * (wpm - 180)      if 180 < wpm <= 200
+            if sil_rule:
+                silence_score = 5 * (20 - silence_pct)
+                fluency       = min(wpm_score, silence_score)
+            else:
+                fluency       = wpm_score   # silence side ignored
 
     Words counted for WPM: word_scores entries where error_type is neither
     'Omission' nor 'Insertion'. Same rule as before.
 
-    Silence ratio: within-speech (excludes leading/trailing dead air) via
-    pydub.silence.detect_silence at -30 dBFS, min 300 ms. Same as before.
-
     Coverage: types in _FLUENCY_FORMULA_TYPES, across practice + sectional + mock.
     answer_short_question is excluded.
-
-    NOTE: wpm_scoring_rules and silence_ratio_rules tables are no longer
-    queried by this code path. They are kept in DB for easy revert.
 
     Fail-open: any error keeps Azure's original c/f/p (logged).
     """
     if question_type not in _FLUENCY_FORMULA_TYPES:
-        return content, fluency, pronunciation
+        return content, fluency, pronunciation, {}
     try:
         from pydub import AudioSegment
         import io
@@ -122,29 +166,40 @@ def _apply_speaking_fluency_formula(
             if isinstance(w, dict) and w.get('error_type') not in ('Omission', 'Insertion')
         )
         if words_spoken <= 0:
-            return content, fluency, pronunciation
+            return content, fluency, pronunciation, {}
 
         seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
         duration_sec = seg.duration_seconds
         if duration_sec <= 0:
-            return content, fluency, pronunciation
+            return content, fluency, pronunciation, {}
 
         wpm = words_spoken * 60.0 / duration_sec
-        silence_pct = _silence_ratio_pct(seg)
+        silence_pct, pause_count = _silence_ratio_pct(seg)
+
+        # Sentence count — reference passage for RA/RS, transcript otherwise.
+        if question_type in ('read_aloud', 'repeat_sentence'):
+            sentence_count = _count_sentences(reference_text)
+        else:
+            sentence_count = _count_sentences(transcript)
+
+        silence_rule_applies = pause_count > sentence_count
 
         # Hard-fail conditions
-        if silence_pct > 20.0 or wpm < 100.0 or wpm > 200.0:
+        if wpm < 100.0 or wpm > 200.0:
             new_fluency = 0.0
             wpm_score_str = "-"
             sil_score_str = "-"
             reason_parts = []
-            if silence_pct > 20.0:
-                reason_parts.append(f"sil>{silence_pct:.1f}%")
             if wpm < 100.0:
                 reason_parts.append(f"wpm<100({wpm:.1f})")
             if wpm > 200.0:
                 reason_parts.append(f"wpm>200({wpm:.1f})")
             reason = ",".join(reason_parts)
+        elif silence_rule_applies and silence_pct > 20.0:
+            new_fluency = 0.0
+            wpm_score_str = "-"
+            sil_score_str = "-"
+            reason = f"sil>{silence_pct:.1f}%(p{pause_count}>s{sentence_count})"
         else:
             if wpm < 140.0:
                 wpm_score = 100.0 - 2.5 * (140.0 - wpm)
@@ -153,21 +208,36 @@ def _apply_speaking_fluency_formula(
             else:  # 180 < wpm <= 200
                 wpm_score = 100.0 - 5.0 * (wpm - 180.0)
 
-            silence_score = 5.0 * (20.0 - silence_pct)
-            new_fluency = min(wpm_score, silence_score)
+            if silence_rule_applies:
+                silence_score = max(0.0, 5.0 * (20.0 - silence_pct))
+                new_fluency = min(wpm_score, silence_score)
+                sil_score_str = f"{silence_score:.1f}"
+                reason = "ok"
+            else:
+                new_fluency = wpm_score
+                sil_score_str = f"skip(p{pause_count}<=s{sentence_count})"
+                reason = "ok_sil_skipped"
             new_fluency = max(0.0, min(100.0, new_fluency))
             wpm_score_str = f"{wpm_score:.1f}"
-            sil_score_str = f"{silence_score:.1f}"
-            reason = "ok"
 
         log.info(
             "[FLUENCY_FORMULA] q=%s type=%s user=%s words=%s dur=%.2fs "
-            "wpm=%.1f sil=%.1f%% wpm_score=%s sil_score=%s "
-            "azure_f=%.1f → new_f=%.1f reason=%s",
+            "wpm=%.1f sil=%.1f%% pauses=%d sentences=%d "
+            "wpm_score=%s sil_score=%s azure_f=%.1f → new_f=%.1f reason=%s",
             question_id, question_type, user_id, words_spoken, duration_sec,
-            wpm, silence_pct, wpm_score_str, sil_score_str,
+            wpm, silence_pct, pause_count, sentence_count,
+            wpm_score_str, sil_score_str,
             float(fluency), new_fluency, reason,
         )
+
+        fluency_metrics = {
+            "wpm": round(wpm, 1),
+            "silence_pct": round(silence_pct, 1),
+            "pause_count": pause_count,
+            "sentence_count": sentence_count,
+            "silence_rule_applied": silence_rule_applies,
+            "duration_sec": round(duration_sec, 2),
+        }
 
         # Cross-penalty: if any one of {fluency, pronunciation} hits 0, halve
         # the other two dimensions before downstream rubric math. Sequential
@@ -199,11 +269,13 @@ def _apply_speaking_fluency_formula(
                 before_c, before_f, before_p,
                 new_content, new_fluency, new_pronunciation,
             )
+        if cross_triggers:
+            fluency_metrics["cross_penalty_triggers"] = cross_triggers
 
-        return new_content, new_fluency, new_pronunciation
+        return new_content, new_fluency, new_pronunciation, fluency_metrics
     except Exception as e:
         log.error("[FLUENCY_FORMULA] application failed (fail-open, keeping azure fluency): %s", e)
-        return content, fluency, pronunciation
+        return content, fluency, pronunciation, {}
 
 
 def _transcribe_azure_with_whisper_parallel(audio_bytes: bytes) -> dict:
@@ -392,7 +464,7 @@ def _run_scoring(
         # 7 types in _FLUENCY_FORMULA_TYPES across practice + sectional + mock.
         # Content (CompletenessScore) and pronunciation (AccuracyScore) pass
         # through Azure-as-is. ASQ is excluded.
-        content, fluency, pronunciation = _apply_speaking_fluency_formula(
+        content, fluency, pronunciation, fluency_metrics = _apply_speaking_fluency_formula(
             user_id=user_id,
             question_id=question_id,
             question_type=question_type,
@@ -401,6 +473,8 @@ def _run_scoring(
             content=content,
             fluency=fluency,
             pronunciation=pronunciation,
+            reference_text=reference_text,
+            transcript=transcript,
         )
 
         # Rubric-weighted PTE score (uniform for all types)
@@ -421,6 +495,7 @@ def _run_scoring(
             "total":         max(config.PTE_FLOOR, pte),
             "transcript":    transcript,
             "word_scores":   word_scores,
+            "fluency_metrics": fluency_metrics,
             **extra,
         })
         update_speaking_score_in_db(
