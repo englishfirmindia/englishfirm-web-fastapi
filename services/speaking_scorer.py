@@ -133,19 +133,22 @@ def _apply_speaking_fluency_formula(
         pauses     = within-speech silence segments >= 600 ms
         sil_rule   = pauses > sentences
 
-        if wpm < 100  OR  wpm > 200:
+        if wpm < 100  OR  wpm > 240:
             fluency = 0
         elif sil_rule and silence_pct > 20:
             fluency = 0
         else:
             wpm_score = 100 - 2.5 * (140 - wpm)   if 100 <= wpm < 140
-                        100                        if 140 <= wpm <= 180
-                        100 - 5 * (wpm - 180)      if 180 < wpm <= 200
+                        100                        if 140 <= wpm <= 200
+                        100 - 2.5 * (wpm - 200)    if 200 < wpm <= 240
             if sil_rule:
                 silence_score = 5 * (20 - silence_pct)
                 fluency       = min(wpm_score, silence_score)
             else:
                 fluency       = wpm_score   # silence side ignored
+
+    WPM curve: 100 floor → ascending to 100 at 140, plateau through 200,
+    descending to 0 at 240, ceiling above. Symmetric ±2.5/WPM slopes.
 
     Words counted for WPM: word_scores entries where error_type is neither
     'Omission' nor 'Insertion'. Same rule as before.
@@ -185,15 +188,15 @@ def _apply_speaking_fluency_formula(
         silence_rule_applies = pause_count > sentence_count
 
         # Hard-fail conditions
-        if wpm < 100.0 or wpm > 200.0:
+        if wpm < 100.0 or wpm > 240.0:
             new_fluency = 0.0
             wpm_score_str = "-"
             sil_score_str = "-"
             reason_parts = []
             if wpm < 100.0:
                 reason_parts.append(f"wpm<100({wpm:.1f})")
-            if wpm > 200.0:
-                reason_parts.append(f"wpm>200({wpm:.1f})")
+            if wpm > 240.0:
+                reason_parts.append(f"wpm>240({wpm:.1f})")
             reason = ",".join(reason_parts)
         elif silence_rule_applies and silence_pct > 20.0:
             new_fluency = 0.0
@@ -203,10 +206,10 @@ def _apply_speaking_fluency_formula(
         else:
             if wpm < 140.0:
                 wpm_score = 100.0 - 2.5 * (140.0 - wpm)
-            elif wpm <= 180.0:
+            elif wpm <= 200.0:
                 wpm_score = 100.0
-            else:  # 180 < wpm <= 200
-                wpm_score = 100.0 - 5.0 * (wpm - 180.0)
+            else:  # 200 < wpm <= 240
+                wpm_score = 100.0 - 2.5 * (wpm - 200.0)
 
             if silence_rule_applies:
                 silence_score = max(0.0, 5.0 * (20.0 - silence_pct))
