@@ -43,18 +43,29 @@ def transcribe_with_whisper(audio_bytes: bytes, language: str = "en") -> str:
     Returns "" on any failure (fail-open). Caller is responsible for
     falling back to an alternate transcript source.
 
-    Whisper accepts AAC / MP3 / WAV / M4A / FLAC / OGG up to 25 MB. We
-    pass AAC directly (no conversion) since the Flutter web client
-    captures AAC by default.
+    Whisper API accepts: flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav,
+    webm. Raw AAC (which is what the Flutter clients upload) is NOT in
+    that list — the API returns 400 for ".aac" filename. We convert AAC
+    to 16 kHz mono WAV via pydub/ffmpeg first. The conversion is fast
+    (~300-500 ms) and runs in the parallel Whisper thread anyway, so it
+    doesn't add to wall-clock latency.
     """
     if not audio_bytes:
         return ""
     try:
-        f = io.BytesIO(audio_bytes)
-        f.name = "audio.aac"  # filename hint for format detection
+        from pydub import AudioSegment
+
+        seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        # 16 kHz mono is the format Whisper internally uses; reduces upload size.
+        seg = seg.set_frame_rate(16000).set_channels(1)
+        wav_io = io.BytesIO()
+        seg.export(wav_io, format="wav")
+        wav_io.seek(0)
+        wav_io.name = "audio.wav"  # filename hint for the API
+
         result = _get_client().audio.transcriptions.create(
             model="whisper-1",
-            file=f,
+            file=wav_io,
             language=language,
             response_format="text",
         )
