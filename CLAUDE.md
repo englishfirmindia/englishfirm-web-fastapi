@@ -44,6 +44,96 @@ When building APIs, refer to `englishfirm-app-fastapi` for:
 - Questions: S3 bucket `apeuni-questions-audio`
 - Azure Speech scoring: region `australiaeast`, key in `.env`
 
+## AWS Production Infrastructure (Reference)
+
+Production runs on AWS in `ap-southeast-2`. Use `--profile englishfirm` on every AWS CLI call.
+
+### Coordinates
+| What | Value |
+|---|---|
+| AWS account | `549209747198` |
+| Region | `ap-southeast-2` |
+| AWS CLI profile | `englishfirm` |
+| Backend domain | `https://api.englishfirm.com` |
+| Frontend domain | `https://app.englishfirm.com` |
+| Backend health | `curl https://api.englishfirm.com/health` |
+
+### Backend (FastAPI on ECS Fargate)
+| What | Value |
+|---|---|
+| ECS cluster | `englishfirm-prod` |
+| ECS service | `englishfirm-web-fastapi` |
+| Task def family | `englishfirm-web-fastapi` |
+| CloudWatch log group | `/ecs/englishfirm-web-fastapi` |
+| ECR repo | `549209747198.dkr.ecr.ap-southeast-2.amazonaws.com/englishfirm-web-fastapi` |
+| ALB | `englishfirm-web-alb-477597736.ap-southeast-2.elb.amazonaws.com` |
+| Target group | `englishfirm-web-tg` |
+| Task SG | `sg-052e0ea449131e68c` |
+| Secrets Manager | `englishfirm-web-fastapi/prod` |
+
+### Frontend
+| What | Value |
+|---|---|
+| S3 bucket | `englishfirm-web-flutter` |
+| CloudFront distro | `E2JXAOH26OS3MK` (`d3msnux4tulesc.cloudfront.net`) |
+
+### Database
+| What | Value |
+|---|---|
+| RDS instance | `database-1` (Postgres 17, `db.t3.micro`) |
+| RDS endpoint | `database-1.cdw0ciyucyrd.ap-southeast-2.rds.amazonaws.com:5432` |
+| DB name | `postgres` |
+| Shared with | mobile backend (`englishfirm-app-fastapi`) — see schema rules in `scripts/deploy/RUNBOOK.md` |
+
+> The DB password lives in `.env` (never commit). Do NOT paste it into commit messages or PR bodies.
+
+### S3 buckets
+| Bucket | Purpose |
+|---|---|
+| `apeuni-user-recordings` | User audio uploads (speaking attempts) |
+| `apeuni-questions-audio` | Question stimulus audio |
+| `englishfirm-web-flutter` | Flutter web build artifacts |
+
+### Common log + status commands
+
+```bash
+# Tail backend logs (live)
+aws logs tail /ecs/englishfirm-web-fastapi --follow \
+  --profile englishfirm --region ap-southeast-2
+
+# Tail with filter (e.g. scoring markers)
+aws logs tail /ecs/englishfirm-web-fastapi --follow \
+  --filter-pattern "FLUENCY_FORMULA" \
+  --profile englishfirm --region ap-southeast-2
+
+# Last 30 min of logs (no follow)
+aws logs tail /ecs/englishfirm-web-fastapi --since 30m \
+  --profile englishfirm --region ap-southeast-2
+
+# Service status (rollout, running tasks, current task def)
+aws ecs describe-services --cluster englishfirm-prod \
+  --services englishfirm-web-fastapi \
+  --profile englishfirm --region ap-southeast-2 \
+  --query 'services[0].deployments[?status==`PRIMARY`] | [0].{rollout:rolloutState,running:runningCount,desired:desiredCount,td:taskDefinition,failed:failedTasks}'
+
+# List task def revisions (latest first)
+aws ecs list-task-definitions --family-prefix englishfirm-web-fastapi \
+  --sort DESC --max-items 10 \
+  --profile englishfirm --region ap-southeast-2
+
+# Health check
+curl -fsS https://api.englishfirm.com/health
+```
+
+### Deploy / rollback
+- Deploy / rollback scripts live in `scripts/deploy/` — see `RUNBOOK.md` for the full procedure.
+- Never deploy or rollback without explicit user instruction.
+
+### Safety
+- AWS CLI calls that READ (`describe-*`, `list-*`, `logs tail`, `get-*`) are safe to run for diagnostics.
+- AWS CLI calls that WRITE (`update-service`, `register-task-definition`, `delete-*`, `terminate-*`, `put-*`, S3 `cp`/`rm`/`sync` to a prod bucket) are NOT safe — confirm with the user before running.
+- Never check AWS keys (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) into git or paste them into chat history. They live in `~/.aws/credentials` under profile `englishfirm`.
+
 ## Cross-Platform Guardrail (MANDATORY)
 
 All API endpoints must remain compatible with the iOS app (`englishfirm-app-flutter`).
