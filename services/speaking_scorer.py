@@ -88,6 +88,48 @@ def _silence_ratio_pct(seg) -> tuple:
     return ratio, len(within_pauses)
 
 
+def _wpm_score(wpm: float, question_type: str) -> float:
+    """
+    Per-type WPM curve. Returns the WPM-side fluency score in [0, 100].
+
+    Non-SGD speaking types (RA, RS, DI, RL, RTS, ptea_RTS):
+        floor gate: wpm < 80 → 0
+        ascending:  80 → 130   (slope 2.0/wpm)
+        plateau:    130 ≤ wpm ≤ 200 → 100
+        descending: 200 → 250  (slope 2.0/wpm)
+        ceiling gate: wpm > 250 → 0
+
+    SGD only:
+        no floor gate (ascend starts at 0)
+        ascending:   0 → 70    (slope ≈ 1.43/wpm)
+        plateau:    70 ≤ wpm ≤ 200 → 100
+        descending: 200 → 250  (slope 2.0/wpm)
+        ceiling gate: wpm > 250 → 0
+
+    SGD's wider plateau and missing floor reflect the longer-form,
+    slower-paced nature of summarising a multi-speaker discussion.
+    Caller is responsible for the WPM gate hard-fail; this function
+    returns only the curve value (still 0 at the boundaries).
+    """
+    if question_type == 'summarize_group_discussion':
+        if wpm > 250.0:
+            return 0.0
+        if wpm < 70.0:
+            return max(0.0, 100.0 - (100.0 / 70.0) * (70.0 - wpm))
+        if wpm <= 200.0:
+            return 100.0
+        return max(0.0, 100.0 - 2.0 * (wpm - 200.0))
+
+    # All other speaking types
+    if wpm < 80.0 or wpm > 250.0:
+        return 0.0
+    if wpm < 130.0:
+        return 100.0 - 2.0 * (130.0 - wpm)
+    if wpm <= 200.0:
+        return 100.0
+    return 100.0 - 2.0 * (wpm - 200.0)
+
+
 def _cross_multiplier(score: float) -> float:
     """
     Soft cross-penalty multiplier. Returns 1.0 when the dimension is healthy
@@ -203,32 +245,46 @@ def _apply_speaking_fluency_formula(
 
         silence_rule_applies = pause_count > sentence_count
 
-        # Hard-fail conditions
-        if wpm < 100.0 or wpm > 240.0:
+        # Per-type gates and silence threshold. SGD (longer-form discussion
+        # summaries) gets a wider plateau on the WPM curve, no floor gate,
+        # and a much higher silence kill threshold (75% vs 20%).
+        is_sgd = question_type == 'summarize_group_discussion'
+        silence_kill_threshold = 75.0 if is_sgd else 20.0
+
+        # WPM gate (hard fail)
+        if (is_sgd and wpm > 250.0) or (not is_sgd and (wpm < 80.0 or wpm > 250.0)):
             new_fluency = 0.0
             wpm_score_str = "-"
             sil_score_str = "-"
             reason_parts = []
-            if wpm < 100.0:
-                reason_parts.append(f"wpm<100({wpm:.1f})")
-            if wpm > 240.0:
-                reason_parts.append(f"wpm>240({wpm:.1f})")
+            if not is_sgd and wpm < 80.0:
+                reason_parts.append(f"wpm<80({wpm:.1f})")
+            if wpm > 250.0:
+                reason_parts.append(f"wpm>250({wpm:.1f})")
             reason = ",".join(reason_parts)
-        elif silence_rule_applies and silence_pct > 20.0:
+
+        # Silence kill switch (per-type threshold, gated by sentence count)
+        elif silence_rule_applies and silence_pct > silence_kill_threshold:
             new_fluency = 0.0
             wpm_score_str = "-"
             sil_score_str = "-"
-            reason = f"sil>{silence_pct:.1f}%(p{pause_count}>s{sentence_count})"
+            reason = (
+                f"sil>{silence_pct:.1f}%(p{pause_count}>s{sentence_count},"
+                f"thresh={int(silence_kill_threshold)}%)"
+            )
+
+        # Normal scoring
         else:
-            if wpm < 140.0:
-                wpm_score = 100.0 - 2.5 * (140.0 - wpm)
-            elif wpm <= 200.0:
-                wpm_score = 100.0
-            else:  # 200 < wpm <= 240
-                wpm_score = 100.0 - 2.5 * (wpm - 200.0)
+            wpm_score = _wpm_score(wpm, question_type)
 
             if silence_rule_applies:
-                silence_score = max(0.0, 5.0 * (20.0 - silence_pct))
+                # Per-type silence_score formula. SGD's 75-band scales 100→0
+                # over silence_pct 0→75 (slope ≈ 1.33/pct). Others use the
+                # original 20-band (slope 5/pct).
+                if is_sgd:
+                    silence_score = max(0.0, 100.0 * (75.0 - silence_pct) / 75.0)
+                else:
+                    silence_score = max(0.0, 5.0 * (20.0 - silence_pct))
                 new_fluency = min(wpm_score, silence_score)
                 sil_score_str = f"{silence_score:.1f}"
                 reason = "ok"
@@ -258,17 +314,15 @@ def _apply_speaking_fluency_formula(
             "duration_sec": round(duration_sec, 2),
         }
 
-        # Cross-penalty (Option B — symmetric soft ramp). Each dimension's
-        # multiplier (0.5 → 1.0 over the 0–20 score range) is applied to
-        # the OTHER two dimensions before downstream rubric math. Replaces
-        # the rev-13 binary halving and stops the harsh f==0 → halve cliff:
-        # a low-but-nonzero score now produces proportional penalty instead
-        # of zero penalty.
+        # Per-type cross-penalty. RA / RS / DI use the full symmetric
+        # ramp (every dimension drags the other two). RL / RTS /
+        # ptea_RTS / SGD isolate content — content is never dragged in
+        # by F or P, but content's mC still drags F and P (bad content
+        # in a free-form response should pull down delivery credit).
+        # F and P don't drag each other in the free-form branch.
         #
         # Content==0 still hits its hard zero-out rule in azure_scorer
-        # (_CONTENT_ZERO_TASKS / _CONTENT_ZERO_LLM_TASKS) — that rule fires
-        # downstream and short-circuits to all-zeros, so any halving here at
-        # the c=0 boundary is harmless / overridden.
+        # (_CONTENT_ZERO_TASKS / _CONTENT_ZERO_LLM_TASKS) downstream.
         before_c = float(content)
         before_f = new_fluency
         before_p = float(pronunciation)
@@ -277,9 +331,20 @@ def _apply_speaking_fluency_formula(
         mF = _cross_multiplier(before_f)
         mP = _cross_multiplier(before_p)
 
-        new_content       = before_c * mF * mP    # F and P drag C
-        new_fluency       = before_f * mC * mP    # C and P drag F
-        new_pronunciation = before_p * mC * mF    # C and F drag P
+        content_drags_others = question_type in {
+            'read_aloud', 'repeat_sentence', 'describe_image',
+        }
+
+        if content_drags_others:
+            # RA / RS / DI: full symmetric (Option B)
+            new_content       = before_c * mF * mP    # F and P drag C
+            new_fluency       = before_f * mC * mP    # C and P drag F
+            new_pronunciation = before_p * mC * mF    # C and F drag P
+        else:
+            # RL / RTS / ptea_RTS / SGD: content isolated, only mC drags F+P
+            new_content       = before_c              # no drag in
+            new_fluency       = before_f * mC         # only C drags F
+            new_pronunciation = before_p * mC         # only C drags P
 
         # Log only when at least one dimension is in the penalty zone
         # (otherwise all three multipliers are 1.0 and there is nothing to log).
