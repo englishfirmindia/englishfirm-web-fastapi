@@ -519,7 +519,18 @@ def persist_speaking_answer_pending(
     question_type: str,
     audio_url: str,
 ) -> None:
-    """Write AttemptAnswer row immediately on speaking submit (pending state)."""
+    """Write or RESET AttemptAnswer row on speaking submit (pending state).
+
+    Redo path: when a row already exists for (attempt_id, question_id) and
+    scoring is complete, we reset it back to pending with the new audio_url
+    and a cleared result_json. The background scoring thread then finds the
+    pending row and updates it with the new score.
+
+    Without this reset, the previous row stayed `complete` with its first
+    score, so update_speaking_score_in_db couldn't find a pending row for
+    the new submission and the new score never landed in the DB. The
+    in-memory _SCORE_STORE saw it; the DB didn't.
+    """
     attempt_id = session.get("attempt_id")
     if not attempt_id:
         return
@@ -532,7 +543,26 @@ def persist_speaking_answer_pending(
                 existing = db.query(AttemptAnswer).filter_by(
                     attempt_id=attempt_id, question_id=question_id
                 ).first()
-                if not existing:
+                if existing:
+                    # Reset for new submission (Redo or any resubmit).
+                    existing.user_answer_json    = {"audio_url": audio_url}
+                    existing.correct_answer_json = {}
+                    existing.result_json         = {}
+                    existing.score               = 0
+                    existing.audio_url           = audio_url
+                    existing.scoring_status      = "pending"
+                    existing.content_score       = None
+                    existing.fluency_score       = None
+                    existing.pronunciation_score = None
+                    # Bump submitted_at so /last-answer ordering reflects the
+                    # actual latest submission, not the first one.
+                    existing.submitted_at        = datetime.now(timezone.utc)
+                    log.info(
+                        "[PERSIST_SPEAKING] reset existing row for redo "
+                        "attempt=%s q=%s answer_id=%s",
+                        attempt_id, question_id, existing.id,
+                    )
+                else:
                     db.add(AttemptAnswer(
                         attempt_id=attempt_id,
                         question_id=question_id,
@@ -544,7 +574,7 @@ def persist_speaking_answer_pending(
                         audio_url=audio_url,
                         scoring_status="pending",
                     ))
-                    db.commit()
+                db.commit()
                 return
             except Exception as e:
                 last_exc = e
