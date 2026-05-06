@@ -171,6 +171,141 @@ def assess_pronunciation(
     raise last_exc
 
 
+def assess_pronunciation_with_timestamps(
+    audio_bytes: bytes,
+    reference_text: str,
+    language: str = "en-US",
+) -> dict:
+    """
+    Continuous-recognition variant of assess_pronunciation that also
+    captures per-word offsets and durations (in milliseconds, absolute
+    from the start of the audio).
+
+    Used by the Read Aloud v2 scorer for pause detection: Whisper-1
+    word timestamps are too coarse (gap == 0 ms between most word
+    pairs); Azure exposes ~10 ms-precision offsets which reveal the
+    short 200-400 ms hesitation pauses Whisper-1 hides.
+
+    Returns the same shape as assess_pronunciation plus
+    `Words[].offset_ms` and `Words[].duration_ms`. Falls back to an
+    empty word list on failure (caller should treat as "no timestamps
+    available" and skip pause detection).
+
+    Aggregation when continuous mode emits multiple segments:
+    AccuracyScore / FluencyScore are averaged across segments;
+    CompletenessScore is averaged; words from all segments are
+    concatenated in offset order.
+    """
+    if not AZURE_SPEECH_KEY:
+        raise RuntimeError("AZURE_SPEECH_KEY not configured")
+
+    import azure.cognitiveservices.speech as speechsdk
+    import threading
+
+    last_exc: Exception = RuntimeError("assess_pronunciation_with_timestamps: no attempts")
+    for attempt in range(1, 4):
+        try:
+            wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
+
+            speech_config = speechsdk.SpeechConfig(
+                subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION,
+            )
+            speech_config.speech_recognition_language = language
+            speech_config.set_property(
+                speechsdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
+                "8000",
+            )
+            speech_config.set_property(
+                speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
+                "3000",
+            )
+            speech_config.request_word_level_timestamps()
+            speech_config.output_format = speechsdk.OutputFormat.Detailed
+
+            pa_config = speechsdk.PronunciationAssessmentConfig(
+                reference_text=reference_text,
+                grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
+                granularity=speechsdk.PronunciationAssessmentGranularity.Word,
+                enable_miscue=bool(reference_text),
+            )
+
+            audio_stream = speechsdk.audio.PushAudioInputStream()
+            audio_config = speechsdk.audio.AudioConfig(stream=audio_stream)
+            recognizer = speechsdk.SpeechRecognizer(
+                speech_config=speech_config, audio_config=audio_config,
+            )
+            pa_config.apply_to(recognizer)
+
+            agg = {
+                "accuracy": [], "fluency": [], "completeness": [],
+                "words": [], "text": [],
+            }
+            done = threading.Event()
+
+            def _on_recognized(evt):
+                r = evt.result
+                if r.reason != speechsdk.ResultReason.RecognizedSpeech or not r.text.strip():
+                    return
+                pr = speechsdk.PronunciationAssessmentResult(r)
+                raw = json.loads(r.properties.get(
+                    speechsdk.PropertyId.SpeechServiceResponse_JsonResult, "{}"
+                ))
+                pa_json = raw.get("NBest", [{}])[0].get("PronunciationAssessment", {})
+                agg["accuracy"].append(pr.accuracy_score)
+                agg["fluency"].append(pr.fluency_score)
+                agg["completeness"].append(float(pa_json.get("CompletenessScore", 0) or 0))
+                agg["text"].append(r.text)
+                # Pull Word objects from raw NBest — the helper API doesn't
+                # expose Offset/Duration, but the JSON does.
+                for w in raw.get("NBest", [{}])[0].get("Words", []):
+                    pa_w = w.get("PronunciationAssessment", {}) or {}
+                    agg["words"].append({
+                        "Word":          w.get("Word", ""),
+                        "AccuracyScore": float(pa_w.get("AccuracyScore", 0) or 0),
+                        "ErrorType":     pa_w.get("ErrorType", "None"),
+                        "offset_ms":     int(w.get("Offset", 0) / 10000),
+                        "duration_ms":   int(w.get("Duration", 0) / 10000),
+                    })
+
+            recognizer.recognized.connect(_on_recognized)
+            recognizer.canceled.connect(lambda evt: done.set())
+            recognizer.session_stopped.connect(lambda evt: done.set())
+
+            audio_stream.write(wav_bytes)
+            audio_stream.close()
+
+            recognizer.start_continuous_recognition()
+            done.wait(timeout=180)
+            recognizer.stop_continuous_recognition()
+
+            if not agg["words"]:
+                raise RuntimeError("Azure: no words recognised in continuous mode")
+
+            n = max(1, len(agg["accuracy"]))
+            return {
+                "AccuracyScore":     sum(agg["accuracy"]) / n,
+                "FluencyScore":      sum(agg["fluency"]) / n,
+                "CompletenessScore": sum(agg["completeness"]) / n if agg["completeness"] else 0.0,
+                "recognized_text":   " ".join(agg["text"]),
+                "Words":             sorted(agg["words"], key=lambda w: w["offset_ms"]),
+            }
+
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "[AZURE] assess_pronunciation_with_timestamps attempt=%d/3 failed — %s: %s",
+                attempt, type(exc).__name__, exc,
+            )
+            if attempt < 3:
+                time.sleep(2)
+
+    logger.error(
+        "[AZURE] assess_pronunciation_with_timestamps failed after 3 attempts — %s: %s",
+        type(last_exc).__name__, last_exc,
+    )
+    raise last_exc
+
+
 def transcribe_and_score_free(audio_bytes: bytes) -> dict:
     """
     Free-form STT + fluency/pronunciation scoring (no reference text).

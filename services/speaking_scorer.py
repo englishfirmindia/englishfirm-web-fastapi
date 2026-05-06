@@ -380,7 +380,11 @@ def _apply_speaking_fluency_formula(
 # is Azure's strength and Whisper has nothing equivalent.
 
 _HESITATION_RE = re.compile(r"^(?:u+h+|u+m+|a+h+|aa+h+|hm+|m+hm+|er+|erm+)$", re.IGNORECASE)
-_PAUSE_GAP_THRESHOLD_SEC = 0.5
+_PAUSE_GAP_THRESHOLD_MS = 250  # Azure word offsets are precise enough to count
+                                # 250 ms+ gaps as perceptible pauses (Whisper-1
+                                # was 500 ms because its timestamps round noisy
+                                # short gaps to either 0 or >=500 — useless at
+                                # this resolution).
 
 # Common English contractions — expand both directions so "we'll" ≡ "we will".
 _CONTRACTIONS = {
@@ -443,22 +447,33 @@ def _score_read_aloud_v2(
         "fluency_metrics":    diagnostic dict for the trainer review UI,
       }
     """
-    from services.azure_speech_service import score_read_aloud
+    from services.azure_speech_service import assess_pronunciation_with_timestamps
     from services.whisper_service import transcribe_with_whisper_words
 
-    # Azure for pronunciation + per-word scores. Wrapped in try/except so a
-    # transient Azure no-match doesn't kill the whole RA scoring — content +
-    # fluency can still be computed from Whisper alone.
+    # Azure (continuous + word timestamps) for pronunciation + per-word
+    # scores + per-word offsets used for pause detection. Wrapped so a
+    # transient Azure failure doesn't kill the whole RA scoring — content
+    # can still be computed from Whisper alone.
+    azure_words = []          # for pause detection (offset_ms + duration_ms)
     try:
-        azure = score_read_aloud(audio_bytes, reference_text)
-        pronunciation = float(azure.get("pronunciation") or 0)
-        word_scores = azure.get("word_scores", []) or []
+        azure = assess_pronunciation_with_timestamps(audio_bytes, reference_text)
+        pronunciation = float(azure.get("AccuracyScore") or 0)
+        azure_words = azure.get("Words", []) or []
+        word_scores = [
+            {
+                "word":            w.get("Word", ""),
+                "accuracy":        w.get("AccuracyScore", 0),
+                "error_type":      w.get("ErrorType", "None"),
+            }
+            for w in azure_words
+        ]
     except Exception as e:
         log.warning("[RA_V2] Azure pronunciation failed (continuing with 0): %s", e)
         pronunciation = 0.0
         word_scores = []
 
-    # Whisper for transcript + word timestamps
+    # Whisper for transcript (used for content matching — Whisper handles
+    # accented PTE vocabulary better than Azure on free-speech-like reads).
     whisper = transcribe_with_whisper_words(audio_bytes)
     whisper_words = whisper.get("words", []) or []
     transcript = whisper.get("transcript", "") or ""
@@ -484,28 +499,47 @@ def _score_read_aloud_v2(
         matched = 0
         content = 0.0
 
-    # ── Speech metrics from Whisper ─────────────────────────────────────────
-    if whisper_words:
-        speech_dur = max(0.001, whisper_words[-1]["end"] - whisper_words[0]["start"])
-        wpm = len(whisper_words) * 60.0 / speech_dur
+    # ── Speech metrics ──────────────────────────────────────────────────────
+    # Pause detection uses Azure word timestamps (offset_ms + duration_ms)
+    # because they're ~10 ms precision; Whisper-1 word boundaries snap
+    # short gaps to 0 ms which makes <500 ms pauses invisible. Speech
+    # duration / WPM also use Azure timestamps for consistency. Hesitation
+    # count comes from Whisper (the filler-friendly transcript) since Azure's
+    # reference-aligned recognition often drops "uh"/"um" entirely.
+    if azure_words:
+        first_start_ms = azure_words[0]["offset_ms"]
+        last_end_ms = azure_words[-1]["offset_ms"] + azure_words[-1]["duration_ms"]
+        speech_dur = max(0.001, (last_end_ms - first_start_ms) / 1000.0)
+        wpm = len(azure_words) * 60.0 / speech_dur
 
         gaps_ms = []
-        for i in range(len(whisper_words) - 1):
-            gap = whisper_words[i + 1]["start"] - whisper_words[i]["end"]
-            if gap >= _PAUSE_GAP_THRESHOLD_SEC:
-                gaps_ms.append(round(gap * 1000))
-
+        for i in range(len(azure_words) - 1):
+            cur_end = azure_words[i]["offset_ms"] + azure_words[i]["duration_ms"]
+            gap = azure_words[i + 1]["offset_ms"] - cur_end
+            if gap >= _PAUSE_GAP_THRESHOLD_MS:
+                gaps_ms.append(int(gap))
         gap_pauses = len(gaps_ms)
-        hesitation_count = sum(
-            1 for w in whisper_words
-            if _HESITATION_RE.match(w["text"].strip().rstrip(".,!?"))
-        )
+    elif whisper_words:
+        # Azure timestamps unavailable — fall back to Whisper (less precise,
+        # will undercount short pauses but still gives something).
+        speech_dur = max(0.001, whisper_words[-1]["end"] - whisper_words[0]["start"])
+        wpm = len(whisper_words) * 60.0 / speech_dur
+        gaps_ms = []
+        for i in range(len(whisper_words) - 1):
+            gap_ms = round((whisper_words[i + 1]["start"] - whisper_words[i]["end"]) * 1000)
+            if gap_ms >= _PAUSE_GAP_THRESHOLD_MS:
+                gaps_ms.append(gap_ms)
+        gap_pauses = len(gaps_ms)
     else:
         speech_dur = 0.0
         wpm = 0.0
         gaps_ms = []
         gap_pauses = 0
-        hesitation_count = 0
+
+    hesitation_count = sum(
+        1 for w in whisper_words
+        if _HESITATION_RE.match(w["text"].strip().rstrip(".,!?"))
+    )
 
     total_pauses = gap_pauses + hesitation_count
     sentence_count = _count_sentences(reference_text)
@@ -582,7 +616,7 @@ def _score_read_aloud_v2(
         "total_pauses":           total_pauses,
         "sentence_count":         sentence_count,
         "pause_lengths_ms":       gaps_ms,
-        "pause_threshold_ms":     int(_PAUSE_GAP_THRESHOLD_SEC * 1000),
+        "pause_threshold_ms":     _PAUSE_GAP_THRESHOLD_MS,
         "wpm_band_score":         round(wpm_band_score, 1),
         "pause_penalty_score":    round(pause_penalty_score, 1),
         "wpm_gate_triggered":     wpm_gate_triggered,
