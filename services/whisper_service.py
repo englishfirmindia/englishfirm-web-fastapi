@@ -22,6 +22,12 @@ from core.logging_config import get_logger
 
 log = get_logger(__name__)
 
+# Whisper-1 silently strips disfluencies (um/uh/ah/er/erm) by default. PTE
+# fluency scoring needs them surfaced. A short filler-rich `prompt=` biases
+# the decoder so disfluencies stay in the transcript with word timestamps.
+# Keep neutral so it doesn't bias toward any non-filler vocabulary.
+_FILLER_PROMPT = "Umm, let me think. Uh, hmm, ah, er, erm. Aah."
+
 _client = None
 
 
@@ -68,6 +74,7 @@ def transcribe_with_whisper(audio_bytes: bytes, language: str = "en") -> str:
             file=wav_io,
             language=language,
             response_format="text",
+            prompt=_FILLER_PROMPT,
         )
         text = str(result).strip()
         log.info("[WHISPER] ok len=%d preview=%r", len(text), text[:80])
@@ -113,6 +120,7 @@ def transcribe_with_whisper_words(audio_bytes: bytes, language: str = "en") -> d
             language=language,
             response_format="verbose_json",
             timestamp_granularities=["word"],
+            prompt=_FILLER_PROMPT,
         )
         # `result` is a Pydantic-like object; .words may be missing if Whisper
         # didn't return any (extremely short / silent clip).

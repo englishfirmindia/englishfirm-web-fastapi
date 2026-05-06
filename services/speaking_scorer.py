@@ -687,16 +687,20 @@ def _score_read_aloud_v2(
     # ── Content score: LCS + linear K=2 insertion penalty ──────────────────
     # recall = LCS(ref, spoken) / |ref|  → upside from order-preserving
     #          coverage of the reference.
-    # insertions = max(0, |spoken| - LCS) → every spoken token that is NOT
-    #          part of the LCS is treated as an insertion (substitution or
-    #          extra word) and docks _CONTENT_INSERTION_PENALTY pts each.
+    # insertions = max(0, |spoken_non_filler| - LCS) → spoken content words
+    #          that are NOT part of the LCS dock _CONTENT_INSERTION_PENALTY
+    #          pts each. Fillers (um/uh/erm) are fluency-side only — we
+    #          strip them from the insertion count so they don't double-dip.
     # content = max(0, recall*100 - K*insertions). Floored at 0.
     ref_tokens = _ra_normalise_tokens(reference_text)
     spoken_tokens = _ra_normalise_tokens(transcript)
     if ref_tokens:
         lcs_len, matched_idx = _lcs_with_matched_indices(ref_tokens, spoken_tokens)
         recall = lcs_len / len(ref_tokens)
-        insertions = max(0, len(spoken_tokens) - lcs_len)
+        spoken_non_filler = sum(
+            1 for t in spoken_tokens if not _HESITATION_RE.match(t)
+        )
+        insertions = max(0, spoken_non_filler - lcs_len)
         content = max(0.0, recall * 100.0 - _CONTENT_INSERTION_PENALTY * insertions)
         matched = lcs_len
     else:
@@ -751,15 +755,20 @@ def _score_read_aloud_v2(
     gaps_ms = [int(e - s) for s, e in pause_intervals]
     gap_pauses = len(gaps_ms)
 
-    hesitation_count_whisper = sum(
-        1 for w in whisper_words
+    # Whisper-detected fillers — with the filler-rich prompt= now passed to
+    # whisper-1, disfluencies stay in the transcript so the regex catches
+    # them with timestamps.
+    whisper_fillers = [
+        w["text"].strip().rstrip(".,!?")
+        for w in whisper_words
         if _HESITATION_RE.match(w["text"].strip().rstrip(".,!?"))
-    )
+    ]
+    hesitation_count_whisper = len(whisper_fillers)
 
     # Azure cross-check: with enable_miscue=True + reference_text, Azure
-    # tags spoken-but-not-in-reference words as ErrorType=Insertion. Filler
-    # tokens (um/uh/ah/er) Whisper-1 silently drops are still here. Filter
-    # to filler-regex matches only — we never reduce the count, only raise.
+    # also tags spoken-but-not-in-reference words as ErrorType=Insertion.
+    # Filter to filler-regex matches only — we keep this as a backstop in
+    # case Azure catches anything Whisper misses. Never reduces the count.
     azure_fillers = [
         (w.get("Word") or "").strip()
         for w in azure_words
@@ -770,9 +779,11 @@ def _score_read_aloud_v2(
     ]
     if len(azure_fillers) > hesitation_count_whisper:
         hesitation_count = len(azure_fillers)
+        hesitation_words = azure_fillers
         hesitation_source = "azure_insertion"
     else:
         hesitation_count = hesitation_count_whisper
+        hesitation_words = whisper_fillers
         hesitation_source = "whisper"
 
     total_pauses = gap_pauses + hesitation_count
@@ -851,7 +862,7 @@ def _score_read_aloud_v2(
         "audio_duration_sec":        round(audio_dur, 2),
         "gap_pauses":                gap_pauses,
         "hesitation_count":          hesitation_count,
-        "hesitation_words":          azure_fillers,
+        "hesitation_words":          hesitation_words,
         "hesitation_source":         hesitation_source,
         "total_pauses":              total_pauses,
         "sentence_count":            sentence_count,
