@@ -38,7 +38,7 @@ echo "→ Updating task definition image to :${SHA}"
 TASK_DEF=$(aws ecs describe-task-definition --task-definition "$SERVICE" \
   --profile "$PROFILE" --region "$REGION" --query 'taskDefinition' --output json)
 
-NEW_DEF=$(echo "$TASK_DEF" | python3 -c "
+echo "$TASK_DEF" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 for k in ('taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy'):
@@ -47,10 +47,11 @@ for c in d['containerDefinitions']:
     if c['name'] == 'web':
         c['image'] = '${ECR_URI}:${SHA}'
 print(json.dumps(d))
-")
+" > /tmp/ecs-taskdef-${SHA}.json
 
-REV=$(echo "$NEW_DEF" | aws ecs register-task-definition --cli-input-json file:///dev/stdin \
+REV=$(aws ecs register-task-definition --cli-input-json "file:///tmp/ecs-taskdef-${SHA}.json" \
   --profile "$PROFILE" --region "$REGION" --query 'taskDefinition.revision' --output text)
+rm -f /tmp/ecs-taskdef-${SHA}.json
 
 echo "→ Registered task def revision: ${SERVICE}:${REV}"
 
