@@ -395,6 +395,11 @@ _RA_PAUSE_TRAILING_TOL_MS = 200
 # How many pauses + hesitations to surface on the score view, longest first.
 _RA_BREAKDOWN_CAP = 10
 
+# RA / RS content-scoring: linear K=2 insertion penalty. Each spoken token
+# that is not part of the LCS against the reference docks 2 percentage
+# points. Floored at 0. Recall (LCS / |ref|) provides the upside.
+_CONTENT_INSERTION_PENALTY = 2.0
+
 # Common English contractions — expand both directions so "we'll" ≡ "we will".
 _CONTRACTIONS = {
     "i'm": "i am", "you're": "you are", "we're": "we are", "they're": "they are",
@@ -557,6 +562,72 @@ def _build_ra_pause_breakdown(
     return capped, overflow
 
 
+def _lcs_with_matched_indices(ref: list, spoken: list) -> tuple:
+    """Standard DP + backtrack. Returns (lcs_len, set of matched spoken indices)."""
+    n, m = len(ref), len(spoken)
+    if n == 0 or m == 0:
+        return 0, set()
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        ri = ref[i - 1]
+        row, prev_row = dp[i], dp[i - 1]
+        for j in range(1, m + 1):
+            if ri == spoken[j - 1]:
+                row[j] = prev_row[j - 1] + 1
+            else:
+                a = prev_row[j]
+                b = row[j - 1]
+                row[j] = a if a >= b else b
+    matched_idx = set()
+    i, j = n, m
+    while i > 0 and j > 0:
+        if ref[i - 1] == spoken[j - 1]:
+            matched_idx.add(j - 1)
+            i -= 1
+            j -= 1
+        elif dp[i - 1][j] >= dp[i][j - 1]:
+            i -= 1
+        else:
+            j -= 1
+    return dp[n][m], matched_idx
+
+
+def _annotate_transcript(transcript: str, matched_idx: set) -> list:
+    """
+    Produce a per-word array describing the user's spoken transcript with
+    matched/unmatched status, aligned to `_ra_normalise_tokens(transcript)`
+    so the indices in `matched_idx` apply directly.
+
+    Each entry: {"word": <original surface form>, "status": "matched"|"extra"}.
+
+    Surface form preservation: walk the transcript word-by-word, normalise
+    each surface word into its expanded token list (e.g. "we'll" → ["we",
+    "will"]), and mark the surface word as matched only if EVERY expanded
+    token landed in the LCS. Punctuation-only fragments are skipped.
+    """
+    if not transcript:
+        return []
+    out = []
+    cursor = 0  # index into the flat normalised-spoken token stream
+    # Match runs of word-y characters (letters/digits/apostrophes) so we
+    # keep punctuation out of the chip list.
+    for m in re.finditer(r"[A-Za-z0-9']+", transcript):
+        surface = m.group(0)
+        expanded = _ra_normalise_tokens(surface)
+        if not expanded:
+            continue
+        n_tok = len(expanded)
+        all_matched = all(
+            (cursor + k) in matched_idx for k in range(n_tok)
+        ) if n_tok > 0 else False
+        out.append({
+            "word":   surface,
+            "status": "matched" if all_matched else "extra",
+        })
+        cursor += n_tok
+    return out
+
+
 def _score_read_aloud_v2(
     user_id: int,
     question_id: int,
@@ -613,26 +684,28 @@ def _score_read_aloud_v2(
     whisper_words = whisper.get("words", []) or []
     transcript = whisper.get("transcript", "") or ""
 
-    # ── Content score: multiset presence ────────────────────────────────────
-    # Each reference token earns a hit if the same token appears anywhere in
-    # the spoken transcript (multiset-aware: a reference word repeated twice
-    # needs to be spoken twice for both hits). Robust to single token merges
-    # like "wild cat" → "wildcat" — only the merged tokens miss, the rest
-    # of the passage still scores.
-    from collections import Counter as _Counter
+    # ── Content score: LCS + linear K=2 insertion penalty ──────────────────
+    # recall = LCS(ref, spoken) / |ref|  → upside from order-preserving
+    #          coverage of the reference.
+    # insertions = max(0, |spoken| - LCS) → every spoken token that is NOT
+    #          part of the LCS is treated as an insertion (substitution or
+    #          extra word) and docks _CONTENT_INSERTION_PENALTY pts each.
+    # content = max(0, recall*100 - K*insertions). Floored at 0.
     ref_tokens = _ra_normalise_tokens(reference_text)
     spoken_tokens = _ra_normalise_tokens(transcript)
     if ref_tokens:
-        spoken_counts = _Counter(spoken_tokens)
-        matched = 0
-        for tok in ref_tokens:
-            if spoken_counts.get(tok, 0) > 0:
-                spoken_counts[tok] -= 1
-                matched += 1
-        content = matched / len(ref_tokens) * 100.0
+        lcs_len, matched_idx = _lcs_with_matched_indices(ref_tokens, spoken_tokens)
+        recall = lcs_len / len(ref_tokens)
+        insertions = max(0, len(spoken_tokens) - lcs_len)
+        content = max(0.0, recall * 100.0 - _CONTENT_INSERTION_PENALTY * insertions)
+        matched = lcs_len
     else:
+        matched_idx = set()
         matched = 0
+        insertions = 0
         content = 0.0
+
+    transcript_annotated = _annotate_transcript(transcript, matched_idx)
 
     # ── Speech metrics ──────────────────────────────────────────────────────
     # WPM + speech_dur use Azure word timestamps (or Whisper fallback) —
@@ -741,11 +814,11 @@ def _score_read_aloud_v2(
         )
 
     log.info(
-        "[RA_V2] q=%s user=%s words_ref=%d words_whisper=%d matched=%d "
+        "[RA_V2] q=%s user=%s words_ref=%d words_whisper=%d lcs=%d ins=%d "
         "wpm=%.1f speech_dur=%.2fs gap_pauses=%d hesitations=%d total_pauses=%d "
         "sentences=%d wpm_band=%.1f pause_score=%.1f gate=%s "
         "→ c/f/p=%.1f/%.1f/%.1f",
-        question_id, user_id, len(ref_tokens), len(spoken_tokens), matched,
+        question_id, user_id, len(ref_tokens), len(spoken_tokens), matched, insertions,
         wpm, speech_dur, gap_pauses, hesitation_count, total_pauses,
         sentence_count, wpm_band_score, pause_penalty_score, wpm_gate_triggered,
         content, fluency, pronunciation,
@@ -770,6 +843,9 @@ def _score_read_aloud_v2(
         "matched_tokens":            matched,
         "ref_token_count":           len(ref_tokens),
         "spoken_token_count":        len(spoken_tokens),
+        "insertions":                insertions,
+        "content_method":            "lcs_k2",
+        "transcript_annotated":      transcript_annotated,
         "cross_multipliers":         {"mC": round(mC, 3), "mF": round(mF, 3), "mP": round(mP, 3)},
     }
 
