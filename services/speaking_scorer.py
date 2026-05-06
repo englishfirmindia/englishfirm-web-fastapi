@@ -471,12 +471,16 @@ def _build_ra_pause_breakdown(
                 prev = w
             else:
                 break
-        return (prev or {}).get("word") or None
+        # assess_pronunciation_with_timestamps emits "Word" (capital W);
+        # fall back to lowercase for any alternate source.
+        if not prev:
+            return None
+        return prev.get("Word") or prev.get("word") or None
 
     def _word_after_pause(end_ms: int):
         for w in az_words:
             if w.get("offset_ms", 0) >= end_ms:
-                return w.get("word") or None
+                return w.get("Word") or w.get("word") or None
         return None
 
     # Pauses
