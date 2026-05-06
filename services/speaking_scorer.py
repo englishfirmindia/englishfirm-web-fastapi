@@ -692,18 +692,21 @@ def _score_read_aloud_v2(
         azure_words=azure_words,
     )
 
-    # ── WPM hard gates (kept) ──────────────────────────────────────────────
-    wpm_gate_triggered = wpm < 80.0 or wpm > 250.0
+    # ── WPM hard gates ─────────────────────────────────────────────────────
+    # Plateau widened from 130–200 → 130–220 (Option A). Slope on the
+    # descending arm stays at 2.0/wpm, so the ceiling gate moves out by
+    # 20 WPM correspondingly: was > 250, now > 270.
+    wpm_gate_triggered = wpm < 80.0 or wpm > 270.0
 
-    # ── WPM band score (kept; RA curve) ─────────────────────────────────────
+    # ── WPM band score (RA curve, plateau 130–220) ─────────────────────────
     if wpm_gate_triggered or wpm <= 0:
         wpm_band_score = 0.0
     elif wpm < 130.0:
         wpm_band_score = 100.0 - 2.0 * (130.0 - wpm)
-    elif wpm <= 200.0:
+    elif wpm <= 220.0:
         wpm_band_score = 100.0
     else:
-        wpm_band_score = max(0.0, 100.0 - 2.0 * (wpm - 200.0))
+        wpm_band_score = max(0.0, 100.0 - 2.0 * (wpm - 220.0))
 
     # ── Pause penalty score (NEW) ──────────────────────────────────────────
     s_clamped = min(max(sentence_count, 1), 10)  # safe denominator
