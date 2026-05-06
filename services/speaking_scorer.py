@@ -751,10 +751,29 @@ def _score_read_aloud_v2(
     gaps_ms = [int(e - s) for s, e in pause_intervals]
     gap_pauses = len(gaps_ms)
 
-    hesitation_count = sum(
+    hesitation_count_whisper = sum(
         1 for w in whisper_words
         if _HESITATION_RE.match(w["text"].strip().rstrip(".,!?"))
     )
+
+    # Azure cross-check: with enable_miscue=True + reference_text, Azure
+    # tags spoken-but-not-in-reference words as ErrorType=Insertion. Filler
+    # tokens (um/uh/ah/er) Whisper-1 silently drops are still here. Filter
+    # to filler-regex matches only — we never reduce the count, only raise.
+    azure_fillers = [
+        (w.get("Word") or "").strip()
+        for w in azure_words
+        if w.get("ErrorType") == "Insertion"
+        and _HESITATION_RE.match(
+            (w.get("Word") or "").strip().rstrip(".,!?").lower()
+        )
+    ]
+    if len(azure_fillers) > hesitation_count_whisper:
+        hesitation_count = len(azure_fillers)
+        hesitation_source = "azure_insertion"
+    else:
+        hesitation_count = hesitation_count_whisper
+        hesitation_source = "whisper"
 
     total_pauses = gap_pauses + hesitation_count
     sentence_count = _count_sentences(reference_text)
@@ -815,11 +834,13 @@ def _score_read_aloud_v2(
 
     log.info(
         "[RA_V2] q=%s user=%s words_ref=%d words_whisper=%d lcs=%d ins=%d "
-        "wpm=%.1f speech_dur=%.2fs gap_pauses=%d hesitations=%d total_pauses=%d "
+        "wpm=%.1f speech_dur=%.2fs gap_pauses=%d hesitations=%d "
+        "(whisper=%d azure_filler=%d src=%s) total_pauses=%d "
         "sentences=%d wpm_band=%.1f pause_score=%.1f gate=%s "
         "→ c/f/p=%.1f/%.1f/%.1f",
         question_id, user_id, len(ref_tokens), len(spoken_tokens), matched, insertions,
-        wpm, speech_dur, gap_pauses, hesitation_count, total_pauses,
+        wpm, speech_dur, gap_pauses, hesitation_count,
+        hesitation_count_whisper, len(azure_fillers), hesitation_source, total_pauses,
         sentence_count, wpm_band_score, pause_penalty_score, wpm_gate_triggered,
         content, fluency, pronunciation,
     )
@@ -830,6 +851,8 @@ def _score_read_aloud_v2(
         "audio_duration_sec":        round(audio_dur, 2),
         "gap_pauses":                gap_pauses,
         "hesitation_count":          hesitation_count,
+        "hesitation_words":          azure_fillers,
+        "hesitation_source":         hesitation_source,
         "total_pauses":              total_pauses,
         "sentence_count":            sentence_count,
         "pause_lengths_ms":          gaps_ms,
