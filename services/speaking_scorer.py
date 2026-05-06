@@ -414,6 +414,10 @@ _RA_FALLBACK_CFG = _SCfg(
     cross_penalty_healthy_threshold=20.0,
     cross_penalty_floor_multiplier=0.5,
     cross_penalty_slope=0.025,
+    content_method="lcs_k2",
+    uses_reference_text=True,
+    uses_cross_penalty=True,
+    pronunciation_source="azure_assessment",
 )
 
 # Common English contractions — expand both directions so "we'll" ≡ "we will".
@@ -644,26 +648,30 @@ def _annotate_transcript(transcript: str, matched_idx: set) -> list:
     return out
 
 
-def _score_read_aloud_v2(
+def _score_speaking_v2(
     user_id: int,
     question_id: int,
     audio_bytes: bytes,
     reference_text: str,
+    task_type: str = "read_aloud",
 ) -> dict:
     """
-    Read Aloud scoring path using:
+    Generic speaking scorer. Picks content / pronunciation / cross-penalty
+    strategies from the per-task `pte_speaking_scoring_config` row so adding
+    a new task type is a row INSERT, not a code change.
 
-      - Whisper word-level transcription for content (positional match) and
-        speech-window WPM + pause detection.
-      - Azure pronunciation assessment for AccuracyScore (the pronunciation
-        component) and per-word phoneme scores for trainer review.
+    Today's wired strategies (RA path):
+      - content_method='lcs_k2'         → LCS recall + linear K-insertion penalty.
+      - pronunciation_source='azure_assessment' → Azure pronunciation assessment
+        with reference_text + enable_miscue.
+      - uses_cross_penalty=True         → soft cross-pillar damping.
 
     Returns the same shape `_run_scoring` expects:
 
       {
-        "content":            0-100 (positional match against reference),
+        "content":            0-100,
         "fluency":            0-100 (after WPM band + pause penalty),
-        "pronunciation":      0-100 (Azure AccuracyScore unchanged),
+        "pronunciation":      0-100,
         "transcript":         Whisper transcript,
         "word_scores":        Azure per-word phoneme list,
         "fluency_metrics":    diagnostic dict for the trainer review UI,
@@ -675,27 +683,35 @@ def _score_read_aloud_v2(
     # Per-task scoring config from pte_speaking_scoring_config; fall back to
     # the compiled defaults if the row is missing or DB is unreachable so a
     # bad config never breaks scoring.
-    cfg = _get_speaking_config("read_aloud") or _RA_FALLBACK_CFG
+    cfg = _get_speaking_config(task_type) or _RA_FALLBACK_CFG
 
-    # Azure (continuous + word timestamps) for pronunciation + per-word
-    # scores + per-word offsets used for pause detection. Wrapped so a
-    # transient Azure failure doesn't kill the whole RA scoring — content
-    # can still be computed from Whisper alone.
-    azure_words = []          # for pause detection (offset_ms + duration_ms)
-    try:
-        azure = assess_pronunciation_with_timestamps(audio_bytes, reference_text)
-        pronunciation = float(azure.get("AccuracyScore") or 0)
-        azure_words = azure.get("Words", []) or []
-        word_scores = [
-            {
-                "word":            w.get("Word", ""),
-                "accuracy":        w.get("AccuracyScore", 0),
-                "error_type":      w.get("ErrorType", "None"),
-            }
-            for w in azure_words
-        ]
-    except Exception as e:
-        log.warning("[RA_V2] Azure pronunciation failed (continuing with 0): %s", e)
+    # Azure pronunciation + word timestamps. Strategy from cfg:
+    #   azure_assessment → pronunciation_assessment + reference_text + miscue
+    #     (used by ref-bound types: RA, RS — gives an AccuracyScore).
+    #   azure_freeform   → continuous transcription only (used by free-speech
+    #     types like DI/RL/RTS/SGD when they migrate to v2). For now this
+    #     branch isn't reached because only RA/RS run through v2.
+    azure_words = []
+    if cfg.pronunciation_source == "azure_assessment":
+        try:
+            azure = assess_pronunciation_with_timestamps(audio_bytes, reference_text)
+            pronunciation = float(azure.get("AccuracyScore") or 0)
+            azure_words = azure.get("Words", []) or []
+            word_scores = [
+                {
+                    "word":            w.get("Word", ""),
+                    "accuracy":        w.get("AccuracyScore", 0),
+                    "error_type":      w.get("ErrorType", "None"),
+                }
+                for w in azure_words
+            ]
+        except Exception as e:
+            log.warning("[V2] Azure pronunciation failed (continuing with 0): %s", e)
+            pronunciation = 0.0
+            word_scores = []
+    else:
+        # Free-speech path placeholder — left unreachable until DI/RL/etc
+        # migrate to v2; will be wired in step 2 of the rollout.
         pronunciation = 0.0
         word_scores = []
 
@@ -705,17 +721,19 @@ def _score_read_aloud_v2(
     whisper_words = whisper.get("words", []) or []
     transcript = whisper.get("transcript", "") or ""
 
-    # ── Content score: LCS + linear K-insertion penalty ───────────────────
-    # recall = LCS(ref, spoken) / |ref|  → upside from order-preserving
-    #          coverage of the reference.
-    # insertions = max(0, |spoken_non_filler| - LCS) → spoken content words
-    #          that are NOT part of the LCS dock K (cfg) pts each. Fillers
-    #          (um/uh/erm) are fluency-side only — we strip them from the
-    #          insertion count so they don't double-dip.
-    # content = max(0, recall*100 - K*insertions). Floored at 0.
+    # ── Content score: strategy by cfg.content_method ──────────────────────
+    # lcs_k2 — recall = LCS(ref, spoken) / |ref| with insertion penalty
+    #   (filler-stripped) docking K each. Used by RA / RS.
+    # llm_keypoints / regex_match / binary — placeholders for the DI/RL/RTS/
+    #   SGD/ASQ migrations; not yet wired since those types still go through
+    #   the legacy dispatch in _run_scoring.
     ref_tokens = _ra_normalise_tokens(reference_text)
     spoken_tokens = _ra_normalise_tokens(transcript)
-    if ref_tokens:
+    matched_idx: set = set()
+    matched = 0
+    insertions = 0
+    content = 0.0
+    if cfg.content_method == "lcs_k2" and ref_tokens:
         lcs_len, matched_idx = _lcs_with_matched_indices(ref_tokens, spoken_tokens)
         recall = lcs_len / len(ref_tokens)
         spoken_non_filler = sum(
@@ -724,11 +742,6 @@ def _score_read_aloud_v2(
         insertions = max(0, spoken_non_filler - lcs_len)
         content = max(0.0, recall * 100.0 - cfg.content_insertion_penalty_k * insertions)
         matched = lcs_len
-    else:
-        matched_idx = set()
-        matched = 0
-        insertions = 0
-        content = 0.0
 
     transcript_annotated = _annotate_transcript(transcript, matched_idx)
 
@@ -851,33 +864,36 @@ def _score_read_aloud_v2(
     else:
         fluency = min(wpm_band_score, pause_penalty_score)
 
-    # ── Cross-penalty (config-driven thresholds) ───────────────────────────
+    # ── Cross-penalty (gated by cfg.uses_cross_penalty) ────────────────────
     content_pre, fluency_pre, pron_pre = content, fluency, pronunciation
-    _cm = lambda s: _cross_multiplier(
-        s, cfg.cross_penalty_healthy_threshold,
-        cfg.cross_penalty_floor_multiplier, cfg.cross_penalty_slope,
-    )
-    mC = _cm(min(fluency, pronunciation))
-    mF = _cm(min(content, pronunciation))
-    mP = _cm(min(content, fluency))
-    if mC < 1.0 or mP < 1.0:
-        content = max(0.0, content * mC)
-        fluency = max(0.0, fluency * mF)
-        pronunciation = max(0.0, pronunciation * mP)
-        log.info(
-            "[CROSS_PENALTY] q=%s type=read_aloud user=%s "
-            "mC=%.3f mF=%.3f mP=%.3f before c/f/p=%.1f/%.1f/%.1f → after c/f/p=%.1f/%.1f/%.1f",
-            question_id, user_id, mC, mF, mP,
-            content_pre, fluency_pre, pron_pre, content, fluency, pronunciation,
+    mC = mF = mP = 1.0
+    if cfg.uses_cross_penalty:
+        _cm = lambda s: _cross_multiplier(
+            s, cfg.cross_penalty_healthy_threshold,
+            cfg.cross_penalty_floor_multiplier, cfg.cross_penalty_slope,
         )
+        mC = _cm(min(fluency, pronunciation))
+        mF = _cm(min(content, pronunciation))
+        mP = _cm(min(content, fluency))
+        if mC < 1.0 or mP < 1.0:
+            content = max(0.0, content * mC)
+            fluency = max(0.0, fluency * mF)
+            pronunciation = max(0.0, pronunciation * mP)
+            log.info(
+                "[CROSS_PENALTY] q=%s type=%s user=%s "
+                "mC=%.3f mF=%.3f mP=%.3f before c/f/p=%.1f/%.1f/%.1f → after c/f/p=%.1f/%.1f/%.1f",
+                question_id, task_type, user_id, mC, mF, mP,
+                content_pre, fluency_pre, pron_pre, content, fluency, pronunciation,
+            )
 
     log.info(
-        "[RA_V2] q=%s user=%s words_ref=%d words_whisper=%d lcs=%d ins=%d "
+        "[V2] q=%s type=%s user=%s words_ref=%d words_whisper=%d lcs=%d ins=%d "
         "wpm=%.1f speech_dur=%.2fs gap_pauses=%d hesitations=%d "
         "(whisper=%d azure_filler=%d src=%s) total_pauses=%d "
         "sentences=%d wpm_band=%.1f pause_score=%.1f gate=%s "
         "→ c/f/p=%.1f/%.1f/%.1f",
-        question_id, user_id, len(ref_tokens), len(spoken_tokens), matched, insertions,
+        question_id, task_type, user_id,
+        len(ref_tokens), len(spoken_tokens), matched, insertions,
         wpm, speech_dur, gap_pauses, hesitation_count,
         hesitation_count_whisper, len(azure_fillers), hesitation_source, total_pauses,
         sentence_count, wpm_band_score, pause_penalty_score, wpm_gate_triggered,
@@ -906,7 +922,7 @@ def _score_read_aloud_v2(
         "ref_token_count":           len(ref_tokens),
         "spoken_token_count":        len(spoken_tokens),
         "insertions":                insertions,
-        "content_method":            "lcs_k2",
+        "content_method":            cfg.content_method,
         "transcript_annotated":      transcript_annotated,
         "cross_multipliers":         {"mC": round(mC, 3), "mF": round(mF, 3), "mP": round(mP, 3)},
     }
@@ -919,6 +935,17 @@ def _score_read_aloud_v2(
         "word_scores":     word_scores,
         "fluency_metrics": fluency_metrics,
     }
+
+
+# Legacy alias — kept so any straggler imports keep working. New callers
+# should use _score_speaking_v2 with an explicit task_type. Safe to drop
+# once `repeat_sentence` migrates to the new dispatch.
+def _score_read_aloud_v2(user_id, question_id, audio_bytes, reference_text):
+    return _score_speaking_v2(
+        user_id=user_id, question_id=question_id,
+        audio_bytes=audio_bytes, reference_text=reference_text,
+        task_type="read_aloud",
+    )
 
 
 def _transcribe_azure_with_whisper_parallel(audio_bytes: bytes) -> dict:
@@ -1032,19 +1059,17 @@ def _run_scoring(
         extra = {}
 
         if question_type in ("read_aloud", "repeat_sentence") and reference_text:
-            # Reference-bound speech (RA + RS) both go through the v3
-            # pipeline: Whisper-driven content (positional multiset match
-            # vs reference) + pause-based fluency (pydub ≥500 ms within-
-            # speech) + Azure pronunciation. Skips
-            # _apply_speaking_fluency_formula entirely — v3 already
-            # computes final c/f/p (incl. cross-penalty) and persists
-            # fluency_metrics. RS rubric (total=13) vs RA rubric
-            # (total=15) is applied downstream by _compute_question_score.
-            raw = _score_read_aloud_v2(
+            # Reference-bound speech (RA + RS) goes through the generic v2
+            # scorer with task_type so the per-task pte_speaking_scoring_config
+            # row drives WPM curve / pause penalty / cross-penalty / content
+            # method. RS rubric (total=13) vs RA rubric (total=15) is applied
+            # downstream by _compute_question_score, unchanged.
+            raw = _score_speaking_v2(
                 user_id=user_id,
                 question_id=question_id,
                 audio_bytes=audio_bytes,
                 reference_text=reference_text,
+                task_type=question_type,
             )
             content        = raw["content"]
             fluency        = raw["fluency"]

@@ -55,6 +55,13 @@ class SpeakingScoringConfig:
     cross_penalty_healthy_threshold: float
     cross_penalty_floor_multiplier: float
     cross_penalty_slope: float
+    # Strategy switches — picked by _score_speaking_v2 per task
+    # content_method   : 'lcs_k2' | 'llm_keypoints' | 'regex_match' | 'binary'
+    # pronunciation_source : 'azure_assessment' | 'azure_freeform'
+    content_method: str = "lcs_k2"
+    uses_reference_text: bool = True
+    uses_cross_penalty: bool = True
+    pronunciation_source: str = "azure_assessment"
 
 
 _COLS = (
@@ -64,7 +71,8 @@ _COLS = (
     "pause_penalty_max_pauses, pause_penalty_sentence_clamp_min, "
     "pause_penalty_sentence_clamp_max, pause_penalty_formula_constant, "
     "cross_penalty_healthy_threshold, cross_penalty_floor_multiplier, "
-    "cross_penalty_slope"
+    "cross_penalty_slope, content_method, uses_reference_text, "
+    "uses_cross_penalty, pronunciation_source"
 )
 
 
@@ -86,6 +94,10 @@ def _row_to_config(row) -> SpeakingScoringConfig:
         cross_penalty_healthy_threshold=float(row[16]),
         cross_penalty_floor_multiplier=float(row[17]),
         cross_penalty_slope=float(row[18]),
+        content_method=str(row[19]),
+        uses_reference_text=bool(row[20]),
+        uses_cross_penalty=bool(row[21]),
+        pronunciation_source=str(row[22]),
     )
 
 
