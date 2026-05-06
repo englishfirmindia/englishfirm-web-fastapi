@@ -369,6 +369,231 @@ def _apply_speaking_fluency_formula(
         return content, fluency, pronunciation, {}
 
 
+# ── RA v2: Whisper-driven content + pause-based fluency ────────────────────────
+#
+# Replaces the legacy `score_read_aloud → _apply_speaking_fluency_formula`
+# pipeline for read_aloud only. Drops Azure CompletenessScore (replaced by
+# positional Whisper match against the reference) and amplitude-based silence
+# detection (replaced by Whisper inter-word gap + filler regex).
+#
+# Pronunciation still comes from Azure AccuracyScore — phoneme-level scoring
+# is Azure's strength and Whisper has nothing equivalent.
+
+_HESITATION_RE = re.compile(r"^(?:u+h+|u+m+|a+h+|aa+h+|hm+|m+hm+|er+|erm+)$", re.IGNORECASE)
+_PAUSE_GAP_THRESHOLD_SEC = 0.5
+
+# Common English contractions — expand both directions so "we'll" ≡ "we will".
+_CONTRACTIONS = {
+    "i'm": "i am", "you're": "you are", "we're": "we are", "they're": "they are",
+    "it's": "it is", "he's": "he is", "she's": "she is", "that's": "that is",
+    "what's": "what is", "where's": "where is", "there's": "there is",
+    "i'll": "i will", "you'll": "you will", "we'll": "we will",
+    "they'll": "they will", "he'll": "he will", "she'll": "she will",
+    "i've": "i have", "you've": "you have", "we've": "we have",
+    "they've": "they have",
+    "i'd": "i would", "you'd": "you would", "we'd": "we would",
+    "they'd": "they would", "he'd": "he would", "she'd": "she would",
+    "isn't": "is not", "aren't": "are not", "wasn't": "was not",
+    "weren't": "were not", "hasn't": "has not", "haven't": "have not",
+    "hadn't": "had not", "doesn't": "does not", "don't": "do not",
+    "didn't": "did not", "won't": "will not", "wouldn't": "would not",
+    "shan't": "shall not", "shouldn't": "should not", "can't": "can not",
+    "cannot": "can not", "couldn't": "could not", "mustn't": "must not",
+    "let's": "let us",
+}
+
+
+def _ra_normalise_tokens(text: str) -> list:
+    """Lowercase, expand contractions, strip punctuation, return token list."""
+    if not text:
+        return []
+    t = text.lower().strip()
+    # Normalise typographic apostrophes/quotes to ASCII before contraction match
+    t = t.replace("’", "'").replace("‘", "'")
+    # Expand contractions phrase-by-phrase
+    for src, dst in _CONTRACTIONS.items():
+        t = re.sub(rf"\b{re.escape(src)}\b", dst, t)
+    # Strip everything except letters, digits, apostrophes-in-words, whitespace
+    t = re.sub(r"[^\w\s']", " ", t)
+    return [tok for tok in t.split() if tok]
+
+
+def _score_read_aloud_v2(
+    user_id: int,
+    question_id: int,
+    audio_bytes: bytes,
+    reference_text: str,
+) -> dict:
+    """
+    Read Aloud scoring path using:
+
+      - Whisper word-level transcription for content (positional match) and
+        speech-window WPM + pause detection.
+      - Azure pronunciation assessment for AccuracyScore (the pronunciation
+        component) and per-word phoneme scores for trainer review.
+
+    Returns the same shape `_run_scoring` expects:
+
+      {
+        "content":            0-100 (positional match against reference),
+        "fluency":            0-100 (after WPM band + pause penalty),
+        "pronunciation":      0-100 (Azure AccuracyScore unchanged),
+        "transcript":         Whisper transcript,
+        "word_scores":        Azure per-word phoneme list,
+        "fluency_metrics":    diagnostic dict for the trainer review UI,
+      }
+    """
+    from services.azure_speech_service import score_read_aloud
+    from services.whisper_service import transcribe_with_whisper_words
+
+    # Azure for pronunciation + per-word scores. Wrapped in try/except so a
+    # transient Azure no-match doesn't kill the whole RA scoring — content +
+    # fluency can still be computed from Whisper alone.
+    try:
+        azure = score_read_aloud(audio_bytes, reference_text)
+        pronunciation = float(azure.get("pronunciation") or 0)
+        word_scores = azure.get("word_scores", []) or []
+    except Exception as e:
+        log.warning("[RA_V2] Azure pronunciation failed (continuing with 0): %s", e)
+        pronunciation = 0.0
+        word_scores = []
+
+    # Whisper for transcript + word timestamps
+    whisper = transcribe_with_whisper_words(audio_bytes)
+    whisper_words = whisper.get("words", []) or []
+    transcript = whisper.get("transcript", "") or ""
+
+    # ── Content score: positional match ─────────────────────────────────────
+    ref_tokens = _ra_normalise_tokens(reference_text)
+    spoken_tokens = _ra_normalise_tokens(transcript)
+    if ref_tokens:
+        matched = sum(
+            1 for i, ref_tok in enumerate(ref_tokens)
+            if i < len(spoken_tokens) and spoken_tokens[i] == ref_tok
+        )
+        content = matched / len(ref_tokens) * 100.0
+    else:
+        matched = 0
+        content = 0.0
+
+    # ── Speech metrics from Whisper ─────────────────────────────────────────
+    if whisper_words:
+        speech_dur = max(0.001, whisper_words[-1]["end"] - whisper_words[0]["start"])
+        wpm = len(whisper_words) * 60.0 / speech_dur
+
+        gaps_ms = []
+        for i in range(len(whisper_words) - 1):
+            gap = whisper_words[i + 1]["start"] - whisper_words[i]["end"]
+            if gap >= _PAUSE_GAP_THRESHOLD_SEC:
+                gaps_ms.append(round(gap * 1000))
+
+        gap_pauses = len(gaps_ms)
+        hesitation_count = sum(
+            1 for w in whisper_words
+            if _HESITATION_RE.match(w["text"].strip().rstrip(".,!?"))
+        )
+    else:
+        speech_dur = 0.0
+        wpm = 0.0
+        gaps_ms = []
+        gap_pauses = 0
+        hesitation_count = 0
+
+    total_pauses = gap_pauses + hesitation_count
+    sentence_count = _count_sentences(reference_text)
+    audio_dur = 0.0
+    try:
+        from pydub import AudioSegment
+        import io as _io
+        audio_dur = AudioSegment.from_file(_io.BytesIO(audio_bytes)).duration_seconds
+    except Exception:
+        pass
+
+    # ── WPM hard gates (kept) ──────────────────────────────────────────────
+    wpm_gate_triggered = wpm < 80.0 or wpm > 250.0
+
+    # ── WPM band score (kept; RA curve) ─────────────────────────────────────
+    if wpm_gate_triggered or wpm <= 0:
+        wpm_band_score = 0.0
+    elif wpm < 130.0:
+        wpm_band_score = 100.0 - 2.0 * (130.0 - wpm)
+    elif wpm <= 200.0:
+        wpm_band_score = 100.0
+    else:
+        wpm_band_score = max(0.0, 100.0 - 2.0 * (wpm - 200.0))
+
+    # ── Pause penalty score (NEW) ──────────────────────────────────────────
+    s_clamped = min(max(sentence_count, 1), 10)  # safe denominator
+    if total_pauses < s_clamped:
+        pause_penalty_score = 100.0
+    elif total_pauses <= 10:
+        pause_penalty_score = 100.0 * (10 - total_pauses) / (11 - s_clamped)
+    else:
+        pause_penalty_score = 0.0
+    pause_penalty_score = max(0.0, min(100.0, pause_penalty_score))
+
+    # ── Combine — worst signal wins ─────────────────────────────────────────
+    if wpm_gate_triggered:
+        fluency = 0.0
+    else:
+        fluency = min(wpm_band_score, pause_penalty_score)
+
+    # ── Cross-penalty (existing) ───────────────────────────────────────────
+    content_pre, fluency_pre, pron_pre = content, fluency, pronunciation
+    mC = _cross_multiplier(min(fluency, pronunciation))
+    mF = _cross_multiplier(min(content, pronunciation))
+    mP = _cross_multiplier(min(content, fluency))
+    if mC < 1.0 or mP < 1.0:
+        content = max(0.0, content * mC)
+        fluency = max(0.0, fluency * mF)
+        pronunciation = max(0.0, pronunciation * mP)
+        log.info(
+            "[CROSS_PENALTY] q=%s type=read_aloud user=%s "
+            "mC=%.3f mF=%.3f mP=%.3f before c/f/p=%.1f/%.1f/%.1f → after c/f/p=%.1f/%.1f/%.1f",
+            question_id, user_id, mC, mF, mP,
+            content_pre, fluency_pre, pron_pre, content, fluency, pronunciation,
+        )
+
+    log.info(
+        "[RA_V2] q=%s user=%s words_ref=%d words_whisper=%d matched=%d "
+        "wpm=%.1f speech_dur=%.2fs gap_pauses=%d hesitations=%d total_pauses=%d "
+        "sentences=%d wpm_band=%.1f pause_score=%.1f gate=%s "
+        "→ c/f/p=%.1f/%.1f/%.1f",
+        question_id, user_id, len(ref_tokens), len(spoken_tokens), matched,
+        wpm, speech_dur, gap_pauses, hesitation_count, total_pauses,
+        sentence_count, wpm_band_score, pause_penalty_score, wpm_gate_triggered,
+        content, fluency, pronunciation,
+    )
+
+    fluency_metrics = {
+        "wpm":                    round(wpm, 1),
+        "speech_duration_sec":    round(speech_dur, 2),
+        "audio_duration_sec":     round(audio_dur, 2),
+        "gap_pauses":             gap_pauses,
+        "hesitation_count":       hesitation_count,
+        "total_pauses":           total_pauses,
+        "sentence_count":         sentence_count,
+        "pause_lengths_ms":       gaps_ms,
+        "pause_threshold_ms":     int(_PAUSE_GAP_THRESHOLD_SEC * 1000),
+        "wpm_band_score":         round(wpm_band_score, 1),
+        "pause_penalty_score":    round(pause_penalty_score, 1),
+        "wpm_gate_triggered":     wpm_gate_triggered,
+        "matched_tokens":         matched,
+        "ref_token_count":        len(ref_tokens),
+        "spoken_token_count":     len(spoken_tokens),
+        "cross_multipliers":      {"mC": round(mC, 3), "mF": round(mF, 3), "mP": round(mP, 3)},
+    }
+
+    return {
+        "content":         round(content, 1),
+        "fluency":         fluency,
+        "pronunciation":   pronunciation,
+        "transcript":      transcript,
+        "word_scores":     word_scores,
+        "fluency_metrics": fluency_metrics,
+    }
+
+
 def _transcribe_azure_with_whisper_parallel(audio_bytes: bytes) -> dict:
     """
     Run Azure transcribe_and_score_free + Whisper transcription concurrently.
@@ -479,7 +704,25 @@ def _run_scoring(
         content_llm_scored = False
         extra = {}
 
-        if question_type in ("read_aloud", "repeat_sentence") and reference_text:
+        if question_type == "read_aloud" and reference_text:
+            # New RA pipeline: Whisper-driven content (positional) + pause-
+            # based fluency. Skips _apply_speaking_fluency_formula entirely
+            # — RA persists fluency_metrics and applies cross-penalty inside
+            # _score_read_aloud_v2.
+            raw = _score_read_aloud_v2(
+                user_id=user_id,
+                question_id=question_id,
+                audio_bytes=audio_bytes,
+                reference_text=reference_text,
+            )
+            content        = raw["content"]
+            fluency        = raw["fluency"]
+            pronunciation  = raw["pronunciation"]
+            transcript     = raw.get("transcript", "")
+            word_scores    = raw.get("word_scores", [])
+            extra          = {"_ra_v2_metrics": raw.get("fluency_metrics", {})}
+
+        elif question_type == "repeat_sentence" and reference_text:
             raw = score_read_aloud(audio_bytes, reference_text)
             content       = raw["content"]
             fluency       = raw["fluency"]
@@ -554,19 +797,24 @@ def _run_scoring(
         # Speaking fluency formula replaces Azure's FluencyScore for the
         # 7 types in _FLUENCY_FORMULA_TYPES across practice + sectional + mock.
         # Content (CompletenessScore) and pronunciation (AccuracyScore) pass
-        # through Azure-as-is. ASQ is excluded.
-        content, fluency, pronunciation, fluency_metrics = _apply_speaking_fluency_formula(
-            user_id=user_id,
-            question_id=question_id,
-            question_type=question_type,
-            audio_bytes=audio_bytes,
-            word_scores=word_scores,
-            content=content,
-            fluency=fluency,
-            pronunciation=pronunciation,
-            reference_text=reference_text,
-            transcript=transcript,
-        )
+        # through Azure-as-is. ASQ is excluded. RA uses its own v2 path
+        # (_score_read_aloud_v2) which already computes fluency + cross-
+        # penalty + metrics, so it short-circuits here.
+        if "_ra_v2_metrics" in extra:
+            fluency_metrics = extra.pop("_ra_v2_metrics")
+        else:
+            content, fluency, pronunciation, fluency_metrics = _apply_speaking_fluency_formula(
+                user_id=user_id,
+                question_id=question_id,
+                question_type=question_type,
+                audio_bytes=audio_bytes,
+                word_scores=word_scores,
+                content=content,
+                fluency=fluency,
+                pronunciation=pronunciation,
+                reference_text=reference_text,
+                transcript=transcript,
+            )
 
         # Rubric-weighted PTE score (uniform for all types)
         computed = _compute_question_score(question_type, {
