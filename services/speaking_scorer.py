@@ -380,11 +380,20 @@ def _apply_speaking_fluency_formula(
 # is Azure's strength and Whisper has nothing equivalent.
 
 _HESITATION_RE = re.compile(r"^(?:u+h+|u+m+|a+h+|aa+h+|hm+|m+hm+|er+|erm+)$", re.IGNORECASE)
-_PAUSE_GAP_THRESHOLD_MS = 250  # Azure word offsets are precise enough to count
-                                # 250 ms+ gaps as perceptible pauses (Whisper-1
-                                # was 500 ms because its timestamps round noisy
-                                # short gaps to either 0 or >=500 — useless at
-                                # this resolution).
+
+# RA v3: pause detection switched from Azure inter-word gaps to pydub
+# continuous-silence detection. Azure attributes long word-tail decay to
+# word duration, so it missed perceptible pauses (e.g. Sekar's 700–1200 ms
+# inter-syllable quiets were marked as part of the previous word). Pydub
+# at ≥ 500 ms below -30 dBFS is closer to what a human listener perceives
+# as a pause. Leading + trailing dead air still excluded with 200 ms
+# tolerance.
+_RA_PAUSE_MIN_MS         = 500
+_RA_PAUSE_LEADING_TOL_MS = 200
+_RA_PAUSE_TRAILING_TOL_MS = 200
+
+# How many pauses + hesitations to surface on the score view, longest first.
+_RA_BREAKDOWN_CAP = 10
 
 # Common English contractions — expand both directions so "we'll" ≡ "we will".
 _CONTRACTIONS = {
@@ -420,6 +429,120 @@ def _ra_normalise_tokens(text: str) -> list:
     # Strip everything except letters, digits, apostrophes-in-words, whitespace
     t = re.sub(r"[^\w\s']", " ", t)
     return [tok for tok in t.split() if tok]
+
+
+def _build_ra_pause_breakdown(
+    *,
+    pause_intervals: list,
+    whisper_words: list,
+    azure_words: list,
+) -> tuple:
+    """
+    Build the longest-first list of pauses + hesitation clusters with
+    surrounding word context, capped at _RA_BREAKDOWN_CAP. Returns
+    (breakdown_list, overflow_count).
+
+    Each entry shape:
+      pause:
+        {kind: "pause", duration_ms: int,
+         preceding_word: str|None, following_word: str|None, count: 1}
+      hesitation cluster:
+        {kind: "hesitation", text: str, count: int, duration_ms: int,
+         preceding_word: str|None, following_word: str|None}
+
+    Word context priority:
+      - Pauses: lookup against Azure word offsets (10 ms precision); fall
+        back to Whisper word timings if Azure unavailable.
+      - Hesitations: lookup against Whisper transcript order (the source
+        of truth for "uh"/"um"/etc).
+    """
+    entries = []
+
+    # Helper: word-by-timestamp lookup for pauses against Azure offsets.
+    # Each Azure word: offset_ms, duration_ms, word.
+    az_words = list(azure_words or [])
+    az_words.sort(key=lambda w: w.get("offset_ms", 0))
+
+    def _word_before_pause(start_ms: int):
+        prev = None
+        for w in az_words:
+            end_ms = w.get("offset_ms", 0) + w.get("duration_ms", 0)
+            if end_ms <= start_ms:
+                prev = w
+            else:
+                break
+        return (prev or {}).get("word") or None
+
+    def _word_after_pause(end_ms: int):
+        for w in az_words:
+            if w.get("offset_ms", 0) >= end_ms:
+                return w.get("word") or None
+        return None
+
+    # Pauses
+    for s, e in pause_intervals:
+        entries.append({
+            "kind":           "pause",
+            "duration_ms":    int(e - s),
+            "preceding_word": _word_before_pause(int(s)),
+            "following_word": _word_after_pause(int(e)),
+            "count":          1,
+        })
+
+    # Hesitation clustering — walk Whisper words in order, group consecutive
+    # identical hesitation tokens into one entry.
+    ws = list(whisper_words or [])
+
+    def _normalised(token: str) -> str:
+        return token.strip().rstrip(".,!?").lower()
+
+    def _is_hesitation(token: str) -> bool:
+        return bool(_HESITATION_RE.match(_normalised(token)))
+
+    i = 0
+    while i < len(ws):
+        w = ws[i]
+        text = _normalised(w.get("text", ""))
+        if not _is_hesitation(text):
+            i += 1
+            continue
+        # Cluster consecutive identical hesitations
+        j = i + 1
+        while j < len(ws) and _normalised(ws[j].get("text", "")) == text:
+            j += 1
+        cluster = ws[i:j]
+        cluster_start = cluster[0].get("start", 0.0)
+        cluster_end   = cluster[-1].get("end", cluster_start)
+        cluster_dur_ms = max(0, int(round((cluster_end - cluster_start) * 1000)))
+
+        # Surrounding words from Whisper, skipping any other hesitations
+        before = None
+        for k in range(i - 1, -1, -1):
+            tk = _normalised(ws[k].get("text", ""))
+            if tk and not _is_hesitation(tk):
+                before = ws[k].get("text", "").strip()
+                break
+        after = None
+        for k in range(j, len(ws)):
+            tk = _normalised(ws[k].get("text", ""))
+            if tk and not _is_hesitation(tk):
+                after = ws[k].get("text", "").strip()
+                break
+
+        entries.append({
+            "kind":           "hesitation",
+            "text":           text,
+            "count":          len(cluster),
+            "duration_ms":    cluster_dur_ms,
+            "preceding_word": before,
+            "following_word": after,
+        })
+        i = j
+
+    # Longest first; cap with overflow count
+    entries.sort(key=lambda x: x.get("duration_ms", 0), reverse=True)
+    overflow = max(0, len(entries) - _RA_BREAKDOWN_CAP)
+    return entries[:_RA_BREAKDOWN_CAP], overflow
 
 
 def _score_read_aloud_v2(
@@ -500,41 +623,48 @@ def _score_read_aloud_v2(
         content = 0.0
 
     # ── Speech metrics ──────────────────────────────────────────────────────
-    # Pause detection uses Azure word timestamps (offset_ms + duration_ms)
-    # because they're ~10 ms precision; Whisper-1 word boundaries snap
-    # short gaps to 0 ms which makes <500 ms pauses invisible. Speech
-    # duration / WPM also use Azure timestamps for consistency. Hesitation
-    # count comes from Whisper (the filler-friendly transcript) since Azure's
-    # reference-aligned recognition often drops "uh"/"um" entirely.
+    # WPM + speech_dur use Azure word timestamps (or Whisper fallback) —
+    # those are aligned with what was actually recognised as speech.
     if azure_words:
         first_start_ms = azure_words[0]["offset_ms"]
         last_end_ms = azure_words[-1]["offset_ms"] + azure_words[-1]["duration_ms"]
         speech_dur = max(0.001, (last_end_ms - first_start_ms) / 1000.0)
         wpm = len(azure_words) * 60.0 / speech_dur
-
-        gaps_ms = []
-        for i in range(len(azure_words) - 1):
-            cur_end = azure_words[i]["offset_ms"] + azure_words[i]["duration_ms"]
-            gap = azure_words[i + 1]["offset_ms"] - cur_end
-            if gap >= _PAUSE_GAP_THRESHOLD_MS:
-                gaps_ms.append(int(gap))
-        gap_pauses = len(gaps_ms)
     elif whisper_words:
-        # Azure timestamps unavailable — fall back to Whisper (less precise,
-        # will undercount short pauses but still gives something).
         speech_dur = max(0.001, whisper_words[-1]["end"] - whisper_words[0]["start"])
         wpm = len(whisper_words) * 60.0 / speech_dur
-        gaps_ms = []
-        for i in range(len(whisper_words) - 1):
-            gap_ms = round((whisper_words[i + 1]["start"] - whisper_words[i]["end"]) * 1000)
-            if gap_ms >= _PAUSE_GAP_THRESHOLD_MS:
-                gaps_ms.append(gap_ms)
-        gap_pauses = len(gaps_ms)
     else:
         speech_dur = 0.0
         wpm = 0.0
-        gaps_ms = []
-        gap_pauses = 0
+
+    # Pause detection: pydub continuous-silence ≥ 500 ms below -30 dBFS,
+    # within-speech only (leading + trailing excluded with 200 ms tolerance).
+    # Each pause carries (start_ms, end_ms) so we can attach word context.
+    pause_intervals = []      # list of (start_ms, end_ms) within-speech only
+    audio_dur = 0.0
+    try:
+        from pydub import AudioSegment
+        from pydub.silence import detect_silence
+        import io as _io
+        _seg = AudioSegment.from_file(_io.BytesIO(audio_bytes))
+        _total_ms = len(_seg)
+        audio_dur = _seg.duration_seconds
+        _sils = detect_silence(
+            _seg,
+            min_silence_len=_RA_PAUSE_MIN_MS,
+            silence_thresh=_SILENCE_THRESH_DBFS,
+        )
+        for s, e in _sils:
+            if s <= _RA_PAUSE_LEADING_TOL_MS:
+                continue                        # leading dead air
+            if (_total_ms - e) <= _RA_PAUSE_TRAILING_TOL_MS:
+                continue                        # trailing dead air
+            pause_intervals.append((s, e))
+    except Exception as e:
+        log.warning("[RA_V3] pydub pause detection failed (continuing with 0): %s", e)
+
+    gaps_ms = [int(e - s) for s, e in pause_intervals]
+    gap_pauses = len(gaps_ms)
 
     hesitation_count = sum(
         1 for w in whisper_words
@@ -543,13 +673,12 @@ def _score_read_aloud_v2(
 
     total_pauses = gap_pauses + hesitation_count
     sentence_count = _count_sentences(reference_text)
-    audio_dur = 0.0
-    try:
-        from pydub import AudioSegment
-        import io as _io
-        audio_dur = AudioSegment.from_file(_io.BytesIO(audio_bytes)).duration_seconds
-    except Exception:
-        pass
+
+    pause_breakdown, pause_breakdown_overflow = _build_ra_pause_breakdown(
+        pause_intervals=pause_intervals,
+        whisper_words=whisper_words,
+        azure_words=azure_words,
+    )
 
     # ── WPM hard gates (kept) ──────────────────────────────────────────────
     wpm_gate_triggered = wpm < 80.0 or wpm > 250.0
@@ -608,22 +737,25 @@ def _score_read_aloud_v2(
     )
 
     fluency_metrics = {
-        "wpm":                    round(wpm, 1),
-        "speech_duration_sec":    round(speech_dur, 2),
-        "audio_duration_sec":     round(audio_dur, 2),
-        "gap_pauses":             gap_pauses,
-        "hesitation_count":       hesitation_count,
-        "total_pauses":           total_pauses,
-        "sentence_count":         sentence_count,
-        "pause_lengths_ms":       gaps_ms,
-        "pause_threshold_ms":     _PAUSE_GAP_THRESHOLD_MS,
-        "wpm_band_score":         round(wpm_band_score, 1),
-        "pause_penalty_score":    round(pause_penalty_score, 1),
-        "wpm_gate_triggered":     wpm_gate_triggered,
-        "matched_tokens":         matched,
-        "ref_token_count":        len(ref_tokens),
-        "spoken_token_count":     len(spoken_tokens),
-        "cross_multipliers":      {"mC": round(mC, 3), "mF": round(mF, 3), "mP": round(mP, 3)},
+        "wpm":                       round(wpm, 1),
+        "speech_duration_sec":       round(speech_dur, 2),
+        "audio_duration_sec":        round(audio_dur, 2),
+        "gap_pauses":                gap_pauses,
+        "hesitation_count":          hesitation_count,
+        "total_pauses":              total_pauses,
+        "sentence_count":            sentence_count,
+        "pause_lengths_ms":          gaps_ms,
+        "pause_threshold_ms":        _RA_PAUSE_MIN_MS,
+        "pause_method":              "pydub_silence",
+        "pause_breakdown":           pause_breakdown,
+        "pause_breakdown_overflow":  pause_breakdown_overflow,
+        "wpm_band_score":            round(wpm_band_score, 1),
+        "pause_penalty_score":       round(pause_penalty_score, 1),
+        "wpm_gate_triggered":        wpm_gate_triggered,
+        "matched_tokens":            matched,
+        "ref_token_count":           len(ref_tokens),
+        "spoken_token_count":        len(spoken_tokens),
+        "cross_multipliers":         {"mC": round(mC, 3), "mF": round(mF, 3), "mP": round(mP, 3)},
     }
 
     return {
