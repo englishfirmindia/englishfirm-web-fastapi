@@ -893,11 +893,15 @@ def _run_scoring(
         content_llm_scored = False
         extra = {}
 
-        if question_type == "read_aloud" and reference_text:
-            # New RA pipeline: Whisper-driven content (positional) + pause-
-            # based fluency. Skips _apply_speaking_fluency_formula entirely
-            # — RA persists fluency_metrics and applies cross-penalty inside
-            # _score_read_aloud_v2.
+        if question_type in ("read_aloud", "repeat_sentence") and reference_text:
+            # Reference-bound speech (RA + RS) both go through the v3
+            # pipeline: Whisper-driven content (positional multiset match
+            # vs reference) + pause-based fluency (pydub ≥500 ms within-
+            # speech) + Azure pronunciation. Skips
+            # _apply_speaking_fluency_formula entirely — v3 already
+            # computes final c/f/p (incl. cross-penalty) and persists
+            # fluency_metrics. RS rubric (total=13) vs RA rubric
+            # (total=15) is applied downstream by _compute_question_score.
             raw = _score_read_aloud_v2(
                 user_id=user_id,
                 question_id=question_id,
@@ -910,14 +914,6 @@ def _run_scoring(
             transcript     = raw.get("transcript", "")
             word_scores    = raw.get("word_scores", [])
             extra          = {"_ra_v2_metrics": raw.get("fluency_metrics", {})}
-
-        elif question_type == "repeat_sentence" and reference_text:
-            raw = score_read_aloud(audio_bytes, reference_text)
-            content       = raw["content"]
-            fluency       = raw["fluency"]
-            pronunciation = raw["pronunciation"]
-            transcript    = raw.get("transcript", "")
-            word_scores   = raw.get("word_scores", [])
 
         elif question_type == "answer_short_question":
             raw = transcribe_and_score_free(audio_bytes)
@@ -986,9 +982,9 @@ def _run_scoring(
         # Speaking fluency formula replaces Azure's FluencyScore for the
         # 7 types in _FLUENCY_FORMULA_TYPES across practice + sectional + mock.
         # Content (CompletenessScore) and pronunciation (AccuracyScore) pass
-        # through Azure-as-is. ASQ is excluded. RA uses its own v2 path
+        # through Azure-as-is. ASQ is excluded. RA + RS use the v3 path
         # (_score_read_aloud_v2) which already computes fluency + cross-
-        # penalty + metrics, so it short-circuits here.
+        # penalty + metrics, so they short-circuit here.
         if "_ra_v2_metrics" in extra:
             fluency_metrics = extra.pop("_ra_v2_metrics")
         else:
