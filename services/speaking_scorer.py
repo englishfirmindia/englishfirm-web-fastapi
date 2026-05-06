@@ -483,7 +483,7 @@ def _build_ra_pause_breakdown(
                 return w.get("Word") or w.get("word") or None
         return None
 
-    # Pauses
+    # Pauses — track start_ms for chronological ordering
     for s, e in pause_intervals:
         entries.append({
             "kind":           "pause",
@@ -491,6 +491,7 @@ def _build_ra_pause_breakdown(
             "preceding_word": _word_before_pause(int(s)),
             "following_word": _word_after_pause(int(e)),
             "count":          1,
+            "_sort_ms":       int(s),
         })
 
     # Hesitation clustering — walk Whisper words in order, group consecutive
@@ -540,13 +541,20 @@ def _build_ra_pause_breakdown(
             "duration_ms":    cluster_dur_ms,
             "preceding_word": before,
             "following_word": after,
+            "_sort_ms":       int(round(cluster_start * 1000)),
         })
         i = j
 
-    # Longest first; cap with overflow count
-    entries.sort(key=lambda x: x.get("duration_ms", 0), reverse=True)
+    # Chronological order (in order of appearance in the recording).
+    # Cap at _RA_BREAKDOWN_CAP — keep the FIRST N (start of the passage),
+    # since "what tripped you up first" reads naturally with the passage.
+    entries.sort(key=lambda x: x.get("_sort_ms", 0))
     overflow = max(0, len(entries) - _RA_BREAKDOWN_CAP)
-    return entries[:_RA_BREAKDOWN_CAP], overflow
+    capped = entries[:_RA_BREAKDOWN_CAP]
+    # Strip the internal sort key before returning
+    for e in capped:
+        e.pop("_sort_ms", None)
+    return capped, overflow
 
 
 def _score_read_aloud_v2(
