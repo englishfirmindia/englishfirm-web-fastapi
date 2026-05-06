@@ -130,20 +130,21 @@ def _wpm_score(wpm: float, question_type: str) -> float:
     return 100.0 - 2.0 * (wpm - 200.0)
 
 
-def _cross_multiplier(score: float) -> float:
+def _cross_multiplier(score: float, healthy: float = 20.0,
+                      floor: float = 0.5, slope: float = 0.025) -> float:
     """
     Soft cross-penalty multiplier. Returns 1.0 when the dimension is healthy
-    (>= 20), 0.5 when it bottomed out (0), and a linear interpolation in
-    between. This replaces the rev-13 binary halving (fluency==0 → halve).
+    (>= `healthy`), `floor` when it bottomed out (0), and a linear
+    interpolation in between. Replaces the rev-13 binary halving.
 
-    The full-strength penalty zone is 0–20; any score >= 20 contributes no
-    penalty to the other dimensions.
+    Defaults match the legacy hard-coded values; pte_speaking_scoring_config
+    overrides them per task at the call site.
     """
-    if score >= 20.0:
+    if score >= healthy:
         return 1.0
     if score <= 0.0:
-        return 0.5
-    return 0.5 + 0.025 * score   # equivalently 0.5 + 0.5 * (score / 20)
+        return floor
+    return floor + slope * score
 
 
 def _count_sentences(text: str) -> int:
@@ -388,17 +389,32 @@ _HESITATION_RE = re.compile(r"^(?:u+h+|u+m+|a+h+|aa+h+|hm+|m+hm+|er+|erm+)$", re
 # at ≥ 500 ms below -30 dBFS is closer to what a human listener perceives
 # as a pause. Leading + trailing dead air still excluded with 200 ms
 # tolerance.
-_RA_PAUSE_MIN_MS         = 500
-_RA_PAUSE_LEADING_TOL_MS = 200
-_RA_PAUSE_TRAILING_TOL_MS = 200
-
 # How many pauses + hesitations to surface on the score view, longest first.
 _RA_BREAKDOWN_CAP = 10
 
-# RA / RS content-scoring: linear K=2 insertion penalty. Each spoken token
-# that is not part of the LCS against the reference docks 2 percentage
-# points. Floored at 0. Recall (LCS / |ref|) provides the upside.
-_CONTENT_INSERTION_PENALTY = 2.0
+# Pause / hesitation / WPM / cross-penalty / LCS-K constants now live per
+# task in the pte_speaking_scoring_config table. The fallback below is the
+# fail-open safety net only — never the live source of truth.
+from services.scoring.speaking_config_service import (
+    SpeakingScoringConfig as _SCfg,
+    get_speaking_config as _get_speaking_config,
+)
+
+_RA_FALLBACK_CFG = _SCfg(
+    task_type="read_aloud",
+    wpm_floor=80.0, wpm_ceiling=270.0,
+    wpm_plateau_low=130.0, wpm_plateau_high=220.0,
+    wpm_slope_per_wpm=2.0, wpm_peak_score=100.0,
+    pause_min_ms=500, pause_leading_tol_ms=200, pause_trailing_tol_ms=200,
+    silence_thresh_dbfs=-30.0,
+    content_insertion_penalty_k=2.0,
+    pause_penalty_max_pauses=10,
+    pause_penalty_sentence_clamp_min=1, pause_penalty_sentence_clamp_max=10,
+    pause_penalty_formula_constant=11,
+    cross_penalty_healthy_threshold=20.0,
+    cross_penalty_floor_multiplier=0.5,
+    cross_penalty_slope=0.025,
+)
 
 # Common English contractions — expand both directions so "we'll" ≡ "we will".
 _CONTRACTIONS = {
@@ -656,6 +672,11 @@ def _score_read_aloud_v2(
     from services.azure_speech_service import assess_pronunciation_with_timestamps
     from services.whisper_service import transcribe_with_whisper_words
 
+    # Per-task scoring config from pte_speaking_scoring_config; fall back to
+    # the compiled defaults if the row is missing or DB is unreachable so a
+    # bad config never breaks scoring.
+    cfg = _get_speaking_config("read_aloud") or _RA_FALLBACK_CFG
+
     # Azure (continuous + word timestamps) for pronunciation + per-word
     # scores + per-word offsets used for pause detection. Wrapped so a
     # transient Azure failure doesn't kill the whole RA scoring — content
@@ -684,13 +705,13 @@ def _score_read_aloud_v2(
     whisper_words = whisper.get("words", []) or []
     transcript = whisper.get("transcript", "") or ""
 
-    # ── Content score: LCS + linear K=2 insertion penalty ──────────────────
+    # ── Content score: LCS + linear K-insertion penalty ───────────────────
     # recall = LCS(ref, spoken) / |ref|  → upside from order-preserving
     #          coverage of the reference.
     # insertions = max(0, |spoken_non_filler| - LCS) → spoken content words
-    #          that are NOT part of the LCS dock _CONTENT_INSERTION_PENALTY
-    #          pts each. Fillers (um/uh/erm) are fluency-side only — we
-    #          strip them from the insertion count so they don't double-dip.
+    #          that are NOT part of the LCS dock K (cfg) pts each. Fillers
+    #          (um/uh/erm) are fluency-side only — we strip them from the
+    #          insertion count so they don't double-dip.
     # content = max(0, recall*100 - K*insertions). Floored at 0.
     ref_tokens = _ra_normalise_tokens(reference_text)
     spoken_tokens = _ra_normalise_tokens(transcript)
@@ -701,7 +722,7 @@ def _score_read_aloud_v2(
             1 for t in spoken_tokens if not _HESITATION_RE.match(t)
         )
         insertions = max(0, spoken_non_filler - lcs_len)
-        content = max(0.0, recall * 100.0 - _CONTENT_INSERTION_PENALTY * insertions)
+        content = max(0.0, recall * 100.0 - cfg.content_insertion_penalty_k * insertions)
         matched = lcs_len
     else:
         matched_idx = set()
@@ -740,13 +761,13 @@ def _score_read_aloud_v2(
         audio_dur = _seg.duration_seconds
         _sils = detect_silence(
             _seg,
-            min_silence_len=_RA_PAUSE_MIN_MS,
-            silence_thresh=_SILENCE_THRESH_DBFS,
+            min_silence_len=cfg.pause_min_ms,
+            silence_thresh=cfg.silence_thresh_dbfs,
         )
         for s, e in _sils:
-            if s <= _RA_PAUSE_LEADING_TOL_MS:
+            if s <= cfg.pause_leading_tol_ms:
                 continue                        # leading dead air
-            if (_total_ms - e) <= _RA_PAUSE_TRAILING_TOL_MS:
+            if (_total_ms - e) <= cfg.pause_trailing_tol_ms:
                 continue                        # trailing dead air
             pause_intervals.append((s, e))
     except Exception as e:
@@ -796,27 +817,30 @@ def _score_read_aloud_v2(
     )
 
     # ── WPM hard gates ─────────────────────────────────────────────────────
-    # Plateau widened from 130–200 → 130–220 (Option A). Slope on the
-    # descending arm stays at 2.0/wpm, so the ceiling gate moves out by
-    # 20 WPM correspondingly: was > 250, now > 270.
-    wpm_gate_triggered = wpm < 80.0 or wpm > 270.0
+    # Below cfg.wpm_floor or above cfg.wpm_ceiling → fluency = 0.
+    wpm_gate_triggered = wpm < cfg.wpm_floor or wpm > cfg.wpm_ceiling
 
-    # ── WPM band score (RA curve, plateau 130–220) ─────────────────────────
+    # ── WPM band score (config-driven curve) ───────────────────────────────
     if wpm_gate_triggered or wpm <= 0:
         wpm_band_score = 0.0
-    elif wpm < 130.0:
-        wpm_band_score = 100.0 - 2.0 * (130.0 - wpm)
-    elif wpm <= 220.0:
-        wpm_band_score = 100.0
+    elif wpm < cfg.wpm_plateau_low:
+        wpm_band_score = cfg.wpm_peak_score - cfg.wpm_slope_per_wpm * (cfg.wpm_plateau_low - wpm)
+    elif wpm <= cfg.wpm_plateau_high:
+        wpm_band_score = cfg.wpm_peak_score
     else:
-        wpm_band_score = max(0.0, 100.0 - 2.0 * (wpm - 220.0))
+        wpm_band_score = max(0.0, cfg.wpm_peak_score - cfg.wpm_slope_per_wpm * (wpm - cfg.wpm_plateau_high))
 
-    # ── Pause penalty score (NEW) ──────────────────────────────────────────
-    s_clamped = min(max(sentence_count, 1), 10)  # safe denominator
+    # ── Pause penalty score ────────────────────────────────────────────────
+    s_clamped = min(max(sentence_count, cfg.pause_penalty_sentence_clamp_min),
+                    cfg.pause_penalty_sentence_clamp_max)
+    max_pauses = cfg.pause_penalty_max_pauses
     if total_pauses < s_clamped:
         pause_penalty_score = 100.0
-    elif total_pauses <= 10:
-        pause_penalty_score = 100.0 * (10 - total_pauses) / (11 - s_clamped)
+    elif total_pauses <= max_pauses:
+        pause_penalty_score = (
+            100.0 * (max_pauses - total_pauses)
+            / (cfg.pause_penalty_formula_constant - s_clamped)
+        )
     else:
         pause_penalty_score = 0.0
     pause_penalty_score = max(0.0, min(100.0, pause_penalty_score))
@@ -827,11 +851,15 @@ def _score_read_aloud_v2(
     else:
         fluency = min(wpm_band_score, pause_penalty_score)
 
-    # ── Cross-penalty (existing) ───────────────────────────────────────────
+    # ── Cross-penalty (config-driven thresholds) ───────────────────────────
     content_pre, fluency_pre, pron_pre = content, fluency, pronunciation
-    mC = _cross_multiplier(min(fluency, pronunciation))
-    mF = _cross_multiplier(min(content, pronunciation))
-    mP = _cross_multiplier(min(content, fluency))
+    _cm = lambda s: _cross_multiplier(
+        s, cfg.cross_penalty_healthy_threshold,
+        cfg.cross_penalty_floor_multiplier, cfg.cross_penalty_slope,
+    )
+    mC = _cm(min(fluency, pronunciation))
+    mF = _cm(min(content, pronunciation))
+    mP = _cm(min(content, fluency))
     if mC < 1.0 or mP < 1.0:
         content = max(0.0, content * mC)
         fluency = max(0.0, fluency * mF)
@@ -867,7 +895,7 @@ def _score_read_aloud_v2(
         "total_pauses":              total_pauses,
         "sentence_count":            sentence_count,
         "pause_lengths_ms":          gaps_ms,
-        "pause_threshold_ms":        _RA_PAUSE_MIN_MS,
+        "pause_threshold_ms":        cfg.pause_min_ms,
         "pause_method":              "pydub_silence",
         "pause_breakdown":           pause_breakdown,
         "pause_breakdown_overflow":  pause_breakdown_overflow,
