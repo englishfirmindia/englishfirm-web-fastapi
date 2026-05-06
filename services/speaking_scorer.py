@@ -463,14 +463,22 @@ def _score_read_aloud_v2(
     whisper_words = whisper.get("words", []) or []
     transcript = whisper.get("transcript", "") or ""
 
-    # ── Content score: positional match ─────────────────────────────────────
+    # ── Content score: multiset presence ────────────────────────────────────
+    # Each reference token earns a hit if the same token appears anywhere in
+    # the spoken transcript (multiset-aware: a reference word repeated twice
+    # needs to be spoken twice for both hits). Robust to single token merges
+    # like "wild cat" → "wildcat" — only the merged tokens miss, the rest
+    # of the passage still scores.
+    from collections import Counter as _Counter
     ref_tokens = _ra_normalise_tokens(reference_text)
     spoken_tokens = _ra_normalise_tokens(transcript)
     if ref_tokens:
-        matched = sum(
-            1 for i, ref_tok in enumerate(ref_tokens)
-            if i < len(spoken_tokens) and spoken_tokens[i] == ref_tok
-        )
+        spoken_counts = _Counter(spoken_tokens)
+        matched = 0
+        for tok in ref_tokens:
+            if spoken_counts.get(tok, 0) > 0:
+                spoken_counts[tok] -= 1
+                matched += 1
         content = matched / len(ref_tokens) * 100.0
     else:
         matched = 0
