@@ -392,6 +392,17 @@ _HESITATION_RE = re.compile(r"^(?:u+h+|u+m+|a+h+|aa+h+|hm+|m+hm+|er+|erm+)$", re
 # How many pauses + hesitations to surface on the score view, longest first.
 _RA_BREAKDOWN_CAP = 10
 
+# Word-count fallback targets per task when LLM key-point scoring is
+# unavailable (no key_points and no stimulus). Keeps today's behaviour
+# byte-equivalent for the LLM-scored types when LLM is bypassed.
+_LLM_CONTENT_FALLBACK_TARGETS = {
+    "describe_image":             40,
+    "retell_lecture":             60,
+    "respond_to_situation":       30,
+    "ptea_respond_situation":     30,
+    "summarize_group_discussion": 50,
+}
+
 # Pause / hesitation / WPM / cross-penalty / LCS-K constants now live per
 # task in the pte_speaking_scoring_config table. The fallback below is the
 # fail-open safety net only — never the live source of truth.
@@ -612,6 +623,21 @@ def _lcs_with_matched_indices(ref: list, spoken: list) -> tuple:
     return dp[n][m], matched_idx
 
 
+def _content_regex_match(transcript: str, expected_answers: list) -> bool:
+    """ASQ / regex_match: True iff any accepted answer appears as a whole
+       phrase (word-bounded, case-insensitive) in the transcript."""
+    if not transcript or not expected_answers:
+        return False
+    t = transcript.lower().strip()
+    for ans in expected_answers:
+        a = (ans or "").lower().strip()
+        if not a:
+            continue
+        if re.search(rf'\b{re.escape(a)}\b', t):
+            return True
+    return False
+
+
 def _annotate_transcript(transcript: str, matched_idx: set) -> list:
     """
     Produce a per-word array describing the user's spoken transcript with
@@ -652,8 +678,11 @@ def _score_speaking_v2(
     user_id: int,
     question_id: int,
     audio_bytes: bytes,
-    reference_text: str,
+    reference_text: str = "",
     task_type: str = "read_aloud",
+    key_points: list = None,
+    expected_answers: list = None,
+    stimulus_audio_url: str = "",
 ) -> dict:
     """
     Generic speaking scorer. Picks content / pronunciation / cross-penalty
@@ -677,21 +706,29 @@ def _score_speaking_v2(
         "fluency_metrics":    diagnostic dict for the trainer review UI,
       }
     """
-    from services.azure_speech_service import assess_pronunciation_with_timestamps
+    from services.azure_speech_service import (
+        assess_pronunciation_with_timestamps,
+        transcribe_and_score_free,
+    )
     from services.whisper_service import transcribe_with_whisper_words
 
     # Per-task scoring config from pte_speaking_scoring_config; fall back to
     # the compiled defaults if the row is missing or DB is unreachable so a
     # bad config never breaks scoring.
     cfg = _get_speaking_config(task_type) or _RA_FALLBACK_CFG
+    key_points = key_points or []
+    expected_answers = expected_answers or []
 
     # Azure pronunciation + word timestamps. Strategy from cfg:
     #   azure_assessment → pronunciation_assessment + reference_text + miscue
     #     (used by ref-bound types: RA, RS — gives an AccuracyScore).
-    #   azure_freeform   → continuous transcription only (used by free-speech
-    #     types like DI/RL/RTS/SGD when they migrate to v2). For now this
-    #     branch isn't reached because only RA/RS run through v2.
+    #   azure_freeform   → continuous free-speech transcription, no reference
+    #     (used by DI/RL/RTS/ptea_RTS/SGD/ASQ). No per-word offsets, so the
+    #     pause-context lookup falls back to Whisper word timings.
     azure_words = []
+    pronunciation = 0.0
+    word_scores = []
+    azure_free_transcript = ""
     if cfg.pronunciation_source == "azure_assessment":
         try:
             azure = assess_pronunciation_with_timestamps(audio_bytes, reference_text)
@@ -706,33 +743,38 @@ def _score_speaking_v2(
                 for w in azure_words
             ]
         except Exception as e:
-            log.warning("[V2] Azure pronunciation failed (continuing with 0): %s", e)
-            pronunciation = 0.0
-            word_scores = []
-    else:
-        # Free-speech path placeholder — left unreachable until DI/RL/etc
-        # migrate to v2; will be wired in step 2 of the rollout.
-        pronunciation = 0.0
-        word_scores = []
+            log.warning("[V2] Azure pronunciation_assessment failed (continuing with 0): %s", e)
+    elif cfg.pronunciation_source == "azure_freeform":
+        try:
+            free = transcribe_and_score_free(audio_bytes)
+            pronunciation = float(free.get("pronunciation") or 0)
+            word_scores = free.get("word_scores", []) or []
+            azure_free_transcript = (free.get("transcript") or "").strip()
+        except Exception as e:
+            log.warning("[V2] Azure free transcribe failed (continuing with 0): %s", e)
 
-    # Whisper for transcript (used for content matching — Whisper handles
-    # accented PTE vocabulary better than Azure on free-speech-like reads).
+    # Whisper for transcript (preferred — handles accented PTE vocabulary
+    # better than Azure on free-speech-like reads). On free-speech tasks
+    # we fall back to the Azure free transcript if Whisper failed.
     whisper = transcribe_with_whisper_words(audio_bytes)
     whisper_words = whisper.get("words", []) or []
-    transcript = whisper.get("transcript", "") or ""
+    transcript = (whisper.get("transcript", "") or "").strip()
+    if not transcript and azure_free_transcript:
+        transcript = azure_free_transcript
 
     # ── Content score: strategy by cfg.content_method ──────────────────────
-    # lcs_k2 — recall = LCS(ref, spoken) / |ref| with insertion penalty
-    #   (filler-stripped) docking K each. Used by RA / RS.
-    # llm_keypoints / regex_match / binary — placeholders for the DI/RL/RTS/
-    #   SGD/ASQ migrations; not yet wired since those types still go through
-    #   the legacy dispatch in _run_scoring.
+    # lcs_k2        — LCS recall + K-insertion dock vs reference (RA/RS).
+    # llm_keypoints — LLM scores transcript against passed-in or
+    #   stimulus-derived key points (DI/RL/RTS/ptea_RTS/SGD).
+    # regex_match / binary — accepted-answer regex match (ASQ).
     ref_tokens = _ra_normalise_tokens(reference_text)
     spoken_tokens = _ra_normalise_tokens(transcript)
     matched_idx: set = set()
     matched = 0
     insertions = 0
     content = 0.0
+    content_llm_scored = False
+    is_correct = None
     if cfg.content_method == "lcs_k2" and ref_tokens:
         lcs_len, matched_idx = _lcs_with_matched_indices(ref_tokens, spoken_tokens)
         recall = lcs_len / len(ref_tokens)
@@ -742,6 +784,19 @@ def _score_speaking_v2(
         insertions = max(0, spoken_non_filler - lcs_len)
         content = max(0.0, recall * 100.0 - cfg.content_insertion_penalty_k * insertions)
         matched = lcs_len
+    elif cfg.content_method == "llm_keypoints":
+        if not key_points and stimulus_audio_url:
+            key_points = _get_stimulus_key_points(task_type, stimulus_audio_url)
+        if key_points and transcript:
+            from services.llm_content_scoring_service import score_content_with_llm
+            content = float(score_content_with_llm(transcript, key_points, task_type))
+            content_llm_scored = True
+        elif transcript:
+            target = _LLM_CONTENT_FALLBACK_TARGETS.get(task_type, 40)
+            content = min(len(transcript.split()) / target, 1.0) * 50.0
+    elif cfg.content_method in ("regex_match", "binary"):
+        is_correct = _content_regex_match(transcript, expected_answers)
+        content = 100.0 if is_correct else 0.0
 
     transcript_annotated = _annotate_transcript(transcript, matched_idx)
 
@@ -949,12 +1004,14 @@ def _score_speaking_v2(
     }
 
     return {
-        "content":         round(content, 1),
-        "fluency":         fluency,
-        "pronunciation":   pronunciation,
-        "transcript":      transcript,
-        "word_scores":     word_scores,
-        "fluency_metrics": fluency_metrics,
+        "content":            round(content, 1),
+        "fluency":            fluency,
+        "pronunciation":      pronunciation,
+        "transcript":         transcript,
+        "word_scores":        word_scores,
+        "fluency_metrics":    fluency_metrics,
+        "content_llm_scored": content_llm_scored,
+        "is_correct":         is_correct,
     }
 
 
@@ -1058,8 +1115,6 @@ def _run_scoring(
     expected_answers: list = None,
     stimulus_audio_url: str = "",
 ):
-    from services.azure_speech_service import score_read_aloud, transcribe_and_score_free
-
     if key_points is None:
         key_points = []
     if expected_answers is None:
@@ -1071,119 +1126,33 @@ def _run_scoring(
         audio_resp.raise_for_status()
         audio_bytes = audio_resp.content
 
-        content = 0.0
-        fluency = 0.0
-        pronunciation = 0.0
-        transcript = ""
-        word_scores = []
-        content_llm_scored = False
+        # Generic v2 dispatch: pte_speaking_scoring_config row for this
+        # task_type drives content method (lcs_k2 / llm_keypoints /
+        # regex_match / binary), pronunciation source (azure_assessment /
+        # azure_freeform), cross-penalty, and the WPM/pause curves. Single
+        # entry point for all 7 speaking types.
+        raw = _score_speaking_v2(
+            user_id=user_id,
+            question_id=question_id,
+            audio_bytes=audio_bytes,
+            reference_text=reference_text,
+            task_type=question_type,
+            key_points=key_points,
+            expected_answers=expected_answers,
+            stimulus_audio_url=stimulus_audio_url,
+        )
+        content            = raw["content"]
+        fluency            = raw["fluency"]
+        pronunciation      = raw["pronunciation"]
+        transcript         = raw.get("transcript", "")
+        word_scores        = raw.get("word_scores", [])
+        fluency_metrics    = raw.get("fluency_metrics", {})
+        content_llm_scored = bool(raw.get("content_llm_scored", False))
+
         extra = {}
-
-        if question_type in ("read_aloud", "repeat_sentence") and reference_text:
-            # Reference-bound speech (RA + RS) goes through the generic v2
-            # scorer with task_type so the per-task pte_speaking_scoring_config
-            # row drives WPM curve / pause penalty / cross-penalty / content
-            # method. RS rubric (total=13) vs RA rubric (total=15) is applied
-            # downstream by _compute_question_score, unchanged.
-            raw = _score_speaking_v2(
-                user_id=user_id,
-                question_id=question_id,
-                audio_bytes=audio_bytes,
-                reference_text=reference_text,
-                task_type=question_type,
-            )
-            content        = raw["content"]
-            fluency        = raw["fluency"]
-            pronunciation  = raw["pronunciation"]
-            transcript     = raw.get("transcript", "")
-            word_scores    = raw.get("word_scores", [])
-            extra          = {"_ra_v2_metrics": raw.get("fluency_metrics", {})}
-
-        elif question_type == "answer_short_question":
-            raw = transcribe_and_score_free(audio_bytes)
-            transcript    = raw.get("transcript", "")
-            fluency       = raw.get("fluency", 0)
-            pronunciation = raw.get("pronunciation", 0)
-            word_scores   = raw.get("word_scores", [])
-            is_correct = False
-            if expected_answers:
-                t_lower = transcript.lower().strip()
-                # Match each accepted variant as a whole phrase with word
-                # boundaries. Any variant match → correct. The DB-provided
-                # acceptedVariants list already covers article/phrasing
-                # alternatives ("diaper", "a diaper", "the diaper"), so we
-                # don't need to split the variant into per-word tokens —
-                # which would re-introduce false positives like "a sheep"
-                # matching "a banana" on the article alone.
-                for ans in expected_answers:
-                    ans_lower = ans.lower().strip()
-                    if not ans_lower:
-                        continue
-                    if re.search(rf'\b{re.escape(ans_lower)}\b', t_lower):
-                        is_correct = True
-                        break
-            content = 100.0 if is_correct else 0.0
-            extra = {"is_correct": is_correct}
-
-        elif question_type == "describe_image":
-            # Whisper transcribes in parallel with Azure for better content
-            # scoring on PTE-specific vocab + accented English. Azure still
-            # provides word_scores, fluency, pronunciation as before.
-            raw = _transcribe_azure_with_whisper_parallel(audio_bytes)
-            transcript    = raw.get("transcript", "")
-            fluency       = raw.get("fluency", 0)
-            pronunciation = raw.get("pronunciation", 0)
-            word_scores   = raw.get("word_scores", [])
-            if key_points and transcript:
-                from services.llm_content_scoring_service import score_content_with_llm
-                content = float(score_content_with_llm(transcript, key_points, question_type))
-                content_llm_scored = True
-            else:
-                content = min(len(transcript.split()) / 40, 1.0) * 50.0 if transcript else 0.0
-
-        else:
-            # RL, RTS, ptea_RTS, SGD — Whisper-parallel transcription too.
-            raw = _transcribe_azure_with_whisper_parallel(audio_bytes)
-            transcript    = raw.get("transcript", "")
-            fluency       = raw.get("fluency", 0)
-            pronunciation = raw.get("pronunciation", 0)
-            word_scores   = raw.get("word_scores", [])
-            if not key_points and stimulus_audio_url:
-                key_points = _get_stimulus_key_points(question_type, stimulus_audio_url)
-            if key_points and transcript:
-                from services.llm_content_scoring_service import score_content_with_llm
-                content = float(score_content_with_llm(transcript, key_points, question_type))
-                content_llm_scored = True
-            else:
-                _targets = {
-                    "retell_lecture": 60,
-                    "respond_to_situation": 30,
-                    "summarize_group_discussion": 50,
-                }
-                target = _targets.get(question_type, 40)
-                content = min(len(transcript.split()) / target, 1.0) * 50.0 if transcript else 0.0
-
-        # Speaking fluency formula replaces Azure's FluencyScore for the
-        # 7 types in _FLUENCY_FORMULA_TYPES across practice + sectional + mock.
-        # Content (CompletenessScore) and pronunciation (AccuracyScore) pass
-        # through Azure-as-is. ASQ is excluded. RA + RS use the v3 path
-        # (_score_read_aloud_v2) which already computes fluency + cross-
-        # penalty + metrics, so they short-circuit here.
-        if "_ra_v2_metrics" in extra:
-            fluency_metrics = extra.pop("_ra_v2_metrics")
-        else:
-            content, fluency, pronunciation, fluency_metrics = _apply_speaking_fluency_formula(
-                user_id=user_id,
-                question_id=question_id,
-                question_type=question_type,
-                audio_bytes=audio_bytes,
-                word_scores=word_scores,
-                content=content,
-                fluency=fluency,
-                pronunciation=pronunciation,
-                reference_text=reference_text,
-                transcript=transcript,
-            )
+        is_correct = raw.get("is_correct")
+        if is_correct is not None:
+            extra["is_correct"] = bool(is_correct)
 
         # Rubric-weighted PTE score (uniform for all types)
         computed = _compute_question_score(question_type, {
