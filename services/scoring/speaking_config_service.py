@@ -62,6 +62,15 @@ class SpeakingScoringConfig:
     uses_reference_text: bool = True
     uses_cross_penalty: bool = True
     pronunciation_source: str = "azure_assessment"
+    # Conditional pronunciation cross-penalty override:
+    #   when fluency >= pronunciation_fluency_gate, mP uses the wider
+    #   content-driven curve (threshold/floor/slope below); when fluency
+    #   is below the gate, mP falls back to today's symmetric rule.
+    # All NULL → override disabled, today's behaviour preserved.
+    pronunciation_fluency_gate: float | None = None
+    pronunciation_content_threshold: float | None = None
+    pronunciation_content_floor: float | None = None
+    pronunciation_content_slope: float | None = None
 
 
 _COLS = (
@@ -72,7 +81,9 @@ _COLS = (
     "pause_penalty_sentence_clamp_max, pause_penalty_formula_constant, "
     "cross_penalty_healthy_threshold, cross_penalty_floor_multiplier, "
     "cross_penalty_slope, content_method, uses_reference_text, "
-    "uses_cross_penalty, pronunciation_source"
+    "uses_cross_penalty, pronunciation_source, "
+    "pronunciation_fluency_gate, pronunciation_content_threshold, "
+    "pronunciation_content_floor, pronunciation_content_slope"
 )
 
 
@@ -98,6 +109,10 @@ def _row_to_config(row) -> SpeakingScoringConfig:
         uses_reference_text=bool(row[20]),
         uses_cross_penalty=bool(row[21]),
         pronunciation_source=str(row[22]),
+        pronunciation_fluency_gate=(float(row[23]) if row[23] is not None else None),
+        pronunciation_content_threshold=(float(row[24]) if row[24] is not None else None),
+        pronunciation_content_floor=(float(row[25]) if row[25] is not None else None),
+        pronunciation_content_slope=(float(row[26]) if row[26] is not None else None),
     )
 
 

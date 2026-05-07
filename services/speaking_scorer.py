@@ -865,6 +865,12 @@ def _score_speaking_v2(
         fluency = min(wpm_band_score, pause_penalty_score)
 
     # ── Cross-penalty (gated by cfg.uses_cross_penalty) ────────────────────
+    # mC and mF use the symmetric 0–20 rule today.
+    # mP optionally uses a fluency-gated content-driven curve when the
+    # pronunciation_*_override columns are seeded — when fluency is
+    # healthy (>= gate) it dampens pronunciation by the wider 0–100
+    # content curve; when fluency is below the gate it falls back to
+    # today's symmetric mP. All NULL → today's behaviour preserved.
     content_pre, fluency_pre, pron_pre = content, fluency, pronunciation
     mC = mF = mP = 1.0
     if cfg.uses_cross_penalty:
@@ -874,7 +880,22 @@ def _score_speaking_v2(
         )
         mC = _cm(min(fluency, pronunciation))
         mF = _cm(min(content, pronunciation))
-        mP = _cm(min(content, fluency))
+        if (cfg.pronunciation_fluency_gate is not None
+                and fluency < cfg.pronunciation_fluency_gate):
+            # Override active, fluency too low → today's fluency-driven mP
+            mP = _cm(fluency)
+        elif (cfg.pronunciation_fluency_gate is not None
+              and cfg.pronunciation_content_threshold is not None):
+            # Override active, fluency healthy → content-driven mP (wider curve)
+            mP = _cross_multiplier(
+                content,
+                cfg.pronunciation_content_threshold,
+                cfg.pronunciation_content_floor or 0.5,
+                cfg.pronunciation_content_slope or 0.005,
+            )
+        else:
+            # No override configured → today's symmetric rule
+            mP = _cm(min(content, fluency))
         if mC < 1.0 or mP < 1.0:
             content = max(0.0, content * mC)
             fluency = max(0.0, fluency * mF)
