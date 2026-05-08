@@ -876,7 +876,13 @@ def _score_speaking_v2(
         hesitation_source = "whisper"
 
     total_pauses = gap_pauses + hesitation_count
-    sentence_count = _count_sentences(reference_text)
+    # Sentence count: reference passage when available (RA / RS), otherwise
+    # the user's transcript (Whisper-preferred, Azure free fallback). The
+    # pause-penalty grants one pause per sentence as the natural buffer, so
+    # using the transcript on free-speech types restores DI/RTL/RTS/SGD
+    # leniency that the v2 unification accidentally dropped.
+    sc_source = reference_text if cfg.uses_reference_text else transcript
+    sentence_count = _count_sentences(sc_source)
 
     pause_breakdown, pause_breakdown_overflow = _build_ra_pause_breakdown(
         pause_intervals=pause_intervals,
