@@ -868,7 +868,17 @@ def _score_speaking_v2(
         is_correct = _content_regex_match(transcript, expected_answers)
         content = 100.0 if is_correct else 0.0
 
-    transcript_annotated = _annotate_transcript(transcript, matched_idx)
+    # transcript_annotated is the matched/extra word-chip data the
+    # frontend's TranscriptDisplayCard renders. Only meaningful for
+    # lcs_k2 content (RA/RS) where we have a reference to compare to.
+    # For LLM / regex / binary content there's no matched_idx, so an
+    # all-extra annotation would be a noisy duplicate of the plain
+    # transcript card. Empty list → frontend hides the card.
+    transcript_annotated = (
+        _annotate_transcript(transcript, matched_idx)
+        if cfg.content_method == "lcs_k2"
+        else []
+    )
 
     # ── Speech metrics ──────────────────────────────────────────────────────
     # WPM + speech_dur use Azure word timestamps (or Whisper fallback) —
