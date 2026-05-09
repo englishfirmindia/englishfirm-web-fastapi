@@ -6,6 +6,7 @@ Ported from englishfirm-app-fastapi/services/question_service.py _score_free_for
 import logging
 import re
 import threading
+import time
 import requests as _requests
 
 import core.config as config
@@ -18,6 +19,33 @@ from services.scoring.azure_scorer import _compute_question_score
 from core.logging_config import get_logger
 
 log = get_logger(__name__)
+
+
+def _download_audio_with_retry(audio_url: str, label: str = "AUDIO_DOWNLOAD") -> bytes:
+    """W6 — 3-attempt linear retry around the user-audio S3 download.
+
+    A single transient S3 hiccup (DNS, TLS reset, brief 503) used to mean the
+    user got PTE=10 with no recourse. With 3 attempts and 1s/2s backoff most
+    of those self-heal. On final failure the original exception propagates so
+    the caller's all-zeros fallback still fires — just rarely.
+    """
+    last_exc: Exception = RuntimeError(f"{label}: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            presigned = generate_presigned_url(audio_url)
+            resp = _requests.get(presigned, timeout=30)
+            resp.raise_for_status()
+            return resp.content
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "[%s] download error attempt=%d/3 url=%s: %s",
+                label, attempt, audio_url, exc,
+            )
+            if attempt < 3:
+                time.sleep(attempt)
+    log.error("[%s] download failed after 3 attempts url=%s: %s", label, audio_url, last_exc)
+    raise last_exc
 
 
 def _pte_score(pct: float) -> int:
@@ -1115,10 +1143,8 @@ def _get_stimulus_key_points(question_type: str, audio_url: str) -> list:
     try:
         from services.azure_speech_service import transcribe_audio_full
         from services.llm_content_scoring_service import extract_key_points
-        presigned = generate_presigned_url(audio_url)
-        resp = _requests.get(presigned, timeout=30)
-        resp.raise_for_status()
-        transcript = transcribe_audio_full(resp.content)
+        audio_bytes = _download_audio_with_retry(audio_url, label="STIMULUS_DOWNLOAD")
+        transcript = transcribe_audio_full(audio_bytes)
         if transcript:
             return extract_key_points(transcript, question_type)
     except Exception as e:
@@ -1142,10 +1168,7 @@ def _run_scoring(
         expected_answers = []
 
     try:
-        presigned = generate_presigned_url(audio_url)
-        audio_resp = _requests.get(presigned, timeout=30)
-        audio_resp.raise_for_status()
-        audio_bytes = audio_resp.content
+        audio_bytes = _download_audio_with_retry(audio_url, label="USER_AUDIO_DOWNLOAD")
 
         # Generic v2 dispatch: pte_speaking_scoring_config row for this
         # task_type drives content method (lcs_k2 / llm_keypoints /
