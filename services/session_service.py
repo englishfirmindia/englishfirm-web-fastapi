@@ -219,6 +219,115 @@ def enrich_content_json(q) -> dict:
     return base
 
 
+def _load_questions_with_retry(
+    module: str,
+    question_type: str,
+    difficulty_level: Optional[int],
+    limit: int,
+    question_id: Optional[int],
+):
+    """W1 — 3-attempt linear retry around the question fetch in start_session.
+
+    Opens a fresh SessionLocal() per attempt so a poisoned connection from a
+    prior failure does not kill all three. Returns (questions, start_index).
+    Raises the final exception only if all 3 attempts die.
+    """
+    from sqlalchemy import func as _func
+    last_exc: Exception = RuntimeError("_load_questions_with_retry: no attempts made")
+    for attempt in range(1, 4):
+        s = SessionLocal()
+        try:
+            query = (
+                s.query(QuestionFromApeuni)
+                .options(joinedload(QuestionFromApeuni.evaluation))
+                .filter(
+                    QuestionFromApeuni.module == module,
+                    QuestionFromApeuni.question_type == question_type,
+                )
+            )
+            start_index = 0
+            if question_id is not None:
+                _look_back = 2
+                position = s.query(_func.count(QuestionFromApeuni.question_id)).filter(
+                    QuestionFromApeuni.module == module,
+                    QuestionFromApeuni.question_type == question_type,
+                    QuestionFromApeuni.question_id < question_id,
+                ).scalar() or 0
+                start_offset = max(0, position - _look_back)
+                start_index = position - start_offset
+                query = query.order_by(QuestionFromApeuni.question_id.asc())
+                if limit:
+                    query = query.offset(start_offset).limit(limit)
+            else:
+                if difficulty_level is not None:
+                    query = query.filter(QuestionFromApeuni.difficulty_level == difficulty_level)
+                query = query.order_by(QuestionFromApeuni.question_id.asc())
+                if limit:
+                    query = query.limit(limit)
+            questions = query.all()
+            # Detach so callers can still touch lazy-loaded relations after we close.
+            for q in questions:
+                s.expunge(q)
+            return questions, start_index
+        except Exception as e:
+            last_exc = e
+            log.error(f"[START_SESSION] question fetch error attempt={attempt}/3 type={question_type}: {e}")
+            if attempt < 3:
+                time.sleep(attempt)
+        finally:
+            s.close()
+    raise last_exc
+
+
+def _create_practice_attempt_with_retry(
+    user_id: int,
+    session_id: str,
+    module: str,
+    question_type: str,
+    total_questions: int,
+) -> Optional[int]:
+    """W2 — 3-attempt linear retry around PracticeAttempt creation.
+
+    Returns attempt_id on success; None on full failure (caller falls back to
+    heal-on-first-write in persist_answer_to_db). Each attempt opens a fresh
+    SessionLocal() so a poisoned session from a prior IntegrityError does not
+    block the next attempt.
+    """
+    last_exc: Exception = RuntimeError("_create_practice_attempt_with_retry: no attempts made")
+    for attempt in range(1, 4):
+        s = SessionLocal()
+        try:
+            row = PracticeAttempt(
+                user_id=user_id,
+                session_id=session_id,
+                module=module,
+                question_type=question_type,
+                filter_type="practice",
+                total_questions=total_questions,
+                total_score=0,
+                questions_answered=0,
+                status="active",
+                scoring_status="pending",
+            )
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            return row.id
+        except Exception as e:
+            last_exc = e
+            log.error(f"[START_SESSION] attempt-row create error attempt={attempt}/3 sid={session_id}: {e}")
+            s.rollback()
+            if attempt < 3:
+                time.sleep(attempt)
+        finally:
+            s.close()
+    log.warning(
+        f"[START_SESSION] PracticeAttempt creation failed after 3 attempts sid={session_id} "
+        f"user={user_id} type={question_type}: {last_exc} — falling back to heal-on-first-write"
+    )
+    return None
+
+
 def start_session(
     db: Session,
     user_id: int,
@@ -228,62 +337,28 @@ def start_session(
     limit: int = config.SESSION_QUESTION_LIMIT,
     question_id: Optional[int] = None,
 ) -> dict:
-    query = (
-        db.query(QuestionFromApeuni)
-        .options(joinedload(QuestionFromApeuni.evaluation))
-        .filter(
-            QuestionFromApeuni.module == module,
-            QuestionFromApeuni.question_type == question_type,
-        )
+    questions, start_index = _load_questions_with_retry(
+        module=module,
+        question_type=question_type,
+        difficulty_level=difficulty_level,
+        limit=limit,
+        question_id=question_id,
     )
-    start_index = 0
-    if question_id is not None:
-        from sqlalchemy import func as _func
-        _look_back = 2
-        position = db.query(_func.count(QuestionFromApeuni.question_id)).filter(
-            QuestionFromApeuni.module == module,
-            QuestionFromApeuni.question_type == question_type,
-            QuestionFromApeuni.question_id < question_id,
-        ).scalar() or 0
-        start_offset = max(0, position - _look_back)
-        start_index = position - start_offset
-        query = query.order_by(QuestionFromApeuni.question_id.asc())
-        if limit:
-            query = query.offset(start_offset).limit(limit)
-    else:
-        if difficulty_level is not None:
-            query = query.filter(QuestionFromApeuni.difficulty_level == difficulty_level)
-        query = query.order_by(QuestionFromApeuni.question_id.asc())
-        if limit:
-            query = query.limit(limit)
-    questions = query.all()
     if not questions:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No questions found")
 
     session_id = str(uuid.uuid4())
 
-    # Create PracticeAttempt row in DB for practice sessions too
-    try:
-        attempt = PracticeAttempt(
-            user_id=user_id,
-            session_id=session_id,
-            module=module,
-            question_type=question_type,
-            filter_type="practice",
-            total_questions=len(questions),
-            total_score=0,
-            questions_answered=0,
-            status="active",
-            scoring_status="pending",
-        )
-        db.add(attempt)
-        db.commit()
-        db.refresh(attempt)
-        attempt_id = attempt.id
-    except Exception as e:
-        log.error(f"[SESSION] DB attempt creation failed: {e}")
-        db.rollback()
-        attempt_id = None
+    # W2: retry PracticeAttempt creation. W2c: tag session degraded if it fails
+    # so persist_answer_to_db (W2b heal-on-first-write) knows to lazy-create.
+    attempt_id = _create_practice_attempt_with_retry(
+        user_id=user_id,
+        session_id=session_id,
+        module=module,
+        question_type=question_type,
+        total_questions=len(questions),
+    )
+    attempt_create_failed = attempt_id is None
 
     ACTIVE_SESSIONS[session_id] = {
         "session_id": session_id,
@@ -296,6 +371,8 @@ def start_session(
         "attempt_id": attempt_id,
         "module": module,
         "question_type": question_type,
+        "attempt_create_failed": attempt_create_failed,
+        "total_questions": len(questions),
     }
 
     return {
@@ -463,6 +540,16 @@ def persist_answer_to_db(
         if isinstance(_pte, int) and _pte > 0:
             score = _pte
 
+    # W2b — heal-on-first-write: if start_session failed to create the
+    # PracticeAttempt row (W2c flag), try to lazy-create it now using the
+    # session metadata. This catches the case where RDS was briefly down at
+    # session start but has since recovered.
+    user_id = session.get("user_id")
+    module = session.get("module")
+    qtype_for_create = session.get("question_type") or question_type
+    total_q = session.get("total_questions") or 0
+    attempt_create_failed = session.get("attempt_create_failed", False)
+
     def _write():
         nonlocal attempt_id
         last_exc: Exception = RuntimeError("_write: no attempts made")
@@ -473,8 +560,46 @@ def persist_answer_to_db(
                 if not attempt_id and session_id:
                     pa = db.query(PracticeAttempt).filter_by(session_id=session_id).first()
                     if not pa:
-                        return
-                    attempt_id = pa.id
+                        # W2b heal path: only fire when start_session flagged
+                        # this session as degraded AND we have the metadata
+                        # needed to recreate the row.
+                        if attempt_create_failed and user_id and module and qtype_for_create:
+                            try:
+                                healed = PracticeAttempt(
+                                    user_id=user_id,
+                                    session_id=session_id,
+                                    module=module,
+                                    question_type=qtype_for_create,
+                                    filter_type="practice",
+                                    total_questions=total_q,
+                                    total_score=0,
+                                    questions_answered=0,
+                                    status="active",
+                                    scoring_status="pending",
+                                )
+                                db.add(healed)
+                                db.commit()
+                                db.refresh(healed)
+                                attempt_id = healed.id
+                                # Cache back into the live session dict so
+                                # subsequent persists skip the heal lookup.
+                                session["attempt_id"] = attempt_id
+                                session["attempt_create_failed"] = False
+                                log.warning(
+                                    f"[PERSIST_ANSWER] heal-on-first-write succeeded "
+                                    f"sid={session_id} attempt_id={attempt_id}"
+                                )
+                            except Exception as heal_exc:
+                                db.rollback()
+                                log.error(
+                                    f"[PERSIST_ANSWER] heal-on-first-write failed "
+                                    f"sid={session_id} q={question_id}: {heal_exc}"
+                                )
+                                return
+                        else:
+                            return
+                    else:
+                        attempt_id = pa.id
                 existing = db.query(AttemptAnswer).filter_by(
                     attempt_id=attempt_id, question_id=question_id
                 ).first()
