@@ -71,6 +71,12 @@ class SpeakingScoringConfig:
     pronunciation_content_threshold: float | None = None
     pronunciation_content_floor: float | None = None
     pronunciation_content_slope: float | None = None
+    # Optional softening curve applied to the LLM content score:
+    #   final = round(100 · (raw / 100) ** content_curve_exponent)
+    # 0.5 (sqrt) lifts the strict-rubric mid-band by ~+20 average; 1.0 or
+    # NULL = no transform (today's behaviour). 0 stays 0, 100 stays 100;
+    # the curve only changes mid-range scores.
+    content_curve_exponent: float | None = None
 
 
 _COLS = (
@@ -83,7 +89,8 @@ _COLS = (
     "cross_penalty_slope, content_method, uses_reference_text, "
     "uses_cross_penalty, pronunciation_source, "
     "pronunciation_fluency_gate, pronunciation_content_threshold, "
-    "pronunciation_content_floor, pronunciation_content_slope"
+    "pronunciation_content_floor, pronunciation_content_slope, "
+    "content_curve_exponent"
 )
 
 
@@ -113,6 +120,7 @@ def _row_to_config(row) -> SpeakingScoringConfig:
         pronunciation_content_threshold=(float(row[24]) if row[24] is not None else None),
         pronunciation_content_floor=(float(row[25]) if row[25] is not None else None),
         pronunciation_content_slope=(float(row[26]) if row[26] is not None else None),
+        content_curve_exponent=(float(row[27]) if row[27] is not None else None),
     )
 
 

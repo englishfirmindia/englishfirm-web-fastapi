@@ -794,6 +794,21 @@ def _score_speaking_v2(
         elif transcript:
             target = _LLM_CONTENT_FALLBACK_TARGETS.get(task_type, 40)
             content = min(len(transcript.split()) / target, 1.0) * 50.0
+        # Soften strict-rubric LLM scoring with a deterministic curve:
+        #   final = 100 · (raw/100) ** exponent
+        # Empirically (66 historical DI submissions) exponent=0.5 lifts the
+        # mid-band ~+20 without rescuing zeros (0**0.5 = 0) or inflating
+        # ceilings (100**0.5 normalised = 100).
+        if (cfg.content_curve_exponent is not None
+                and cfg.content_curve_exponent < 1.0
+                and content > 0):
+            content_pre_curve = content
+            content = round(100.0 * (content / 100.0) ** cfg.content_curve_exponent, 1)
+            log.info(
+                "[CONTENT_CURVE] q=%s type=%s exponent=%.2f raw=%.1f → curved=%.1f",
+                question_id, task_type, cfg.content_curve_exponent,
+                content_pre_curve, content,
+            )
     elif cfg.content_method in ("regex_match", "binary"):
         is_correct = _content_regex_match(transcript, expected_answers)
         content = 100.0 if is_correct else 0.0
