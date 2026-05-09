@@ -724,6 +724,9 @@ def update_speaking_score_in_db(
     transcript: str = "",
     word_scores: list = None,
     fluency_metrics: dict = None,
+    scoring_warnings: list = None,
+    component_status: dict = None,
+    content_reasoning: Optional[str] = None,
 ) -> None:
     """Update AttemptAnswer with Azure scores after async scoring completes.
 
@@ -731,6 +734,11 @@ def update_speaking_score_in_db(
     persisted into result_json under the same key for audit (wpm, silence_pct,
     pause_count, sentence_count, silence_rule_applied, duration_sec, and
     cross_multipliers when in penalty zone). Empty/None is omitted.
+
+    W7/W8/W9: scoring_warnings (list of warning codes), component_status (per
+    sub-score scored/failed/degraded), and content_reasoning (LLM rationale)
+    are persisted into result_json so the trainer review and student-facing
+    UI can distinguish a real zero from a pipeline failure.
     """
     def _update():
         from sqlalchemy import func
@@ -770,6 +778,12 @@ def update_speaking_score_in_db(
                     }
                     if fluency_metrics:
                         rj["fluency_metrics"] = fluency_metrics
+                    if scoring_warnings:
+                        rj["scoring_warnings"] = list(scoring_warnings)
+                    if component_status:
+                        rj["component_status"] = dict(component_status)
+                    if content_reasoning:
+                        rj["content_reasoning"] = content_reasoning
                     answer.result_json = rj
                     answer.scoring_status = "complete"
                     db.flush()
@@ -842,6 +856,15 @@ def get_score_from_store(user_id: int, question_id: int) -> Optional[dict]:
             "transcript":    rj.get("transcript", ""),
             "word_scores":   rj.get("word_scores", []),
         }
+        # W7/W8/W9: surface partial-success metadata if we persisted it.
+        if rj.get("fluency_metrics"):
+            result["fluency_metrics"] = rj.get("fluency_metrics")
+        if rj.get("scoring_warnings"):
+            result["scoring_warnings"] = rj.get("scoring_warnings")
+        if rj.get("component_status"):
+            result["component_status"] = rj.get("component_status")
+        if rj.get("content_reasoning"):
+            result["content_reasoning"] = rj.get("content_reasoning")
         # Repopulate in-memory store so subsequent polls don't re-hit the DB
         _SCORE_STORE[(user_id, question_id)] = result
         return result

@@ -7,6 +7,7 @@ import logging
 import re
 import threading
 import time
+from typing import Optional
 import requests as _requests
 
 import core.config as config
@@ -802,6 +803,12 @@ def _score_speaking_v2(
     insertions = 0
     content = 0.0
     content_llm_scored = False
+    content_reasoning: Optional[str] = None
+    # W7/W8: scoring_warnings is the user-visible signal that *something* in
+    # the pipeline degraded — the score is what it is, but the UI can show
+    # a note ("content scoring temporarily unavailable") instead of letting
+    # the user assume a real 0.
+    scoring_warnings: list = []
     is_correct = None
     if cfg.content_method == "lcs_k2" and ref_tokens:
         lcs_len, matched_idx = _lcs_with_matched_indices(ref_tokens, spoken_tokens)
@@ -814,14 +821,34 @@ def _score_speaking_v2(
         matched = lcs_len
     elif cfg.content_method == "llm_keypoints":
         if not key_points and stimulus_audio_url:
-            key_points = _get_stimulus_key_points(task_type, stimulus_audio_url)
+            # W8: distinguish stimulus-extraction failure from no-key-points.
+            # _get_stimulus_key_points now returns dict with scored flag.
+            kp_result = _get_stimulus_key_points(task_type, stimulus_audio_url)
+            key_points = kp_result.get("key_points") or []
+            if not kp_result.get("scored", True):
+                code = kp_result.get("warning_code") or "content_keypoints_unavailable"
+                if code not in scoring_warnings:
+                    scoring_warnings.append(code)
         if key_points and transcript:
             from services.llm_content_scoring_service import score_content_with_llm
-            content = float(score_content_with_llm(transcript, key_points, task_type))
-            content_llm_scored = True
+            llm_out = score_content_with_llm(transcript, key_points, task_type)
+            content = float(llm_out.get("score", 0.0))
+            if llm_out.get("scored"):
+                content_llm_scored = True
+                content_reasoning = llm_out.get("reasoning")
+            else:
+                # W8: LLM call failed — surface the warning so this 0 is
+                # distinguishable from a real off-topic 0.
+                code = llm_out.get("warning_code") or "content_llm_unavailable"
+                if code not in scoring_warnings:
+                    scoring_warnings.append(code)
         elif transcript:
             target = _LLM_CONTENT_FALLBACK_TARGETS.get(task_type, 40)
             content = min(len(transcript.split()) / target, 1.0) * 50.0
+            # If we landed in the word-count fallback because key_points
+            # extraction failed (already flagged above), the score is best-
+            # effort. If key_points was simply empty (no stimulus audio,
+            # legitimate path), no warning needed.
         # Soften strict-rubric LLM scoring with a deterministic curve:
         #   final = 100 · (raw/100) ** exponent
         # Empirically (66 historical DI submissions) exponent=0.5 lifts the
@@ -1060,6 +1087,8 @@ def _score_speaking_v2(
         "word_scores":        word_scores,
         "fluency_metrics":    fluency_metrics,
         "content_llm_scored": content_llm_scored,
+        "content_reasoning":  content_reasoning,
+        "scoring_warnings":   scoring_warnings,
         "is_correct":         is_correct,
     }
 
@@ -1128,6 +1157,17 @@ def _transcribe_azure_with_whisper_parallel(audio_bytes: bytes) -> dict:
         "[WHISPER] azure_len=%d whisper_len=%d source=%s",
         len(azure_transcript), len(whisper_transcript), source,
     )
+    # W5: structured metric for fall-through rate. `[WHISPER_FALLBACK]` is
+    # the grep target — count occurrences over a window to decide whether
+    # W5b (raise the join cap, add an internal retry) is worth the latency
+    # budget. `azure_fallback` = Whisper failed/timed-out, Azure transcript
+    # used. `none` = both empty (much rarer).
+    if source != 'whisper':
+        log.warning(
+            "[WHISPER_FALLBACK] source=%s azure_len=%d whisper_len=%d — "
+            "free-form content scoring will use Azure transcript",
+            source, len(azure_transcript), len(whisper_transcript),
+        )
 
     return {
         **(azure_result if isinstance(azure_result, dict) else {}),
@@ -1138,18 +1178,40 @@ def _transcribe_azure_with_whisper_parallel(audio_bytes: bytes) -> dict:
     }
 
 
-def _get_stimulus_key_points(question_type: str, audio_url: str) -> list:
-    """Transcribe stimulus audio + GPT-extract key points for RL/RTS/SGD."""
+def _get_stimulus_key_points(question_type: str, audio_url: str) -> dict:
+    """Transcribe stimulus audio + GPT-extract key points for RL/RTS/SGD.
+
+    Returns the same dict shape as `extract_key_points` so callers can
+    distinguish "no key points because the stimulus was empty" from
+    "no key points because Azure/Whisper/LLM was unreachable":
+        {"key_points": list, "scored": bool, "warning_code": Optional[str]}
+    """
     try:
         from services.azure_speech_service import transcribe_audio_full
         from services.llm_content_scoring_service import extract_key_points
         audio_bytes = _download_audio_with_retry(audio_url, label="STIMULUS_DOWNLOAD")
         transcript = transcribe_audio_full(audio_bytes)
-        if transcript:
-            return extract_key_points(transcript, question_type)
+        if not transcript:
+            # Azure STT-only `transcribe_audio_full` is fail-open empty —
+            # this is W8's silent-cascade entry point. Surface explicitly.
+            log.warning(
+                "[SCORER] Stimulus transcription returned empty for %s — "
+                "downstream content score will be flagged degraded",
+                question_type,
+            )
+            return {
+                "key_points": [],
+                "scored": False,
+                "warning_code": "stimulus_transcription_unavailable",
+            }
+        return extract_key_points(transcript, question_type)
     except Exception as e:
         log.error(f"[SCORER] Stimulus key-point extraction failed ({question_type}): {e}")
-    return []
+        return {
+            "key_points": [],
+            "scored": False,
+            "warning_code": "stimulus_transcription_unavailable",
+        }
 
 
 def _run_scoring(
@@ -1192,6 +1254,9 @@ def _run_scoring(
         word_scores        = raw.get("word_scores", [])
         fluency_metrics    = raw.get("fluency_metrics", {})
         content_llm_scored = bool(raw.get("content_llm_scored", False))
+        # W7/W8/W9
+        content_reasoning  = raw.get("content_reasoning")
+        scoring_warnings   = list(raw.get("scoring_warnings") or [])
 
         extra = {}
         is_correct = raw.get("is_correct")
@@ -1208,17 +1273,35 @@ def _run_scoring(
         })
         pte = _pte_score(computed["pct"])
 
-        store_score(user_id, question_id, {
-            "scoring":       "complete",
-            "content":       round(content, 1),
-            "fluency":       fluency,
-            "pronunciation": pronunciation,
-            "total":         max(config.PTE_FLOOR, pte),
-            "transcript":    transcript,
-            "word_scores":   word_scores,
-            "fluency_metrics": fluency_metrics,
+        # W7: per-component status — "scored" when the dimension was
+        # produced cleanly, "degraded" when its value reflects a fall-open
+        # path (cross-penalty halving counts as scored — that's a real
+        # rubric outcome, not a pipeline failure).
+        component_status = {
+            "content": "degraded" if scoring_warnings and not content_llm_scored
+                       and any(w.startswith("content_") or w.startswith("stimulus_")
+                               for w in scoring_warnings)
+                       else "scored",
+            "fluency": "scored",
+            "pronunciation": "scored",
+        }
+
+        score_payload = {
+            "scoring":          "complete",
+            "content":          round(content, 1),
+            "fluency":          fluency,
+            "pronunciation":    pronunciation,
+            "total":            max(config.PTE_FLOOR, pte),
+            "transcript":       transcript,
+            "word_scores":      word_scores,
+            "fluency_metrics":  fluency_metrics,
+            "scoring_warnings": scoring_warnings,
+            "component_status": component_status,
             **extra,
-        })
+        }
+        if content_reasoning:
+            score_payload["content_reasoning"] = content_reasoning
+        store_score(user_id, question_id, score_payload)
         update_speaking_score_in_db(
             user_id=user_id,
             question_id=question_id,
@@ -1229,23 +1312,40 @@ def _run_scoring(
             transcript=transcript,
             word_scores=word_scores,
             fluency_metrics=fluency_metrics,
+            scoring_warnings=scoring_warnings,
+            component_status=component_status,
+            content_reasoning=content_reasoning,
         )
         log.info(f"[SCORER] q={question_id} type={question_type} content={content:.1f} " f"fluency={fluency} pronunciation={pronunciation} pte={pte}")
         if question_type == "answer_short_question":
             log.info(f"[ASQ] q={question_id} " f"user_said={transcript!r} " f"expected={expected_answers!r} " f"is_correct={extra.get('is_correct')} " f"pte={pte}")
 
     except Exception as e:
-        store_score(user_id, question_id, {"scoring": "error", "error": str(e)})
-        if "no speech recognised" in str(e).lower():
+        is_no_speech = "no speech recognised" in str(e).lower()
+        # W7: even on the catastrophic-error path, give the UI something to
+        # distinguish "the user said nothing" from "scoring pipeline broke".
+        if is_no_speech:
+            warning_code = "no_speech_detected"
+            component_status = {"content": "scored", "fluency": "scored", "pronunciation": "scored"}
             logger.warning(
                 "[SCORER] user=%s question=%s type=%s no speech recognised",
                 user_id, question_id, question_type,
             )
         else:
+            warning_code = "scoring_pipeline_failed"
+            component_status = {
+                "content": "failed", "fluency": "failed", "pronunciation": "failed",
+            }
             logger.error(
                 "[SCORER ERROR] user=%s question=%s type=%s exception=%s: %s",
                 user_id, question_id, question_type, type(e).__name__, e,
             )
+        store_score(user_id, question_id, {
+            "scoring": "error",
+            "error": str(e),
+            "scoring_warnings": [warning_code],
+            "component_status": component_status,
+        })
         # Always mark AttemptAnswer complete so background aggregation is never blocked
         update_speaking_score_in_db(
             user_id=user_id,
@@ -1256,6 +1356,8 @@ def _run_scoring(
             total=0,
             transcript="",
             word_scores=[],
+            scoring_warnings=[warning_code],
+            component_status=component_status,
         )
 
 
