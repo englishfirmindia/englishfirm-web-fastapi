@@ -16,6 +16,12 @@ from db.database import get_db
 from db.models import User
 from services.email import send_password_reset
 from services.zapier import send_signup_webhook
+from services.auth_token_service import (
+    issue_access_token,
+    issue_token_pair,
+    rotate_refresh_token,
+    revoke_refresh_token,
+)
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -48,11 +54,9 @@ class ResetPasswordRequest(BaseModel):
 
 
 def _make_token(user_id: int) -> str:
-    payload = {
-        "sub": str(user_id),
-        "exp": datetime.utcnow() + timedelta(days=config.JWT_EXPIRY_DAYS),
-    }
-    return jwt.encode(payload, config.JWT_SECRET_KEY, algorithm=config.JWT_ALGORITHM)
+    """Short-lived (30 min) JWT access token. Pair this with a refresh
+       token issued via services.auth_token_service.issue_token_pair."""
+    return issue_access_token(user_id)
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -60,11 +64,13 @@ def _set_session_cookie(response: Response, token: str) -> None:
     Set the httpOnly session cookie alongside the JSON `access_token`.
     Web clients (Flutter web with withCredentials) read this on subsequent
     requests; iOS ignores Set-Cookie and keeps using `Authorization: Bearer`.
+    Now scoped to the access-token TTL — the refresh cookie carries the
+    durable session.
     """
     response.set_cookie(
         key=config.SESSION_COOKIE_NAME,
         value=token,
-        max_age=config.SESSION_COOKIE_MAX_AGE_SECONDS,
+        max_age=config.JWT_ACCESS_EXPIRY_MINUTES * 60,
         httponly=True,
         secure=config.SESSION_COOKIE_SECURE,
         samesite=config.SESSION_COOKIE_SAMESITE,
@@ -79,6 +85,49 @@ def _clear_session_cookie(response: Response) -> None:
         path="/",
         domain=config.SESSION_COOKIE_DOMAIN,
     )
+
+
+def _set_refresh_cookie(response: Response, raw_refresh: str) -> None:
+    """httpOnly cookie holding the raw refresh token. 30-day max-age.
+       Web clients use this; iOS ignores Set-Cookie and uses the JSON
+       refresh_token field instead."""
+    response.set_cookie(
+        key=config.REFRESH_COOKIE_NAME,
+        value=raw_refresh,
+        max_age=config.REFRESH_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=config.SESSION_COOKIE_SECURE,
+        samesite=config.SESSION_COOKIE_SAMESITE,
+        domain=config.SESSION_COOKIE_DOMAIN,
+        path="/",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=config.REFRESH_COOKIE_NAME,
+        path="/",
+        domain=config.SESSION_COOKIE_DOMAIN,
+    )
+
+
+def _issue_pair_and_set_cookies(
+    db: Session, user_id: int, request: Request, response: Response,
+) -> dict:
+    """Helper used by login / google / apple — issue access+refresh pair,
+       set both cookies, return the JSON response body. db.commit() must
+       be called by caller (or rely on dependency cleanup)."""
+    access, refresh, _row = issue_token_pair(db, user_id=user_id, request=request)
+    db.commit()
+    _set_session_cookie(response, access)
+    _set_refresh_cookie(response, refresh)
+    return {
+        "access_token":         access,
+        "refresh_token":        refresh,
+        "token_type":           "bearer",
+        "access_expires_in":    config.JWT_ACCESS_EXPIRY_MINUTES * 60,
+        "refresh_expires_in":   config.REFRESH_COOKIE_MAX_AGE_SECONDS,
+    }
 
 
 def _make_password_reset_token(user_id: int) -> str:
@@ -158,9 +207,7 @@ def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
-    token = _make_token(user.id)
-    _set_session_cookie(response, token)
-    return {"access_token": token, "token_type": "bearer"}
+    return _issue_pair_and_set_cookies(db, user.id, request, response)
 
 
 @router.post("/forgot-password")
@@ -260,9 +307,7 @@ def google_auth(
         db.commit()
         db.refresh(user)
 
-    token = _make_token(user.id)
-    _set_session_cookie(response, token)
-    return {"access_token": token, "token_type": "bearer"}
+    return _issue_pair_and_set_cookies(db, user.id, request, response)
 
 
 @router.post("/apple")
@@ -340,9 +385,7 @@ def apple_auth(
         db.commit()
         db.refresh(user)
 
-    token = _make_token(user.id)
-    _set_session_cookie(response, token)
-    return {"access_token": token, "token_type": "bearer"}
+    return _issue_pair_and_set_cookies(db, user.id, request, response)
 
 
 @router.get("/me")
@@ -358,11 +401,71 @@ def me(user: User = Depends(get_current_user)):
     }
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: Optional[str] = None
+
+
+@router.post("/refresh")
+@limiter.limit("60/minute")
+def refresh(
+    request: Request,
+    response: Response,
+    body: Optional[RefreshRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Rotate a refresh token → new access + refresh pair. Reads the raw
+    refresh token from the httpOnly cookie (web) or the JSON body (iOS).
+    On any failure (expired / unknown / replayed) returns 401 with
+    detail="refresh_invalid" so the frontend can distinguish from an
+    expired access token and force re-login.
+    """
+    raw = (body.refresh_token if body else None) or request.cookies.get(config.REFRESH_COOKIE_NAME)
+    if not raw:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="refresh_invalid",
+        )
+    result = rotate_refresh_token(db, raw, request=request)
+    if result is None:
+        db.commit()  # persist any family-revoke side effect
+        _clear_refresh_cookie(response)
+        _clear_session_cookie(response)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="refresh_invalid",
+        )
+    new_access, new_refresh = result
+    db.commit()
+    _set_session_cookie(response, new_access)
+    _set_refresh_cookie(response, new_refresh)
+    return {
+        "access_token":       new_access,
+        "refresh_token":      new_refresh,
+        "token_type":         "bearer",
+        "access_expires_in":  config.JWT_ACCESS_EXPIRY_MINUTES * 60,
+        "refresh_expires_in": config.REFRESH_COOKIE_MAX_AGE_SECONDS,
+    }
+
+
 @router.post("/logout")
-def logout(response: Response):
+def logout(
+    request: Request,
+    response: Response,
+    body: Optional[RefreshRequest] = None,
+    db: Session = Depends(get_db),
+):
     """
-    Clear the session cookie. Safe to call without auth — no-op for clients
-    that aren't using the cookie (iOS bearer flow ignores Set-Cookie).
+    Revoke the current refresh token (if any) and clear cookies. Safe to
+    call without auth — bare cookie clear if no refresh token is found.
     """
+    raw = (body.refresh_token if body else None) or request.cookies.get(config.REFRESH_COOKIE_NAME)
+    if raw:
+        try:
+            revoke_refresh_token(db, raw)
+            db.commit()
+        except Exception:
+            db.rollback()  # best-effort; never block logout on DB error
     _clear_session_cookie(response)
+    _clear_refresh_cookie(response)
     return {"message": "Logged out"}

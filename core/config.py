@@ -19,7 +19,25 @@ DB_MAX_OVERFLOW = 40
 # ── Auth (JWT) ────────────────────────────────────────────────────────────────
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+# Legacy single-token TTL — kept for backwards compatibility while old
+# 30-day JWTs in the wild expire naturally. New logins issue an access +
+# refresh pair using the constants below.
 JWT_EXPIRY_DAYS = 30
+# New short-lived access JWT (stateless). Auto-refreshed by the frontend
+# 401 interceptor via /api/v1/auth/refresh.
+JWT_ACCESS_EXPIRY_MINUTES = int(os.getenv("JWT_ACCESS_EXPIRY_MINUTES", "30"))
+# Long-lived refresh token (stored hashed in auth_refresh_tokens, rotated
+# single-use on each /auth/refresh call). 30 days of activity-rolling
+# session length: each rotation issues a fresh 30-day clock.
+JWT_REFRESH_EXPIRY_DAYS = int(os.getenv("JWT_REFRESH_EXPIRY_DAYS", "30"))
+# httpOnly cookie name carrying the raw refresh token on web clients. iOS
+# uses the JSON refresh_token field instead; both flow into /auth/refresh.
+REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "ef_refresh")
+REFRESH_COOKIE_MAX_AGE_SECONDS = JWT_REFRESH_EXPIRY_DAYS * 24 * 60 * 60
+# Grace window after rotation: the just-rotated refresh token still works
+# for this many seconds, so two tabs racing /auth/refresh don't trigger a
+# spurious family revocation.
+REFRESH_ROTATION_GRACE_SECONDS = int(os.getenv("REFRESH_ROTATION_GRACE_SECONDS", "10"))
 
 # ── Auth (web session cookie) ─────────────────────────────────────────────────
 # Web clients use an httpOnly cookie holding the same JWT, so the token is not

@@ -3,7 +3,7 @@ from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from .database import Base
 
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID, INET
 from sqlalchemy import ForeignKey
 
 
@@ -490,3 +490,21 @@ class TrainerNote(Base):
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
     updated_at  = Column(DateTime(timezone=True), nullable=True)
     deleted_at  = Column(DateTime(timezone=True), nullable=True)
+
+
+class AuthRefreshToken(Base):
+    """Stored refresh tokens for /auth/refresh rotation. Hashed; raw value
+       never lives server-side after issue."""
+    __tablename__ = "auth_refresh_tokens"
+    id            = Column(UUID(as_uuid=True), primary_key=True)
+    user_id       = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash    = Column(String(64), unique=True, nullable=False)
+    token_family  = Column(UUID(as_uuid=True), nullable=False, index=True)
+    issued_at     = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at    = Column(DateTime(timezone=True), nullable=False)
+    revoked_at    = Column(DateTime(timezone=True), nullable=True)
+    replaced_by   = Column(UUID(as_uuid=True), ForeignKey("auth_refresh_tokens.id", ondelete="SET NULL"), nullable=True)
+    user_agent    = Column(Text, nullable=True)
+    ip_address    = Column(INET, nullable=True)
+    last_used_at  = Column(DateTime(timezone=True), nullable=True)
+
