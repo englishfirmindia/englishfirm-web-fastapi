@@ -804,8 +804,7 @@ def _score_speaking_v2(
     content = 0.0
     content_llm_scored = False
     content_reasoning: Optional[str] = None
-    # Bucket-scoring audit fields (only populated on the llm_keypoints path)
-    content_classifications: Optional[list] = None
+    # Audit field: content score before the length-floor cap (llm_keypoints only)
     content_pre_cap: Optional[float] = None
     # W7/W8: scoring_warnings is the user-visible signal that *something* in
     # the pipeline degraded — the score is what it is, but the UI can show
@@ -836,7 +835,6 @@ def _score_speaking_v2(
             from services.llm_content_scoring_service import score_content_with_llm
             llm_out = score_content_with_llm(transcript, key_points, task_type)
             content = float(llm_out.get("score", 0.0))
-            content_classifications = llm_out.get("classifications")
             if llm_out.get("scored"):
                 content_llm_scored = True
                 content_reasoning = llm_out.get("reasoning")
@@ -854,15 +852,11 @@ def _score_speaking_v2(
             # effort. If key_points was simply empty (no stimulus audio,
             # legitimate path), no warning needed.
 
-        # ── sqrt softening (DORMANT under bucket scoring) ──────────────────
-        # The deterministic per-keypoint bucket scoring inside
-        # score_content_with_llm grades each idea explicitly, so the LLM
-        # mid-band drift sqrt was compensating for no longer exists.
-        # content_curve_exponent is NULL for the bucket-scored task types
-        # (set by 2026-05-10_bucket_content_scoring.sql), so this branch
-        # is dormant by design. Code path kept intact for fast rollback —
-        # if the bucket scheme misbehaves in production, restoring sqrt is
-        # a single SQL UPDATE setting content_curve_exponent = 0.5.
+        # Soften strict-rubric LLM scoring with a deterministic curve:
+        #   final = 100 · (raw/100) ** exponent
+        # Empirically (66 historical DI submissions) exponent=0.5 lifts the
+        # mid-band ~+20 without rescuing zeros (0**0.5 = 0) or inflating
+        # ceilings (100**0.5 normalised = 100).
         if (cfg.content_curve_exponent is not None
                 and cfg.content_curve_exponent < 1.0
                 and content > 0):
@@ -876,10 +870,9 @@ def _score_speaking_v2(
 
         # ── Length-floor cap ───────────────────────────────────────────────
         # If the user's transcript is shorter than length_floor_words, the
-        # content score is capped at length_floor_cap regardless of how the
-        # LLM bucket-classified each key point. Prevents short keyword-drop
-        # responses from earning too much partial credit (e.g. Nimisha's
-        # 29-word "instructions read aloud" SGD response).
+        # (post-curve) content score is capped at length_floor_cap. Stops
+        # short keyword-drop responses from being lifted into the high band
+        # by the sqrt curve (e.g. a 29-word "instructions read aloud" SGD).
         content_pre_cap = content
         if (cfg.length_floor_words is not None
                 and cfg.length_floor_cap is not None
@@ -1115,16 +1108,12 @@ def _score_speaking_v2(
         "insertions":                insertions,
         "content_method":            cfg.content_method,
         "transcript_annotated":      transcript_annotated,
-        # Bucket-scoring audit trail (LLM-content tasks only). Lets trainer
-        # review + future replays show exactly which key points the LLM
-        # credited and at what level, plus the length-cap effect if any.
-        "content_classifications":   (
-            content_classifications
-            if cfg.content_method == "llm_keypoints" else None
-        ),
+        # Pre-cap content score (LLM-content tasks only) — lets trainer
+        # review and replays see whether the length-floor cap kicked in.
         "content_pre_cap":           (
             round(content_pre_cap, 1)
-            if cfg.content_method == "llm_keypoints" else None
+            if cfg.content_method == "llm_keypoints" and content_pre_cap is not None
+            else None
         ),
         "cross_multipliers":         {"mC": round(mC, 3), "mF": round(mF, 3), "mP": round(mP, 3)},
     }
