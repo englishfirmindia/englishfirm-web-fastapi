@@ -987,13 +987,26 @@ def _score_speaking_v2(
     # ── Pause penalty score ────────────────────────────────────────────────
     s_clamped = min(max(sentence_count, cfg.pause_penalty_sentence_clamp_min),
                     cfg.pause_penalty_sentence_clamp_max)
-    max_pauses = cfg.pause_penalty_max_pauses
+    # When pause_penalty_max_pauses_mult is seeded (DI / RTL / RTS / SGD)
+    # the cliff scales with the user's actual sentence count: more
+    # sentences spoken → more natural pauses tolerated. Falls back to the
+    # static columns for RA / RS / ASQ where the multiplier is NULL.
+    if cfg.pause_penalty_max_pauses_mult is not None:
+        # ceil rather than banker's round() so 7 sentences × 1.5 = 11 (not
+        # 10) — matches the user-facing "at least 150% of sentences"
+        # promise and errs lenient.
+        import math as _math
+        max_pauses = max(1, _math.ceil(sentence_count * cfg.pause_penalty_max_pauses_mult))
+        formula_const = max_pauses + 1
+    else:
+        max_pauses = cfg.pause_penalty_max_pauses
+        formula_const = cfg.pause_penalty_formula_constant
     if total_pauses < s_clamped:
         pause_penalty_score = 100.0
     elif total_pauses <= max_pauses:
         pause_penalty_score = (
             100.0 * (max_pauses - total_pauses)
-            / (cfg.pause_penalty_formula_constant - s_clamped)
+            / (formula_const - s_clamped)
         )
     else:
         pause_penalty_score = 0.0
@@ -1039,13 +1052,13 @@ def _score_speaking_v2(
         "[V2] q=%s type=%s user=%s words_ref=%d words_whisper=%d lcs=%d ins=%d "
         "wpm=%.1f speech_dur=%.2fs gap_pauses=%d hesitations=%d "
         "(whisper=%d azure_filler=%d src=%s) total_pauses=%d "
-        "sentences=%d wpm_band=%.1f pause_score=%.1f gate=%s "
+        "sentences=%d max_pauses=%d wpm_band=%.1f pause_score=%.1f gate=%s "
         "→ c/f/p=%.1f/%.1f/%.1f",
         question_id, task_type, user_id,
         len(ref_tokens), len(spoken_tokens), matched, insertions,
         wpm, speech_dur, gap_pauses, hesitation_count,
         hesitation_count_whisper, len(azure_fillers), hesitation_source, total_pauses,
-        sentence_count, wpm_band_score, pause_penalty_score, wpm_gate_triggered,
+        sentence_count, max_pauses, wpm_band_score, pause_penalty_score, wpm_gate_triggered,
         content, fluency, pronunciation,
     )
 

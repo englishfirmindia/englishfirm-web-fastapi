@@ -77,6 +77,12 @@ class SpeakingScoringConfig:
     # NULL = no transform (today's behaviour). 0 stays 0, 100 stays 100;
     # the curve only changes mid-range scores.
     content_curve_exponent: float | None = None
+    # Optional dynamic pause-penalty cliff: when set, max_pauses is
+    # computed at scoring time as round(sentence_count × multiplier)
+    # instead of using the static pause_penalty_max_pauses column. The
+    # formula_constant is then derived as max_pauses + 1 to preserve the
+    # "soft start at threshold" semantics. NULL → static behaviour.
+    pause_penalty_max_pauses_mult: float | None = None
 
 
 _COLS = (
@@ -90,7 +96,7 @@ _COLS = (
     "uses_cross_penalty, pronunciation_source, "
     "pronunciation_fluency_gate, pronunciation_content_threshold, "
     "pronunciation_content_floor, pronunciation_content_slope, "
-    "content_curve_exponent"
+    "content_curve_exponent, pause_penalty_max_pauses_mult"
 )
 
 
@@ -121,6 +127,7 @@ def _row_to_config(row) -> SpeakingScoringConfig:
         pronunciation_content_floor=(float(row[25]) if row[25] is not None else None),
         pronunciation_content_slope=(float(row[26]) if row[26] is not None else None),
         content_curve_exponent=(float(row[27]) if row[27] is not None else None),
+        pause_penalty_max_pauses_mult=(float(row[28]) if row[28] is not None else None),
     )
 
 
