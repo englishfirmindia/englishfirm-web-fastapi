@@ -1027,9 +1027,13 @@ def _score_speaking_v2(
             mP = _cm(fluency)
         elif (cfg.pronunciation_fluency_gate is not None
               and cfg.pronunciation_content_threshold is not None):
-            # Override active, fluency healthy → content-driven mP (wider curve)
+            # Override active, fluency healthy → wide-curve mP driven by
+            # min(content, fluency). Pronunciation now reflects the worse
+            # of the other two pillars, not just content alone — so a
+            # smooth-but-content-light read (or a content-perfect-but-
+            # halting read) both pull pronunciation down.
             mP = _cross_multiplier(
-                content,
+                min(content, fluency),
                 cfg.pronunciation_content_threshold,
                 cfg.pronunciation_content_floor or 0.5,
                 cfg.pronunciation_content_slope or 0.005,
