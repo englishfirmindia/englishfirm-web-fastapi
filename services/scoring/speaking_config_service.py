@@ -83,6 +83,12 @@ class SpeakingScoringConfig:
     # formula_constant is then derived as max_pauses + 1 to preserve the
     # "soft start at threshold" semantics. NULL → static behaviour.
     pause_penalty_max_pauses_mult: float | None = None
+    # Length-floor cap for LLM-scored content. When the user's transcript
+    # is shorter than `length_floor_words` words, content is capped at
+    # `length_floor_cap` no matter how the LLM rated each key point. NULL
+    # on either column → no cap (today's behaviour for non-LLM tasks).
+    length_floor_words: int | None = None
+    length_floor_cap: int | None = None
 
 
 _COLS = (
@@ -96,7 +102,8 @@ _COLS = (
     "uses_cross_penalty, pronunciation_source, "
     "pronunciation_fluency_gate, pronunciation_content_threshold, "
     "pronunciation_content_floor, pronunciation_content_slope, "
-    "content_curve_exponent, pause_penalty_max_pauses_mult"
+    "content_curve_exponent, pause_penalty_max_pauses_mult, "
+    "length_floor_words, length_floor_cap"
 )
 
 
@@ -128,6 +135,8 @@ def _row_to_config(row) -> SpeakingScoringConfig:
         pronunciation_content_slope=(float(row[26]) if row[26] is not None else None),
         content_curve_exponent=(float(row[27]) if row[27] is not None else None),
         pause_penalty_max_pauses_mult=(float(row[28]) if row[28] is not None else None),
+        length_floor_words=(int(row[29]) if row[29] is not None else None),
+        length_floor_cap=(int(row[30]) if row[30] is not None else None),
     )
 
 

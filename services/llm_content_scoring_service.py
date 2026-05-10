@@ -137,83 +137,146 @@ def extract_key_points(transcript: str, question_type: str) -> dict:
 
 # ── Speaking content scoring (DI / RL / RTS / SGD) ───────────────────────────
 
-def score_content_with_llm(student_transcript: str, key_points: list, question_type: str) -> dict:
-    """Score student response against key points.
+# ── Bucket-based content scoring ──────────────────────────────────────────────
+# The LLM is no longer asked for a holistic 0–100 number (which drifts toward
+# the mid-band and credits keyword-dropping at ~60%). Instead it classifies
+# each key point into a fixed taxonomy:
+#
+#   covered            — explained or paraphrased the idea           ratio 1.00
+#   mentioned_explicit — references the idea but doesn't explain     ratio 0.50
+#   mentioned_partial  — single-word topic mention, no elaboration   ratio 0.25
+#   missed             — absent from the response                    ratio 0
+#
+# Score is then computed deterministically from the classifications. A length-
+# floor cap is applied by the caller (_score_speaking_v2) when the user's
+# transcript is too short to legitimately reach the bucket score.
 
-    Returns a dict so the caller (and ultimately the user) can tell a real
-    zero apart from an LLM-unavailable zero, and so the trainer review can
-    surface the LLM's reasoning instead of dropping it on the log floor:
+_BUCKET_RATIOS = {
+    "covered":            1.00,
+    "mentioned_explicit": 0.50,
+    "mentioned_partial":  0.25,
+    "missed":             0.00,
+}
+
+
+def _score_from_classifications(classifications: list, n_key_points: int) -> float:
+    if n_key_points <= 0:
+        return 0.0
+    credit_per_kp = 100.0 / n_key_points
+    raw = 0.0
+    for c in classifications:
+        bucket = (c or {}).get("bucket", "missed")
+        ratio = _BUCKET_RATIOS.get(bucket, 0.0)
+        raw += ratio * credit_per_kp
+    return max(0.0, min(100.0, round(raw, 1)))
+
+
+def score_content_with_llm(student_transcript: str, key_points: list, question_type: str) -> dict:
+    """Score student response against key points using bucket classification.
+
+    Returns:
         {
-            "score":        float,             # 0-100
-            "scored":       bool,              # True if LLM returned cleanly
-            "reasoning":    Optional[str],     # only present when scored
-            "warning_code": Optional[str],     # set when scored=False
+            "score":            float,            # 0-100, derived from buckets
+            "scored":           bool,             # True iff LLM returned cleanly
+            "reasoning":        Optional[str],    # one-line overall judgement
+            "classifications":  Optional[list],   # per-keypoint buckets
+            "warning_code":     Optional[str],    # set when scored=False
         }
 
-    A return with scored=False and score=0.0 means "no LLM signal — do not
-    treat this 0 as the student's content score". The caller is expected to
-    surface the warning_code via result_json.scoring_warnings.
+    classifications shape:
+        [{"key_point": "<kp text>", "bucket": "covered"|"mentioned_explicit"|
+                                              "mentioned_partial"|"missed",
+          "evidence": "<quote or empty>"}]
+
+    Caller is responsible for applying the length-floor cap and the existing
+    content_zero rules. The deterministic combiner happens here so the
+    calibration is identical regardless of who consumes the result.
     """
     if not student_transcript.strip():
-        return {"score": 0.0, "scored": True, "reasoning": None, "warning_code": None}
+        return {"score": 0.0, "scored": True, "reasoning": None,
+                "classifications": [], "warning_code": None}
     if not key_points:
-        # No key points to score against — caller must decide whether to
-        # treat that as legitimate or as a degraded path.
-        return {"score": 0.0, "scored": True, "reasoning": None, "warning_code": None}
+        return {"score": 0.0, "scored": True, "reasoning": None,
+                "classifications": [], "warning_code": None}
 
-    kp_text = "\n".join(f"- {kp}" for kp in key_points)
+    kp_lines = "\n".join(f"  {i+1}. {kp}" for i, kp in enumerate(key_points))
 
-    _prompts = {
-        "retell_lecture": (
-            "You are scoring a PTE Retell Lecture response.\n\n"
-            f"Key points the student should cover:\n{kp_text}\n\n"
-            f"Student's response:\n{student_transcript}\n\n"
-            "Score how well the student covered the key points (0-100). "
-            "Accurate paraphrasing counts — exact wording is not required. "
-            'Return JSON only: {"score": <int 0-100>, "reasoning": "<one sentence>"}'
-        ),
-        "summarize_group_discussion": (
-            "You are scoring a PTE Summarize Group Discussion response.\n\n"
-            f"Key viewpoints from the discussion:\n{kp_text}\n\n"
-            f"Student's response:\n{student_transcript}\n\n"
-            "Score how well the student summarised the discussion viewpoints (0-100). "
-            'Return JSON only: {"score": <int 0-100>, "reasoning": "<one sentence>"}'
-        ),
-        "respond_to_situation": (
-            "You are scoring a PTE Respond to Situation response.\n\n"
-            f"Key elements the response must address:\n{kp_text}\n\n"
-            f"Student's response:\n{student_transcript}\n\n"
-            "Score how well the student addressed all required elements (0-100). "
-            'Return JSON only: {"score": <int 0-100>, "reasoning": "<one sentence>"}'
-        ),
-        "describe_image": (
-            "You are scoring a PTE Describe Image response.\n\n"
-            f"Key elements the student should describe:\n{kp_text}\n\n"
-            f"Student's response:\n{student_transcript}\n\n"
-            "Score how accurately and completely the student described the image (0-100). "
-            'Return JSON only: {"score": <int 0-100>, "reasoning": "<one sentence>"}'
-        ),
+    _intros = {
+        "retell_lecture":             "You are scoring a PTE Retell Lecture response.",
+        "summarize_group_discussion": "You are scoring a PTE Summarize Group Discussion response.",
+        "respond_to_situation":       "You are scoring a PTE Respond to Situation response.",
+        "ptea_respond_situation":     "You are scoring a PTE Respond to Situation response.",
+        "describe_image":             "You are scoring a PTE Describe Image response.",
     }
-    prompt = _prompts.get(question_type, _prompts["describe_image"])
+    intro = _intros.get(question_type, _intros["describe_image"])
+
+    prompt = (
+        f"{intro}\n\n"
+        f"Key points to evaluate:\n{kp_lines}\n\n"
+        f"Student's response:\n{student_transcript}\n\n"
+        "For EACH key point, classify how the student handled it using exactly\n"
+        "one of these buckets:\n"
+        '  - "covered"            : student explained or paraphrased the idea\n'
+        '                           (even briefly). Counts even if the wording\n'
+        '                           differs from the key point.\n'
+        '  - "mentioned_explicit" : student references the idea but does not\n'
+        '                           actually explain or develop it.\n'
+        '  - "mentioned_partial"  : only a single-word or topic-keyword mention\n'
+        '                           with no elaboration whatsoever.\n'
+        '  - "missed"             : the idea is absent from the response.\n\n'
+        "If the student's response is essentially restating the task instructions\n"
+        "or prompt without summarising actual content, classify all key points as\n"
+        '"mentioned_partial" at most.\n\n'
+        "Return STRICT JSON only, no markdown:\n"
+        "{\n"
+        '  "classifications": [\n'
+        '    {"key_point_index": 1, "bucket": "<bucket>", "evidence": "<short quote or empty>"},\n'
+        "    ... one entry per key point ...\n"
+        "  ],\n"
+        '  "reasoning": "<one sentence overall>"\n'
+        "}"
+    )
 
     try:
         result = _call_llm(prompt)
-        score = max(0.0, min(100.0, float(result.get("score", 0))))
+        raw_classes = result.get("classifications") or []
+        classifications = []
+        for i, kp in enumerate(key_points):
+            entry = {}
+            for c in raw_classes:
+                if (c or {}).get("key_point_index") == i + 1:
+                    entry = c
+                    break
+            bucket = (entry.get("bucket") or "missed").strip()
+            if bucket not in _BUCKET_RATIOS:
+                bucket = "missed"
+            classifications.append({
+                "key_point": kp,
+                "bucket":    bucket,
+                "evidence":  (entry.get("evidence") or "").strip(),
+            })
+        score = _score_from_classifications(classifications, len(key_points))
         reasoning = (result.get("reasoning") or "").strip() or None
-        log.info("[LLM-CONTENT] %s score=%.1f reason=%s", question_type, score, reasoning or "")
+        log.info(
+            "[LLM-CONTENT] %s score=%.1f buckets=%s reason=%s",
+            question_type, score,
+            [c["bucket"] for c in classifications], reasoning or "",
+        )
         return {
-            "score": score,
-            "scored": True,
-            "reasoning": reasoning,
-            "warning_code": None,
+            "score":            score,
+            "scored":           True,
+            "reasoning":        reasoning,
+            "classifications":  classifications,
+            "warning_code":     None,
         }
     except Exception as e:
         log.warning("[LLM-CONTENT] Fallback for %s: %s", question_type, e)
         return {
-            "score": 0.0,
-            "scored": False,
-            "reasoning": None,
-            "warning_code": "content_llm_unavailable",
+            "score":            0.0,
+            "scored":           False,
+            "reasoning":        None,
+            "classifications":  None,
+            "warning_code":     "content_llm_unavailable",
         }
 
 
