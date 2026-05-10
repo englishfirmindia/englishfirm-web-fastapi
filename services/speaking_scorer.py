@@ -1007,49 +1007,32 @@ def _score_speaking_v2(
 
     # ── Cross-penalty (gated by cfg.uses_cross_penalty) ────────────────────
     # mC and mF use the symmetric 0–20 rule today.
-    # mP optionally uses a fluency-gated content-driven curve when the
-    # pronunciation_*_override columns are seeded — when fluency is
-    # healthy (>= gate) it dampens pronunciation by the wider 0–100
-    # content curve; when fluency is below the gate it falls back to
-    # today's symmetric mP. All NULL → today's behaviour preserved.
+    # Simplified cross-penalty: only pronunciation is touched. Content and
+    # fluency pass through untouched (mC = mF = 1.0). mP runs on the wide
+    # 0–100 curve driven by min(content, fluency), unconditionally — no
+    # fluency gate, no symmetric fallback. When either pillar is at 0,
+    # the curve floors at 0.5; when both are >= 100, mP stays at 1.0.
+    #
+    # Curve params come from pronunciation_content_{threshold,floor,slope}
+    # (defaults 100 / 0.5 / 0.005). The legacy symmetric trio
+    # (cross_penalty_*) and the pronunciation_fluency_gate column are no
+    # longer read by the algorithm but are kept on the row for rollback.
     content_pre, fluency_pre, pron_pre = content, fluency, pronunciation
     mC = mF = mP = 1.0
     if cfg.uses_cross_penalty:
-        _cm = lambda s: _cross_multiplier(
-            s, cfg.cross_penalty_healthy_threshold,
-            cfg.cross_penalty_floor_multiplier, cfg.cross_penalty_slope,
+        mP = _cross_multiplier(
+            min(content, fluency),
+            cfg.pronunciation_content_threshold or 100.0,
+            cfg.pronunciation_content_floor or 0.5,
+            cfg.pronunciation_content_slope or 0.005,
         )
-        mC = _cm(min(fluency, pronunciation))
-        mF = _cm(min(content, pronunciation))
-        if (cfg.pronunciation_fluency_gate is not None
-                and fluency < cfg.pronunciation_fluency_gate):
-            # Override active, fluency too low → today's fluency-driven mP
-            mP = _cm(fluency)
-        elif (cfg.pronunciation_fluency_gate is not None
-              and cfg.pronunciation_content_threshold is not None):
-            # Override active, fluency healthy → wide-curve mP driven by
-            # min(content, fluency). Pronunciation now reflects the worse
-            # of the other two pillars, not just content alone — so a
-            # smooth-but-content-light read (or a content-perfect-but-
-            # halting read) both pull pronunciation down.
-            mP = _cross_multiplier(
-                min(content, fluency),
-                cfg.pronunciation_content_threshold,
-                cfg.pronunciation_content_floor or 0.5,
-                cfg.pronunciation_content_slope or 0.005,
-            )
-        else:
-            # No override configured → today's symmetric rule
-            mP = _cm(min(content, fluency))
-        if mC < 1.0 or mP < 1.0:
-            content = max(0.0, content * mC)
-            fluency = max(0.0, fluency * mF)
+        if mP < 1.0:
             pronunciation = max(0.0, pronunciation * mP)
             log.info(
-                "[CROSS_PENALTY] q=%s type=%s user=%s "
-                "mC=%.3f mF=%.3f mP=%.3f before c/f/p=%.1f/%.1f/%.1f → after c/f/p=%.1f/%.1f/%.1f",
-                question_id, task_type, user_id, mC, mF, mP,
-                content_pre, fluency_pre, pron_pre, content, fluency, pronunciation,
+                "[CROSS_PENALTY] q=%s type=%s user=%s mP=%.3f "
+                "before p=%.1f → after p=%.1f (c=%.1f f=%.1f untouched)",
+                question_id, task_type, user_id, mP,
+                pron_pre, pronunciation, content, fluency,
             )
 
     log.info(
