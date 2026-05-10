@@ -560,16 +560,67 @@ def get_speaking_sectional_results(session_id: str, user_id: int, db: Session) -
         .order_by(AttemptAnswer.submitted_at)
         .all()
     )
-    questions = [
-        {
-            "question_id":    a.question_id,
-            "question_type":  a.question_type,
-            "score":          a.score,
-            "result_json":    a.result_json or {},
-            "scoring_status": a.scoring_status,
-        }
-        for a in answers
-    ]
+
+    # Bulk-fetch the question rows so each answer can carry its
+    # content_json + correctAnswers + presigned stimulus/image URLs. Same
+    # enrichment the trainer review uses, so the unified
+    # SpeakingAttemptCard widget can render every surface from one shape.
+    qids = [a.question_id for a in answers]
+    qmap = {}
+    if qids:
+        q_rows = (
+            db.query(QuestionFromApeuni)
+            .filter(QuestionFromApeuni.question_id.in_(qids))
+            .all()
+        )
+        qmap = {q.question_id: q for q in q_rows}
+
+    questions = []
+    for a in answers:
+        q = qmap.get(a.question_id)
+        content_json = enrich_content_json(q) if q else {}
+        # Presign stimulus audio + image so the front-end can play directly.
+        stim = (content_json.get("audio_url") or content_json.get("s3_key")
+                or content_json.get("audio_s3_key"))
+        if stim:
+            try:
+                content_json["audio_url"] = generate_presigned_url(stim)
+            except Exception:
+                pass
+        img = content_json.get("image_url") or content_json.get("image_s3_key")
+        if img:
+            try:
+                content_json["image_url"] = generate_presigned_url(img)
+            except Exception:
+                pass
+
+        # Presign student recording.
+        recording_url = None
+        if a.audio_url:
+            try:
+                recording_url = generate_presigned_url(a.audio_url)
+            except Exception:
+                recording_url = a.audio_url  # fall back to raw URL
+
+        # Trainer-style "correct answer" payload — comes from the
+        # evaluation row attached to the question.
+        correct = {}
+        if q and q.evaluation and q.evaluation.evaluation_json:
+            correct = q.evaluation.evaluation_json.get("correctAnswers", {}) or {}
+
+        questions.append({
+            "question_id":     a.question_id,
+            "question_type":   a.question_type,
+            "score":           a.score,
+            "content_score":   a.content_score,
+            "fluency_score":   a.fluency_score,
+            "pronunciation_score": a.pronunciation_score,
+            "result_json":     a.result_json or {},
+            "scoring_status":  a.scoring_status,
+            "audio_url":       recording_url,
+            "content_json":    content_json,
+            "correct":         correct,
+        })
 
     return {
         "attempt_id":         attempt.id,

@@ -773,6 +773,33 @@ def get_mock_review(session_id: str, user_id: int, db: Session) -> dict:
             except Exception:
                 pass
 
+        # ── Full content_json + correct payload for speaking review ────
+        # The SpeakingAttemptCard reads these to render stimulus, sample
+        # answer, accepted variants, etc. — same shape as sectional and
+        # trainer review.
+        full_content_json: dict = {}
+        correct_payload: dict = {}
+        if q is not None:
+            from services.session_service import enrich_content_json as _enrich
+            full_content_json = _enrich(q)
+            stim2 = (full_content_json.get("audio_url")
+                     or full_content_json.get("s3_key")
+                     or full_content_json.get("audio_s3_key"))
+            if stim2:
+                try:
+                    full_content_json["audio_url"] = generate_presigned_url(stim2)
+                except Exception:
+                    pass
+            img2 = (full_content_json.get("image_url")
+                    or full_content_json.get("image_s3_key"))
+            if img2:
+                try:
+                    full_content_json["image_url"] = generate_presigned_url(img2)
+                except Exception:
+                    pass
+            if q.evaluation and q.evaluation.evaluation_json:
+                correct_payload = q.evaluation.evaluation_json.get("correctAnswers", {}) or {}
+
         items.append({
             "question_number":     i,
             "question_id":         a.question_id,
@@ -789,6 +816,9 @@ def get_mock_review(session_id: str, user_id: int, db: Session) -> dict:
             "correct_answer":      a.correct_answer_json or {},
             "result_detail":       a.result_json or {},
             "context":             context,
+            "audio_url":           context.get("recording_url"),
+            "content_json":        full_content_json,
+            "correct":             correct_payload,
         })
 
     return {"found": True, "items": items}
