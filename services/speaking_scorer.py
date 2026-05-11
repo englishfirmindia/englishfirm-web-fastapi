@@ -1262,11 +1262,13 @@ def _run_scoring(
     key_points: list = None,
     expected_answers: list = None,
     stimulus_audio_url: str = "",
+    extra_warnings: list = None,
 ):
     if key_points is None:
         key_points = []
     if expected_answers is None:
         expected_answers = []
+    extra_warnings = list(extra_warnings or [])
 
     try:
         audio_bytes = _download_audio_with_retry(audio_url, label="USER_AUDIO_DOWNLOAD")
@@ -1296,6 +1298,12 @@ def _run_scoring(
         # W7/W8/W9
         content_reasoning  = raw.get("content_reasoning")
         scoring_warnings   = list(raw.get("scoring_warnings") or [])
+        # Handler-supplied warnings (e.g. "reference_missing" when the
+        # question row had a null/empty passage or transcript) — prepend
+        # so they show up first in trainer review.
+        for w in extra_warnings:
+            if w and w not in scoring_warnings:
+                scoring_warnings.insert(0, w)
 
         extra = {}
         is_correct = raw.get("is_correct")
@@ -1379,10 +1387,11 @@ def _run_scoring(
                 "[SCORER ERROR] user=%s question=%s type=%s exception=%s: %s",
                 user_id, question_id, question_type, type(e).__name__, e,
             )
+        err_warnings = [w for w in extra_warnings if w] + [warning_code]
         store_score(user_id, question_id, {
             "scoring": "error",
             "error": str(e),
-            "scoring_warnings": [warning_code],
+            "scoring_warnings": err_warnings,
             "component_status": component_status,
         })
         # Always mark AttemptAnswer complete so background aggregation is never blocked
@@ -1395,7 +1404,7 @@ def _run_scoring(
             total=0,
             transcript="",
             word_scores=[],
-            scoring_warnings=[warning_code],
+            scoring_warnings=err_warnings,
             component_status=component_status,
         )
 
@@ -1409,11 +1418,13 @@ def kick_off_scoring(
     key_points: list = None,
     expected_answers: list = None,
     stimulus_audio_url: str = "",
+    extra_warnings: list = None,
 ):
     t = threading.Thread(
         target=_run_scoring,
         args=(user_id, question_id, question_type, audio_url,
-              reference_text, key_points, expected_answers, stimulus_audio_url),
+              reference_text, key_points, expected_answers, stimulus_audio_url,
+              extra_warnings),
         daemon=True,
     )
     t.start()

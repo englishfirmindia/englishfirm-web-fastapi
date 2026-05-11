@@ -1,9 +1,12 @@
 import math
+import logging
 from typing import Optional
 import uuid
-from fastapi import APIRouter, Depends, Body, Query
+from fastapi import APIRouter, Depends, Body, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import asc, desc
+
+logger = logging.getLogger(__name__)
 
 from db.database import get_db
 from db.models import User, QuestionFromApeuni, UserQuestionAttempt
@@ -11,16 +14,18 @@ from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, get_score_from_store, persist_speaking_answer_pending, store_score
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url, generate_presigned_upload_url
-from core.security_helpers import safe_question_id, assert_audio_url_owned
+from core.security_helpers import safe_question_id, assert_audio_url_owned, resolve_question_with_retry
 
 router = APIRouter(prefix="/speaking/retell-lecture", tags=["Speaking - Retell Lecture"])
 
 
 def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int,
-                    key_points: list = None, stimulus_audio_url: str = "") -> None:
+                    key_points: list = None, stimulus_audio_url: str = "",
+                    extra_warnings: list = None) -> None:
     from services.speaking_scorer import kick_off_scoring
     kick_off_scoring(user_id, question_id, task_type, audio_url,
-                     key_points=key_points or [], stimulus_audio_url=stimulus_audio_url)
+                     key_points=key_points or [], stimulus_audio_url=stimulus_audio_url,
+                     extra_warnings=extra_warnings)
 
 
 
@@ -140,14 +145,29 @@ def submit(
     assert_audio_url_owned(audio_url, current_user.id)
 
     session = get_session(session_id)
-    q_obj = session["questions"].get(question_id)
-    key_points = []
-    stimulus_audio_url = ""
-    if q_obj:
-        stimulus_audio_url = (q_obj.content_json or {}).get("audio_url", "")
-        if q_obj.evaluation:
-            ca = (q_obj.evaluation.evaluation_json or {}).get("correctAnswers", {})
-            key_points = ca.get("keyPoints") or []
+    q_obj = resolve_question_with_retry(question_id, db, session=session)
+    if q_obj is None:
+        raise HTTPException(
+            status_code=503,
+            detail="question lookup failed",
+            headers={"Retry-After": "5"},
+        )
+    stimulus_audio_url = ((q_obj.content_json or {}).get("audio_url") or "").strip()
+    key_points: list = []
+    if q_obj.evaluation:
+        ca = (q_obj.evaluation.evaluation_json or {}).get("correctAnswers", {})
+        key_points = ca.get("keyPoints") or []
+    extra_warnings: list = []
+    # LLM can extract keyPoints on-the-fly from the stimulus audio, so a
+    # missing keyPoints list is recoverable. Only flag when BOTH the stored
+    # key points AND the stimulus audio URL are missing — that's when the
+    # scorer has nothing to score against.
+    if not key_points and not stimulus_audio_url:
+        logger.error(
+            "[RTL submit] q=%d both keyPoints and audio_url missing — scoring with warning",
+            question_id,
+        )
+        extra_warnings.append("reference_missing")
 
     scorer = get_scorer("retell_lecture")
     scorer.score(
@@ -156,7 +176,7 @@ def submit(
         answer={
             "audio_url": audio_url,
             "kick_off_fn": lambda t, q, u: _kick_off_azure(
-                t, q, u, current_user.id, key_points, stimulus_audio_url),
+                t, q, u, current_user.id, key_points, stimulus_audio_url, extra_warnings),
         },
     )
     mark_submitted(session_id, question_id, 0)

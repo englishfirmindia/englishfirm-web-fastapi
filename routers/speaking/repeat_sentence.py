@@ -2,7 +2,7 @@ import math
 from typing import Optional
 import uuid
 import logging
-from fastapi import APIRouter, Depends, Body, Query
+from fastapi import APIRouter, Depends, Body, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import asc, desc
 
@@ -14,14 +14,16 @@ from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, get_score_from_store, store_score, persist_speaking_answer_pending
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url, generate_presigned_upload_url
-from core.security_helpers import safe_question_id, assert_audio_url_owned
+from core.security_helpers import safe_question_id, assert_audio_url_owned, resolve_question_with_retry
 
 router = APIRouter(prefix="/speaking/repeat-sentence", tags=["Speaking - Repeat Sentence"])
 
 
-def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int, reference_text: str = "") -> None:
+def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int,
+                    reference_text: str = "", extra_warnings: list = None) -> None:
     from services.speaking_scorer import kick_off_scoring
-    kick_off_scoring(user_id, question_id, task_type, audio_url, reference_text)
+    kick_off_scoring(user_id, question_id, task_type, audio_url, reference_text,
+                     extra_warnings=extra_warnings)
 
 
 
@@ -152,19 +154,35 @@ def submit(
         logger.error("[RS submit] get_session failed: %s", e)
         raise
     try:
-        q_obj = session["questions"].get(question_id)
-        reference_text = (q_obj.content_json or {}).get("transcript", "") if q_obj else ""
+        q_obj = resolve_question_with_retry(question_id, db, session=session)
+        if q_obj is None:
+            raise HTTPException(
+                status_code=503,
+                detail="question lookup failed",
+                headers={"Retry-After": "5"},
+            )
+        reference_text = ((q_obj.content_json or {}).get("transcript") or "").strip()
+        extra_warnings: list = []
+        if not reference_text:
+            logger.error(
+                "[RS submit] q=%d transcript missing in content_json — scoring with warning",
+                question_id,
+            )
+            extra_warnings.append("reference_missing")
         scorer = get_scorer("repeat_sentence")
         scorer.score(
             question_id=question_id,
             session_id=session_id,
             answer={
                 "audio_url": audio_url,
-                "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id, reference_text),
+                "kick_off_fn": lambda t, q, u: _kick_off_azure(
+                    t, q, u, current_user.id, reference_text, extra_warnings),
             },
         )
         mark_submitted(session_id, question_id, 0)
         persist_speaking_answer_pending(session, question_id, "repeat_sentence", audio_url)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("[RS submit] scoring/mark error: %s", e, exc_info=True)
         raise

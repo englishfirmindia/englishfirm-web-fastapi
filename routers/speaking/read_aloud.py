@@ -1,9 +1,12 @@
 import math
 import uuid
 from typing import Optional
-from fastapi import APIRouter, Depends, Body, Query
+import logging
+from fastapi import APIRouter, Depends, Body, Query, HTTPException
 from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from db.database import get_db
 from db.models import User, QuestionFromApeuni, UserQuestionAttempt
@@ -12,13 +15,15 @@ from services.session_service import start_session, get_session, mark_submitted,
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url, generate_presigned_upload_url
 from services.speaking_scorer import kick_off_scoring
-from core.security_helpers import safe_question_id, assert_audio_url_owned
+from core.security_helpers import safe_question_id, assert_audio_url_owned, resolve_question_with_retry
 
 router = APIRouter(prefix="/speaking/read-aloud", tags=["Speaking - Read Aloud"])
 
 
-def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int, reference_text: str = "") -> None:
-    kick_off_scoring(user_id, question_id, task_type, audio_url, reference_text)
+def _kick_off_azure(task_type: str, question_id: int, audio_url: str, user_id: int,
+                    reference_text: str = "", extra_warnings: list = None) -> None:
+    kick_off_scoring(user_id, question_id, task_type, audio_url, reference_text,
+                     extra_warnings=extra_warnings)
 
 
 @router.get("/list")
@@ -141,8 +146,21 @@ def submit(
     assert_audio_url_owned(audio_url, current_user.id)
 
     session = get_session(session_id)
-    q_obj = session["questions"].get(question_id)
-    reference_text = (q_obj.content_json or {}).get("passage", "") if q_obj else ""
+    q_obj = resolve_question_with_retry(question_id, db, session=session)
+    if q_obj is None:
+        raise HTTPException(
+            status_code=503,
+            detail="question lookup failed",
+            headers={"Retry-After": "5"},
+        )
+    reference_text = ((q_obj.content_json or {}).get("passage") or "").strip()
+    extra_warnings: list = []
+    if not reference_text:
+        logger.error(
+            "[RA submit] q=%d passage missing in content_json — scoring with warning",
+            question_id,
+        )
+        extra_warnings.append("reference_missing")
 
     scorer = get_scorer("read_aloud")
     scorer.score(
@@ -150,7 +168,8 @@ def submit(
         session_id=session_id,
         answer={
             "audio_url": audio_url,
-            "kick_off_fn": lambda t, q, u: _kick_off_azure(t, q, u, current_user.id, reference_text),
+            "kick_off_fn": lambda t, q, u: _kick_off_azure(
+                t, q, u, current_user.id, reference_text, extra_warnings),
         },
     )
     mark_submitted(session_id, question_id, 0)

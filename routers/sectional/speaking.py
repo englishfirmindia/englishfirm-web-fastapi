@@ -17,7 +17,7 @@ from db.models import User, PracticeAttempt
 from core.dependencies import get_current_user
 from services.session_service import ACTIVE_SESSIONS, persist_speaking_answer_pending
 from services.speaking_scorer import kick_off_scoring
-from core.security_helpers import safe_question_id, assert_audio_url_owned
+from core.security_helpers import safe_question_id, assert_audio_url_owned, resolve_question_with_retry
 from services.speaking_sectional_service import (
 
     get_speaking_sectional_info,
@@ -101,16 +101,36 @@ def submit_audio(
     session.setdefault("submitted_questions", set()).add(question_id)
     ACTIVE_SESSIONS.save(session_id)
 
-    # Write pending AttemptAnswer to RDS + kick off Azure scoring immediately
-    q = session.get("questions", {}).get(question_id)
-    if q:
-        persist_speaking_answer_pending(session, question_id, q.question_type, audio_url)
-        cj = q.content_json or {}
-        if q.question_type == "repeat_sentence":
-            reference_text = cj.get("transcript", "")
-        else:
-            reference_text = cj.get("passage", "")
-        kick_off_scoring(current_user.id, question_id, q.question_type, audio_url, reference_text)
+    # Write pending AttemptAnswer to RDS + kick off Azure scoring immediately.
+    # Retry the question lookup before giving up — a cold task right after
+    # deploy can miss the in-process cache and pick up a transient DB blip,
+    # which is exactly how Nimisha's q=22542 silently scored 0.
+    q = resolve_question_with_retry(question_id, db, session=session)
+    if q is None:
+        raise HTTPException(
+            status_code=503,
+            detail="question lookup failed",
+            headers={"Retry-After": "5"},
+        )
+    persist_speaking_answer_pending(session, question_id, q.question_type, audio_url)
+    cj = q.content_json or {}
+    if q.question_type == "repeat_sentence":
+        reference_text = (cj.get("transcript") or "").strip()
+    else:
+        reference_text = (cj.get("passage") or "").strip()
+    extra_warnings: list = []
+    # Only RA / RS use reference_text downstream; other types pass empty by
+    # design (their scorer ignores it). Flag missing only for RA / RS.
+    if q.question_type in ("read_aloud", "repeat_sentence") and not reference_text:
+        log.error(
+            "[Sectional submit-audio] q=%d type=%s reference missing — scoring with warning",
+            question_id, q.question_type,
+        )
+        extra_warnings.append("reference_missing")
+    kick_off_scoring(
+        current_user.id, question_id, q.question_type, audio_url, reference_text,
+        extra_warnings=extra_warnings,
+    )
 
     return {"status": "recorded", "question_id": question_id}
 
