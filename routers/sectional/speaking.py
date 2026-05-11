@@ -10,6 +10,7 @@ Endpoints:
 """
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
+from sqlalchemy import text as _sql_text
 from sqlalchemy.orm import Session
 
 from db.database import get_db
@@ -133,6 +134,53 @@ def submit_audio(
     )
 
     return {"status": "recorded", "question_id": question_id}
+
+
+@router.post("/timer")
+def update_timer(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Persist the current on-screen sectional countdown into
+    practice_attempts.time_remaining_seconds. Called by the frontend after
+    every speaking-sectional submit (via session_id) so a resume picks up
+    at the exact second the user last saw.
+
+    LEAST(COALESCE(existing, :s), :s) guarantees out-of-order arrivals
+    (older payload landing after a newer one due to network reorder) can
+    never raise the value — the smaller wins. NULL existing → take the
+    new value as-is.
+    """
+    session_id = payload.get("session_id")
+    trs = payload.get("time_remaining_seconds")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    if not isinstance(trs, (int, float)) or trs < 0:
+        raise HTTPException(status_code=400, detail="time_remaining_seconds must be a non-negative number")
+
+    session = ACTIVE_SESSIONS.get(session_id)
+    if not session or session.get("user_id") != current_user.id:
+        # Don't 404 — the timer is best-effort. Caller shouldn't have to
+        # branch on session-not-found errors.
+        return {"status": "ignored"}
+    attempt_id = session.get("attempt_id")
+    if attempt_id is None:
+        return {"status": "ignored"}
+
+    db.execute(
+        _sql_text("""
+            UPDATE practice_attempts
+            SET time_remaining_seconds = LEAST(
+                COALESCE(time_remaining_seconds, :s), :s
+            )
+            WHERE id = :attempt_id
+        """),
+        {"s": int(trs), "attempt_id": attempt_id},
+    )
+    db.commit()
+    return {"status": "saved", "time_remaining_seconds": int(trs)}
 
 
 @router.post("/finish")

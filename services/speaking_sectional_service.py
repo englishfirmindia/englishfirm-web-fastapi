@@ -72,12 +72,10 @@ def _display_name(task_type: str) -> str:
     return _DISPLAY_NAMES.get(task_type, task_type.replace("_", " ").title())
 
 
+SPEAKING_SECTIONAL_TOTAL_MINUTES = 40
+
 def get_speaking_sectional_info() -> dict:
     total_questions = sum(t["count"] for t in SPEAKING_STRUCTURE)
-    total_seconds = sum(
-        t["count"] * (t["prep_seconds"] + t["rec_seconds"])
-        for t in SPEAKING_STRUCTURE
-    )
     sections = [
         {
             "task":              t["task"],
@@ -91,7 +89,9 @@ def get_speaking_sectional_info() -> dict:
     ]
     return {
         "total_questions": total_questions,
-        "total_minutes":   round(total_seconds / 60, 1),
+        # Fixed 40 min for the whole speaking sectional — matches what the
+        # frontend timer ticks down from on fresh start.
+        "total_minutes":   SPEAKING_SECTIONAL_TOTAL_MINUTES,
         "sections":        sections,
     }
 
@@ -241,6 +241,9 @@ def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -
         "attempt_id":      attempt.id,
         "test_number":     test_number,
         "total_questions": len(questions_payload),
+        # Fresh start — no submits yet, leave attempt.time_remaining_seconds
+        # at NULL and tell the frontend to start ticking from 40 min.
+        "total_minutes":   SPEAKING_SECTIONAL_TOTAL_MINUTES,
         "questions":       questions_payload,
     }
 
@@ -334,12 +337,23 @@ def resume_speaking_sectional_exam(session_id: str, user_id: int, db: Session) -
         })
 
     log.info(f"[Speaking Sectional] Resumed session={session_id} user={user_id} " f"submitted={len(submitted_ids)}/{len(qid_order)}")
+    # Restore the on-screen countdown the user last saw. NULL column
+    # means "fresh start" (e.g. they created the attempt but never
+    # submitted anything) — use the full 40-min default.
+    time_remaining = (
+        attempt.time_remaining_seconds
+        if attempt.time_remaining_seconds is not None
+        else SPEAKING_SECTIONAL_TOTAL_MINUTES * 60
+    )
+
     return {
-        "session_id":      session_id,
-        "attempt_id":      attempt.id,
-        "total_questions": len(qid_order),
-        "submitted_count": len(submitted_ids),
-        "questions":       questions_payload,
+        "session_id":            session_id,
+        "attempt_id":            attempt.id,
+        "total_questions":       len(qid_order),
+        "submitted_count":       len(submitted_ids),
+        "total_minutes":         SPEAKING_SECTIONAL_TOTAL_MINUTES,
+        "time_remaining_seconds": time_remaining,
+        "questions":             questions_payload,
     }
 
 

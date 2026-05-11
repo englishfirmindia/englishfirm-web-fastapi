@@ -306,6 +306,10 @@ class PracticeAttempt(Base):
     selected_question_ids    = Column(JSONB, nullable=True)
     started_at          = Column(DateTime(timezone=True), server_default=func.now())
     completed_at        = Column(DateTime(timezone=True), nullable=True)
+    # Last on-screen countdown value (seconds) — persisted on every submit
+    # so a resumed sectional starts the timer back at the exact value the
+    # user last saw. NULL = use the module's fresh-start default.
+    time_remaining_seconds = Column(Integer, nullable=True)
 
     answers = relationship("AttemptAnswer", back_populates="attempt", cascade="all, delete")
 
