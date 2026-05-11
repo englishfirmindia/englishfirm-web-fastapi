@@ -41,8 +41,8 @@ SPEAKING_STRUCTURE = [
     {"task": "describe_image",             "count": 5,  "prep_seconds": 25, "rec_seconds": 40},
     {"task": "retell_lecture",             "count": 2,  "prep_seconds": 10, "rec_seconds": 40},
     {"task": "answer_short_question",      "count": 5,  "prep_seconds": 0,  "rec_seconds": 10},
-    {"task": "ptea_respond_situation",      "count": 2,  "prep_seconds": 0,  "rec_seconds": 40},
     {"task": "summarize_group_discussion", "count": 2,  "prep_seconds": 10, "rec_seconds": 60},
+    {"task": "ptea_respond_situation",     "count": 2,  "prep_seconds": 0,  "rec_seconds": 40},
 ]
 
 # Weights from RDS pte_question_weightage.speaking_percent.
