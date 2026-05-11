@@ -727,6 +727,7 @@ def update_speaking_score_in_db(
     scoring_warnings: list = None,
     component_status: dict = None,
     content_reasoning: Optional[str] = None,
+    is_correct: Optional[bool] = None,
 ) -> None:
     """Update AttemptAnswer with Azure scores after async scoring completes.
 
@@ -784,6 +785,11 @@ def update_speaking_score_in_db(
                         rj["component_status"] = dict(component_status)
                     if content_reasoning:
                         rj["content_reasoning"] = content_reasoning
+                    if is_correct is not None:
+                        # ASQ (and any future binary content_method) — the
+                        # sectional/mock review screens key off this flag to
+                        # render the ✓/✗ badge, separate from content_score.
+                        rj["is_correct"] = bool(is_correct)
                     answer.result_json = rj
                     answer.scoring_status = "complete"
                     db.flush()

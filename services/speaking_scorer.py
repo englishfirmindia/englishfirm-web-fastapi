@@ -1362,6 +1362,7 @@ def _run_scoring(
             scoring_warnings=scoring_warnings,
             component_status=component_status,
             content_reasoning=content_reasoning,
+            is_correct=extra.get("is_correct"),
         )
         log.info(f"[SCORER] q={question_id} type={question_type} content={content:.1f} " f"fluency={fluency} pronunciation={pronunciation} pte={pte}")
         if question_type == "answer_short_question":
