@@ -182,59 +182,31 @@ def get_listening_sectional_info() -> dict:
 
 
 def start_listening_sectional_exam(db: Session, user_id: int, test_number: int) -> dict:
-    """Select questions, create session, return question list with presigned audio URLs."""
-    # Exclude questions already SUBMITTED (attempt_answers row); merely-shown
-    # but unanswered questions stay in the pool.
-    practiced_ids = set(
-        row[0]
-        for row in db.query(AttemptAnswer.question_id)
-        .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
-        .filter(PracticeAttempt.user_id == user_id)
+    """Select questions, create session, return question list with presigned audio URLs.
+
+    Question set is locked per (module, test_number) in
+    `sectional_test_questions` — every user, every redo, same questions.
+    """
+    from services.sectional_test_catalog import get_locked_question_ids
+
+    locked_ids = get_locked_question_ids(db, "listening", test_number)
+    rows_by_id = {
+        q.question_id: q
+        for q in db.query(QuestionFromApeuni)
+        .options(joinedload(QuestionFromApeuni.evaluation))
+        .filter(QuestionFromApeuni.question_id.in_(locked_ids))
         .all()
-    )
-
-    selected_qs: list = []
-
-    for task in LISTENING_STRUCTURE:
-        task_type = task["task"]
-        db_module = task["module"]
-        count     = task["count"]
-
-        opts  = [joinedload(QuestionFromApeuni.evaluation)]
-        fresh = (
-            db.query(QuestionFromApeuni)
-            .options(*opts)
-            .filter(
-                QuestionFromApeuni.module        == db_module,
-                QuestionFromApeuni.question_type == task_type,
-                ~QuestionFromApeuni.question_id.in_(practiced_ids) if practiced_ids else True,
-            )
-            .all()
+    }
+    selected_qs = [rows_by_id[qid] for qid in locked_ids if qid in rows_by_id]
+    missing = [qid for qid in locked_ids if qid not in rows_by_id]
+    if missing:
+        log.warning(
+            "[Listening Sectional] %d locked question_ids missing for test %d: %s",
+            len(missing), test_number, missing,
         )
-        pool = fresh
-        if len(fresh) < count:
-            log.info(f"[Listening Sectional] Not enough fresh questions for {task_type} " f"(need {count}, have {len(fresh)}) — falling back to full pool")
-            pool = (
-                db.query(QuestionFromApeuni)
-                .options(*opts)
-                .filter(
-                    QuestionFromApeuni.module        == db_module,
-                    QuestionFromApeuni.question_type == task_type,
-                )
-                .all()
-            )
-
-        n = min(count, len(pool))
-        if n == 0:
-            log.info(f"[Listening Sectional] No questions for {task_type} — skipping")
-            continue
-        selected_qs.extend(random.sample(pool, n))
 
     if not selected_qs:
         raise HTTPException(status_code=404, detail="No listening questions available")
-
-    # Note: pool filter uses attempt_answers (submitted only), so we no longer
-    # pre-mark selected questions in user_question_attempts on session start.
 
     session_id = str(uuid.uuid4())
     task_timing = {t["task"]: t for t in LISTENING_STRUCTURE}

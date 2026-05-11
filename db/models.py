@@ -496,6 +496,17 @@ class TrainerNote(Base):
     deleted_at  = Column(DateTime(timezone=True), nullable=True)
 
 
+class SectionalTestQuestions(Base):
+    """Locked question set per (module, test_number) sectional slot.
+       Seeded once via 2026-05-12_seed_sectional_test_questions.py — every
+       user gets the same questions for the same test, every redo included."""
+    __tablename__ = "sectional_test_questions"
+    module       = Column(String, primary_key=True)
+    test_number  = Column(Integer, primary_key=True)
+    question_ids = Column(ARRAY(Integer), nullable=False)
+    seeded_at    = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class AuthRefreshToken(Base):
     """Stored refresh tokens for /auth/refresh rotation. Hashed; raw value
        never lives server-side after issue."""

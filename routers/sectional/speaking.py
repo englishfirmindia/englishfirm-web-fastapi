@@ -48,21 +48,29 @@ def start_exam(
     current_user: User = Depends(get_current_user),
 ):
     test_number = int(payload.get("test_number", 1))
-    already_done = (
+    # Redos of completed tests are allowed — each is a new versioned row.
+    # Only block if there's an existing INCOMPLETE attempt for this same
+    # test slot; the user should Resume that one instead of starting a
+    # parallel attempt.
+    in_progress = (
         db.query(PracticeAttempt)
         .filter(
             PracticeAttempt.user_id == current_user.id,
             PracticeAttempt.module == "speaking",
             PracticeAttempt.question_type == "sectional",
-            PracticeAttempt.status == "complete",
+            PracticeAttempt.status != "complete",
         )
         .all()
     )
-    for a in already_done:
+    for a in in_progress:
         if (a.task_breakdown or {}).get("test_number") == test_number:
             raise HTTPException(
                 status_code=409,
-                detail=f"Test {test_number} has already been completed and cannot be retaken.",
+                detail={
+                    "code": "in_progress",
+                    "session_id": a.session_id,
+                    "message": f"Test {test_number} is still in progress — resume it before starting a new attempt.",
+                },
             )
     return start_speaking_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
 
@@ -245,8 +253,14 @@ def attempted_tests(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Returns completed speaking sectional tests with most-recent completion date."""
-    attempts = (
+    """Returns every completed speaking sectional attempt with derived version.
+
+    Response:
+      attempted_tests: [{test_number, completed_at}]   ← back-compat: latest per test
+      attempts:        [{test_number, version, score, session_id, completed_at}]
+                       ← every completed attempt, oldest = v1 within each test_number
+    """
+    rows = (
         db.query(PracticeAttempt)
         .filter(
             PracticeAttempt.user_id == current_user.id,
@@ -254,20 +268,34 @@ def attempted_tests(
             PracticeAttempt.question_type == "sectional",
             PracticeAttempt.status == "complete",
         )
-        .order_by(PracticeAttempt.completed_at.desc())
+        .order_by(PracticeAttempt.completed_at.asc())
         .all()
     )
-    seen: dict[int, str] = {}
-    for a in attempts:
-        tb = a.task_breakdown or {}
-        tn = tb.get("test_number")
-        if isinstance(tn, int) and tn not in seen:
-            seen[tn] = a.completed_at.isoformat() if a.completed_at else None
+    # Bucket by test_number (oldest first) to derive version 1..N
+    by_test: dict[int, list[PracticeAttempt]] = {}
+    for a in rows:
+        tn = (a.task_breakdown or {}).get("test_number")
+        if isinstance(tn, int):
+            by_test.setdefault(tn, []).append(a)
+    attempts_payload = []
+    latest_per_test: dict[int, str] = {}
+    for tn in sorted(by_test):
+        for version, a in enumerate(by_test[tn], start=1):
+            completed_at_iso = a.completed_at.isoformat() if a.completed_at else None
+            attempts_payload.append({
+                "test_number": tn,
+                "version":     version,
+                "score":       a.total_score,
+                "session_id":  a.session_id,
+                "completed_at": completed_at_iso,
+            })
+            latest_per_test[tn] = completed_at_iso
     return {
         "attempted_tests": [
-            {"test_number": tn, "completed_at": dt}
-            for tn, dt in sorted(seen.items())
-        ]
+            {"test_number": tn, "completed_at": latest_per_test[tn]}
+            for tn in sorted(latest_per_test)
+        ],
+        "attempts": attempts_payload,
     }
 
 

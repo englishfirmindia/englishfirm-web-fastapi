@@ -97,60 +97,35 @@ def get_speaking_sectional_info() -> dict:
 
 
 def start_speaking_sectional_exam(db: Session, user_id: int, test_number: int) -> dict:
-    """Select questions, create session + PracticeAttempt, return question list."""
-    # Exclude questions the user has already SUBMITTED (an attempt_answers row).
-    # Using user_question_attempts here would also exclude questions merely
-    # shown but never answered (e.g. abandoned sectionals), exhausting the
-    # pool too aggressively.
-    practiced_ids = set(
-        row[0]
-        for row in db.query(AttemptAnswer.question_id)
-        .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
-        .filter(PracticeAttempt.user_id == user_id)
+    """Select questions, create session + PracticeAttempt, return question list.
+
+    Question set is locked per (module, test_number) in
+    `sectional_test_questions` — every user, every redo, same questions.
+    Seeded once via scripts/migrations/2026-05-12_seed_sectional_test_questions.py.
+    """
+    from services.sectional_test_catalog import get_locked_question_ids
+
+    locked_ids = get_locked_question_ids(db, "speaking", test_number)
+    rows_by_id = {
+        q.question_id: q
+        for q in db.query(QuestionFromApeuni)
+        .options(joinedload(QuestionFromApeuni.evaluation))
+        .filter(QuestionFromApeuni.question_id.in_(locked_ids))
         .all()
-    )
-
-    selected_qs: list = []
-
-    for task in SPEAKING_STRUCTURE:
-        task_type = task["task"]
-        count     = task["count"]
-
-        fresh = (
-            db.query(QuestionFromApeuni)
-            .options(joinedload(QuestionFromApeuni.evaluation))
-            .filter(
-                QuestionFromApeuni.module        == "speaking",
-                QuestionFromApeuni.question_type == task_type,
-                ~QuestionFromApeuni.question_id.in_(practiced_ids) if practiced_ids else True,
-            )
-            .all()
+    }
+    # Preserve catalog order — _select_question_ids walked the STRUCTURE
+    # in declaration order, and the frontend renders tasks in that order.
+    selected_qs = [rows_by_id[qid] for qid in locked_ids if qid in rows_by_id]
+    missing = [qid for qid in locked_ids if qid not in rows_by_id]
+    if missing:
+        log.warning(
+            "[Speaking Sectional] %d locked question_ids missing from "
+            "question_from_apeuni for test %d: %s",
+            len(missing), test_number, missing,
         )
-        pool = fresh
-        if len(fresh) < count:
-            log.info(f"[Speaking Sectional] Not enough fresh questions for {task_type} " f"(need {count}, have {len(fresh)}) — falling back to full pool")
-            pool = (
-                db.query(QuestionFromApeuni)
-                .options(joinedload(QuestionFromApeuni.evaluation))
-                .filter(
-                    QuestionFromApeuni.module        == "speaking",
-                    QuestionFromApeuni.question_type == task_type,
-                )
-                .all()
-            )
-
-        n = min(count, len(pool))
-        if n == 0:
-            log.info(f"[Speaking Sectional] No questions for {task_type} — skipping")
-            continue
-        selected_qs.extend(random.sample(pool, n))
 
     if not selected_qs:
         raise HTTPException(status_code=404, detail="No speaking questions available")
-
-    # Note: deliberately not pre-marking selected questions in
-    # user_question_attempts. Pool filtering uses attempt_answers (submitted
-    # only) instead, so unanswered selections don't pollute the table.
 
     # Build question payload with presigned URLs
     task_timing = {t["task"]: t for t in SPEAKING_STRUCTURE}
