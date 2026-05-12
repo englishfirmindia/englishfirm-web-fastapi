@@ -14,6 +14,17 @@ import re
 from .base import ScoringResult, ScoringStrategy, to_pte_score
 
 
+def _split_sentences(text: str) -> list:
+    """Split into sentences while ignoring decimals (e.g. '$1.75') so a number
+    like '1.75 billion' isn't counted as two sentences. Common bug surfaced
+    by SWT submissions that quote dollar figures from the source passage.
+    Abbreviations like 'Mr.' / 'e.g.' are rare in PTE summaries and not
+    handled here — flag separately if they show up in practice."""
+    # Mask digit-dot-digit so the regex below doesn't fragment on decimals.
+    safe = re.sub(r'(\d)\.(\d)', r'\1 \2', text or '')
+    return [s for s in re.split(r'[.!?]+', safe) if s.strip()]
+
+
 # ── SWT heuristic (max 10 pts) ────────────────────────────────────────────────
 
 def _score_swt_heuristic(user_text: str) -> tuple:
@@ -210,7 +221,7 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
     # ── Form gate (deterministic) ──────────────────────────────────────────
     body = (text or '').strip()
     wc = len(body.split())
-    sentences = [s for s in re.split(r'[.!?]+', body) if s.strip()]
+    sentences = _split_sentences(body)
     form_ok = body and len(sentences) == 1 and 5 <= wc <= 75
 
     if not form_ok:
@@ -238,35 +249,46 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Claude scores content + grammar + vocabulary in one call ───────────
+    # ── Primary: gpt-5-nano. Fallback chain: Claude Haiku 4.5 → heuristic ──
     scoring_warnings: list = []
-    scorer_label = "claude-haiku-4-5"
+    scorer_label = "gpt-5-nano"
     try:
-        from services.anthropic_scoring_service import score_swt_subscores_with_claude
-        claude_result = score_swt_subscores_with_claude(prompt or '', body)
+        from services.openai_scoring_service import score_swt_subscores_with_openai
+        llm_result = score_swt_subscores_with_openai(prompt or '', body)
     except Exception as e:
-        # The service itself shouldn't raise (it catches everything), but be
-        # defensive in case an import or boot-time failure surfaces here.
         from core.logging_config import get_logger
-        get_logger(__name__).error(f"[SWT] Claude call raised unexpectedly: {e}")
-        claude_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+        get_logger(__name__).error(f"[SWT] OpenAI call raised unexpectedly: {e}")
+        llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
 
-    if not claude_result.get("scored"):
+    if not llm_result.get("scored"):
+        # Fall back to Claude before going to heuristic.
+        try:
+            from services.anthropic_scoring_service import score_swt_subscores_with_claude
+            llm_result = score_swt_subscores_with_claude(prompt or '', body)
+            if llm_result.get("scored"):
+                scorer_label = "claude-haiku-4-5-fallback"
+                scoring_warnings.append("openai_unavailable_used_claude")
+        except Exception as e:
+            from core.logging_config import get_logger
+            get_logger(__name__).error(f"[SWT] Claude fallback raised unexpectedly: {e}")
+            llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+
+    if not llm_result.get("scored"):
         fallback = _swt_heuristic_fallback(body, content_max, grammar_max, vocab_max)
         content_sub    = fallback["content"]
         grammar_sub    = fallback["grammar"]
         vocabulary_sub = fallback["vocabulary"]
         scoring_warnings.append(
-            claude_result.get("warning_code") or "content_llm_unavailable"
+            llm_result.get("warning_code") or "content_llm_unavailable"
         )
         scorer_label = "heuristic-fallback"
     else:
-        content_sub    = claude_result["content"]
-        grammar_sub    = claude_result["grammar"]
-        vocabulary_sub = claude_result["vocabulary"]
+        content_sub    = llm_result["content"]
+        grammar_sub    = llm_result["grammar"]
+        vocabulary_sub = llm_result["vocabulary"]
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
-    if claude_result.get("scored") and content_sub["score"] == 0:
+    if llm_result.get("scored") and content_sub["score"] == 0:
         breakdown = {
             "form": form_max,
             "content":    content_sub,
@@ -449,18 +471,30 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Claude scores the six sub-scores ───────────────────────────────────
+    # ── Primary: gpt-5-nano. Fallback chain: Claude Haiku 4.5 → heuristic ──
     scoring_warnings: list = []
-    scorer_label = "claude-haiku-4-5"
+    scorer_label = "gpt-5-nano"
     try:
-        from services.anthropic_scoring_service import score_we_subscores_with_claude
-        claude_result = score_we_subscores_with_claude(prompt or '', body)
+        from services.openai_scoring_service import score_we_subscores_with_openai
+        llm_result = score_we_subscores_with_openai(prompt or '', body)
     except Exception as e:
         from core.logging_config import get_logger
-        get_logger(__name__).error(f"[WE] Claude call raised unexpectedly: {e}")
-        claude_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+        get_logger(__name__).error(f"[WE] OpenAI call raised unexpectedly: {e}")
+        llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
 
-    if not claude_result.get("scored"):
+    if not llm_result.get("scored"):
+        try:
+            from services.anthropic_scoring_service import score_we_subscores_with_claude
+            llm_result = score_we_subscores_with_claude(prompt or '', body)
+            if llm_result.get("scored"):
+                scorer_label = "claude-haiku-4-5-fallback"
+                scoring_warnings.append("openai_unavailable_used_claude")
+        except Exception as e:
+            from core.logging_config import get_logger
+            get_logger(__name__).error(f"[WE] Claude fallback raised unexpectedly: {e}")
+            llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+
+    if not llm_result.get("scored"):
         fallback = _we_heuristic_fallback(body)
         content_sub    = fallback["content"]
         dsc_sub        = fallback["dsc"]
@@ -469,19 +503,19 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         vocabulary_sub = fallback["vocabulary"]
         spelling_sub   = fallback["spelling"]
         scoring_warnings.append(
-            claude_result.get("warning_code") or "content_llm_unavailable"
+            llm_result.get("warning_code") or "content_llm_unavailable"
         )
         scorer_label = "heuristic-fallback"
     else:
-        content_sub    = claude_result["content"]
-        dsc_sub        = claude_result["dsc"]
-        grammar_sub    = claude_result["grammar"]
-        glr_sub        = claude_result["glr"]
-        vocabulary_sub = claude_result["vocabulary"]
-        spelling_sub   = claude_result["spelling"]
+        content_sub    = llm_result["content"]
+        dsc_sub        = llm_result["dsc"]
+        grammar_sub    = llm_result["grammar"]
+        glr_sub        = llm_result["glr"]
+        vocabulary_sub = llm_result["vocabulary"]
+        spelling_sub   = llm_result["spelling"]
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
-    if claude_result.get("scored") and content_sub["score"] == 0:
+    if llm_result.get("scored") and content_sub["score"] == 0:
         breakdown = {
             "form": form_score,
             "content":    content_sub,
@@ -640,35 +674,47 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Claude scores the four sub-scores ────────────────────────────────
+    # ── Primary: gpt-5-nano. Fallback chain: Claude Haiku 4.5 → heuristic ──
     scoring_warnings: list = []
-    scorer_label = "claude-haiku-4-5"
+    scorer_label = "gpt-5-nano"
     try:
-        from services.anthropic_scoring_service import score_sst_subscores_with_claude
-        claude_result = score_sst_subscores_with_claude(prompt or '', body)
+        from services.openai_scoring_service import score_sst_subscores_with_openai
+        llm_result = score_sst_subscores_with_openai(prompt or '', body)
     except Exception as e:
         from core.logging_config import get_logger
-        get_logger(__name__).error(f"[SST] Claude call raised unexpectedly: {e}")
-        claude_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+        get_logger(__name__).error(f"[SST] OpenAI call raised unexpectedly: {e}")
+        llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
 
-    if not claude_result.get("scored"):
+    if not llm_result.get("scored"):
+        try:
+            from services.anthropic_scoring_service import score_sst_subscores_with_claude
+            llm_result = score_sst_subscores_with_claude(prompt or '', body)
+            if llm_result.get("scored"):
+                scorer_label = "claude-haiku-4-5-fallback"
+                scoring_warnings.append("openai_unavailable_used_claude")
+        except Exception as e:
+            from core.logging_config import get_logger
+            get_logger(__name__).error(f"[SST] Claude fallback raised unexpectedly: {e}")
+            llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+
+    if not llm_result.get("scored"):
         fallback = _sst_heuristic_fallback(body)
         content_sub    = fallback["content"]
         grammar_sub    = fallback["grammar"]
         vocabulary_sub = fallback["vocabulary"]
         spelling_sub   = fallback["spelling"]
         scoring_warnings.append(
-            claude_result.get("warning_code") or "content_llm_unavailable"
+            llm_result.get("warning_code") or "content_llm_unavailable"
         )
         scorer_label = "heuristic-fallback"
     else:
-        content_sub    = claude_result["content"]
-        grammar_sub    = claude_result["grammar"]
-        vocabulary_sub = claude_result["vocabulary"]
-        spelling_sub   = claude_result["spelling"]
+        content_sub    = llm_result["content"]
+        grammar_sub    = llm_result["grammar"]
+        vocabulary_sub = llm_result["vocabulary"]
+        spelling_sub   = llm_result["spelling"]
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ──────────────
-    if claude_result.get("scored") and content_sub["score"] == 0:
+    if llm_result.get("scored") and content_sub["score"] == 0:
         breakdown = {
             "form": form_score,
             "content":    content_sub,
