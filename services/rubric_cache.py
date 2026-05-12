@@ -24,8 +24,9 @@ log = get_logger(__name__)
 
 _REFRESH_SECONDS = 300  # 5 min
 
-# Defaults match the values that were hardcoded in ai_scorer.py prior to this
-# loader landing. Kept in code so a DB outage cannot floor scores to zero.
+# Defaults mirror the RDS row content so a DB outage cannot floor scores to
+# zero. Update both places if the rubric changes — the loader prefers RDS
+# values when present.
 _DEFAULTS: Dict[str, Dict[str, int]] = {
     "summarize_written_text": {
         "form_max": 1,
@@ -33,6 +34,35 @@ _DEFAULTS: Dict[str, Dict[str, int]] = {
         "grammar_max": 2,
         "vocabulary_max": 2,
     },
+    "write_essay": {
+        # Real PTE rubric — 26 max total.
+        "content_max": 6,
+        "grammar_max": 2,
+        "vocabulary_max": 2,
+        "coherence_max": 6,   # Development, Structure & Coherence (DSC)
+        "glr_max": 6,         # General Linguistic Range
+        "spelling_max": 2,
+        # Form is determined by word-count band rather than a single max:
+        "words_200_300": 2,   # ideal range
+        "words_120_199": 1,   # below ideal
+        "words_301_380": 1,   # above ideal
+        "words_lt_120": 0,    # form-zero — kills the attempt
+        "words_gt_380": 0,    # form-zero — kills the attempt
+    },
+}
+
+# Fields read for each task. Kept separate from defaults so the SQL query
+# stays focused and doesn't pull columns that don't apply to the task.
+_TASK_FIELDS: Dict[str, list] = {
+    "summarize_written_text": [
+        "form_max", "content_max", "grammar_max", "vocabulary_max",
+    ],
+    "write_essay": [
+        "content_max", "grammar_max", "vocabulary_max",
+        "coherence_max", "glr_max", "spelling_max",
+        "words_200_300", "words_120_199", "words_301_380",
+        "words_lt_120", "words_gt_380",
+    ],
 }
 
 
@@ -45,11 +75,16 @@ class _RubricCache:
     def _refresh(self) -> None:
         """Refresh the rubric cache from RDS. Best-effort: errors are logged
         and the previous cache (or defaults) keeps serving."""
+        # Union of all fields any task wants — keep the SQL one statement.
+        all_fields = sorted({
+            f for fields in _TASK_FIELDS.values() for f in fields
+        })
+        select_cols = ", ".join(["task"] + all_fields)
         s = SessionLocal()
         try:
             rows = s.execute(
                 _sql(
-                    "SELECT task, form_max, content_max, grammar_max, vocabulary_max "
+                    f"SELECT {select_cols} "
                     "FROM pte_scoring_reading_writing_rubric "
                     "WHERE task = ANY(:tasks)"
                 ),
@@ -57,12 +92,16 @@ class _RubricCache:
             ).fetchall()
             new_data: Dict[str, Dict[str, int]] = {}
             for r in rows:
-                new_data[r.task] = {
-                    "form_max": r.form_max if r.form_max is not None else _DEFAULTS[r.task]["form_max"],
-                    "content_max": r.content_max if r.content_max is not None else _DEFAULTS[r.task]["content_max"],
-                    "grammar_max": r.grammar_max if r.grammar_max is not None else _DEFAULTS[r.task]["grammar_max"],
-                    "vocabulary_max": r.vocabulary_max if r.vocabulary_max is not None else _DEFAULTS[r.task]["vocabulary_max"],
-                }
+                task = r.task
+                wanted = _TASK_FIELDS.get(task, all_fields)
+                row_dict: Dict[str, int] = {}
+                for field in wanted:
+                    db_value = getattr(r, field, None)
+                    if db_value is not None:
+                        row_dict[field] = db_value
+                    else:
+                        row_dict[field] = _DEFAULTS.get(task, {}).get(field, 0)
+                new_data[task] = row_dict
             with self._lock:
                 self._data = new_data
                 self._loaded_at = time.time()
@@ -93,3 +132,30 @@ def get_rubric_max(task: str, field: str) -> int:
     """Read the (task, field) max from RDS via cache. Falls back to hardcoded
     defaults if the DB is unreachable or the field is missing."""
     return _cache.get_max(task, field)
+
+
+def get_we_form_score(word_count: int) -> int:
+    """Map an essay word count to the form sub-score using RDS band values.
+
+    Bands (real PTE):
+      200–300 → words_200_300 (default 2)
+      120–199 → words_120_199 (default 1)
+      301–380 → words_301_380 (default 1)
+      < 120   → words_lt_120  (default 0 — form-zero kills the attempt)
+      > 380   → words_gt_380  (default 0 — form-zero kills the attempt)
+    """
+    if 200 <= word_count <= 300:
+        return get_rubric_max("write_essay", "words_200_300")
+    if 120 <= word_count <= 199:
+        return get_rubric_max("write_essay", "words_120_199")
+    if 301 <= word_count <= 380:
+        return get_rubric_max("write_essay", "words_301_380")
+    if word_count < 120:
+        return get_rubric_max("write_essay", "words_lt_120")
+    # word_count > 380
+    return get_rubric_max("write_essay", "words_gt_380")
+
+
+def get_we_form_max() -> int:
+    """Maximum achievable form sub-score for WE (used for the total max)."""
+    return get_rubric_max("write_essay", "words_200_300")

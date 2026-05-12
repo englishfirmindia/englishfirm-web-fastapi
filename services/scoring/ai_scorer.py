@@ -316,6 +316,230 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
     )
 
 
+# ── WE — hybrid form gate + Claude Haiku 4.5 ─────────────────────────────────
+
+def _we_heuristic_fallback(user_text: str) -> dict:
+    """Heuristic sub-scores used only when Claude is unreachable. Six
+    sub-scores match the real PTE WE rubric. Three of them (DSC, GLR,
+    spelling) have no clean rule-based proxy — they default to a midpoint
+    so the score is plausible rather than zero, with the warning surfaced
+    in result_json so the trainer knows the attempt was degraded."""
+    text = (user_text or '').strip()
+    if not text:
+        return {
+            "content":    {"score": 0.0, "reasoning": None},
+            "dsc":        {"score": 0.0, "reasoning": None},
+            "grammar":    {"score": 0.0, "reasoning": None},
+            "glr":        {"score": 0.0, "reasoning": None},
+            "vocabulary": {"score": 0.0, "reasoning": None},
+            "spelling":   {"score": 0.0, "reasoning": None},
+        }
+    words = text.split()
+    wc = len(words)
+    sentences = [s for s in re.split(r'[.!?]+', text) if s.strip()]
+    paragraphs = [p for p in re.split(r'\n\s*\n', text) if p.strip()]
+
+    # Content (0–6): word-count banded.
+    content_score = 6 if wc >= 250 else 5 if wc >= 200 else 4 if wc >= 150 else 2 if wc >= 100 else 1
+
+    # DSC (0–6): paragraph-count proxy.
+    if len(paragraphs) >= 4:
+        dsc_score = 6
+    elif len(paragraphs) == 3:
+        dsc_score = 4
+    elif len(paragraphs) == 2:
+        dsc_score = 2
+    elif len(sentences) >= 4:
+        dsc_score = 1
+    else:
+        dsc_score = 0
+
+    # Grammar (0–2): first-cap + ends-punct (same proxy as before).
+    g = 0
+    if text[0].isupper():
+        g += 1
+    if text[-1] in '.!?':
+        g += 1
+    grammar_score = g
+
+    # GLR (0–6): no rule-based proxy — midpoint default. Flagged via
+    # scoring_warnings upstream so the trainer knows this is a fallback.
+    glr_score = 3
+
+    # Vocabulary (0–2): unique-word density.
+    unique_words = len(set(w.lower().strip('.,!?;:()"\'- ') for w in words if len(w) > 3))
+    if unique_words >= 60:
+        vocab_score = 2
+    elif unique_words >= 35:
+        vocab_score = 1
+    else:
+        vocab_score = 0
+
+    # Spelling (0–2): heuristic can't detect spelling — assume correct.
+    spelling_score = 2
+
+    return {
+        "content":    {"score": float(content_score), "reasoning": None},
+        "dsc":        {"score": float(dsc_score), "reasoning": None},
+        "grammar":    {"score": float(grammar_score), "reasoning": None},
+        "glr":        {"score": float(glr_score), "reasoning": None},
+        "vocabulary": {"score": float(vocab_score), "reasoning": None},
+        "spelling":   {"score": float(spelling_score), "reasoning": None},
+    }
+
+
+def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
+    """WE scoring path — mirrors the SWT shape:
+      1. Load form-band rubric from RDS (200–300 → 2, 120–199 / 301–380 → 1,
+         outside → 0). Form-zero kills the attempt (PTE 10 floor).
+      2. Claude Haiku 4.5 scores content + dsc + grammar + glr + vocabulary
+         + spelling in a single call with per-sub-score reasoning.
+      3. Off-topic floor: LLM content == 0 → PTE 10.
+      4. Otherwise earned = form + sum(sub-scores); PTE via standard formula.
+
+    Claude unreachable → six-sub-score heuristic fallback + warning code in
+    result_json. Never raises.
+    """
+    from services.rubric_cache import (
+        get_rubric_max, get_we_form_max, get_we_form_score,
+    )
+
+    content_max = get_rubric_max('write_essay', 'content_max')
+    grammar_max = get_rubric_max('write_essay', 'grammar_max')
+    vocab_max   = get_rubric_max('write_essay', 'vocabulary_max')
+    dsc_max     = get_rubric_max('write_essay', 'coherence_max')
+    glr_max     = get_rubric_max('write_essay', 'glr_max')
+    spell_max   = get_rubric_max('write_essay', 'spelling_max')
+    form_max    = get_we_form_max()
+    max_pts = (
+        form_max + content_max + dsc_max + grammar_max + glr_max
+        + vocab_max + spell_max
+    )  # default = 26
+
+    body = (text or '').strip()
+    wc = len(body.split())
+    form_score = get_we_form_score(wc) if body else 0
+
+    # ── Form-zero floor ────────────────────────────────────────────────────
+    if form_score == 0:
+        if not body:
+            reason = "Empty response."
+        elif wc < 120:
+            reason = f"Form-zero — {wc} words is below the 120-word minimum."
+        else:
+            reason = f"Form-zero — {wc} words exceeds the 380-word maximum."
+        breakdown = {
+            "form": 0,
+            "content":    {"score": 0.0, "reasoning": "Not scored — form-zero."},
+            "dsc":        {"score": 0.0, "reasoning": "Not scored — form-zero."},
+            "grammar":    {"score": 0.0, "reasoning": "Not scored — form-zero."},
+            "glr":        {"score": 0.0, "reasoning": "Not scored — form-zero."},
+            "vocabulary": {"score": 0.0, "reasoning": "Not scored — form-zero."},
+            "spelling":   {"score": 0.0, "reasoning": "Not scored — form-zero."},
+            "earned": 0,
+            "max_pts": max_pts,
+            "task_type": "we",
+            "scorer": "form-gate-floor",
+            "scoring_warnings": [reason],
+        }
+        return ScoringResult(
+            pte_score=to_pte_score(0.0),
+            raw_score=0.0,
+            is_async=False,
+            breakdown=breakdown,
+        )
+
+    # ── Claude scores the six sub-scores ───────────────────────────────────
+    scoring_warnings: list = []
+    scorer_label = "claude-haiku-4-5"
+    try:
+        from services.anthropic_scoring_service import score_we_subscores_with_claude
+        claude_result = score_we_subscores_with_claude(prompt or '', body)
+    except Exception as e:
+        from core.logging_config import get_logger
+        get_logger(__name__).error(f"[WE] Claude call raised unexpectedly: {e}")
+        claude_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+
+    if not claude_result.get("scored"):
+        fallback = _we_heuristic_fallback(body)
+        content_sub    = fallback["content"]
+        dsc_sub        = fallback["dsc"]
+        grammar_sub    = fallback["grammar"]
+        glr_sub        = fallback["glr"]
+        vocabulary_sub = fallback["vocabulary"]
+        spelling_sub   = fallback["spelling"]
+        scoring_warnings.append(
+            claude_result.get("warning_code") or "content_llm_unavailable"
+        )
+        scorer_label = "heuristic-fallback"
+    else:
+        content_sub    = claude_result["content"]
+        dsc_sub        = claude_result["dsc"]
+        grammar_sub    = claude_result["grammar"]
+        glr_sub        = claude_result["glr"]
+        vocabulary_sub = claude_result["vocabulary"]
+        spelling_sub   = claude_result["spelling"]
+
+    # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
+    if claude_result.get("scored") and content_sub["score"] == 0:
+        breakdown = {
+            "form": form_score,
+            "content":    content_sub,
+            "dsc":        dsc_sub,
+            "grammar":    grammar_sub,
+            "glr":        glr_sub,
+            "vocabulary": vocabulary_sub,
+            "spelling":   spelling_sub,
+            "earned": 0,
+            "max_pts": max_pts,
+            "task_type": "we",
+            "scorer": scorer_label,
+            "scoring_warnings": ["content_off_topic"],
+        }
+        return ScoringResult(
+            pte_score=to_pte_score(0.0),
+            raw_score=0.0,
+            is_async=False,
+            breakdown=breakdown,
+        )
+
+    # ── Aggregate + PTE ────────────────────────────────────────────────────
+    earned = (
+        form_score
+        + content_sub["score"]
+        + dsc_sub["score"]
+        + grammar_sub["score"]
+        + glr_sub["score"]
+        + vocabulary_sub["score"]
+        + spelling_sub["score"]
+    )
+    earned = max(0.0, min(float(max_pts), earned))
+    pct = earned / max_pts if max_pts > 0 else 0.0
+
+    breakdown = {
+        "form": form_score,
+        "content":    content_sub,
+        "dsc":        dsc_sub,
+        "grammar":    grammar_sub,
+        "glr":        glr_sub,
+        "vocabulary": vocabulary_sub,
+        "spelling":   spelling_sub,
+        "earned": earned,
+        "max_pts": max_pts,
+        "task_type": "we",
+        "scorer": scorer_label,
+    }
+    if scoring_warnings:
+        breakdown["scoring_warnings"] = scoring_warnings
+
+    return ScoringResult(
+        pte_score=to_pte_score(pct),
+        raw_score=pct,
+        is_async=False,
+        breakdown=breakdown,
+    )
+
+
 # ── Scorer class ──────────────────────────────────────────────────────────────
 
 class AIScorer(ScoringStrategy):
@@ -349,21 +573,11 @@ class AIScorer(ScoringStrategy):
             return _score_swt_with_claude(text, prompt)
 
         elif self.task_type == 'we':
-            earned, max_pts = _score_we_heuristic(text)
-            wc = len(text.split())
-            form_ok = 120 <= wc <= 380
-            if not form_ok:
-                # Form gate failed (word count outside 120–380) — floor to PTE 10
-                earned = 0
-            elif prompt and text.strip():
-                from services.llm_content_scoring_service import score_we_content
-                heuristic_content = 3 if wc >= 200 else 2 if wc >= 120 else 1 if wc >= 60 else 0
-                llm_content = score_we_content(prompt, text)
-                if llm_content == 0:
-                    # LLM judged content completely off-topic — floor to PTE 10
-                    earned = 0
-                else:
-                    earned = max(0, min(max_pts, earned - heuristic_content + llm_content))
+            # WE now uses a hybrid path identical in shape to SWT: RDS-driven
+            # form gate (word-count bands) + Claude Haiku 4.5 for the six
+            # substantive sub-scores (content / DSC / grammar / GLR /
+            # vocabulary / spelling), each returned with a reasoning string.
+            return _score_we_with_claude(text, prompt)
 
         else:  # sst
             sst = _score_sst_heuristic(text)

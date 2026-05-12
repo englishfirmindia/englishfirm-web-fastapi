@@ -211,3 +211,210 @@ def _failure(warning_code: str, reason: str = "") -> dict:
         "scored": False,
         "warning_code": warning_code,
     }
+
+
+# ── Write Essay (WE) ─────────────────────────────────────────────────────────
+
+_WE_SYSTEM_PROMPT = """You are scoring a PTE Academic Write Essay response.
+
+The student is given a prompt and writes a 200–300 word essay in 20 minutes. You score six sub-scores — Form is scored deterministically by the system before reaching you (based on word count) and is not your job.
+
+CONTENT (0–6) — Relevance and depth of argument:
+  6 = Fully addresses the prompt with a clear, well-developed position; arguments are substantial and relevant throughout.
+  5 = Adequately addresses the prompt; position is clear with good supporting points, minor gaps.
+  4 = Addresses the prompt with a discernible position; arguments are present but some are shallow or partially off-topic.
+  3 = Partial address of the prompt; position is unclear or arguments are mostly underdeveloped.
+  2 = Minimal engagement with the prompt; relies heavily on generalities, off-topic for stretches.
+  1 = Barely addresses the prompt; mostly tangential or filler.
+  0 = Completely off-topic or fails to address the prompt at all.
+
+DEVELOPMENT, STRUCTURE & COHERENCE (0–6):
+  6 = Clear introduction, body, and conclusion; logical paragraphing; smooth transitions; ideas flow naturally.
+  5 = Clear structure with logical flow; minor lapses in coherence or transitions.
+  4 = Identifiable structure but uneven development or weak transitions in places.
+  3 = Some structure but disorganised in parts; coherence breaks down within or across paragraphs.
+  2 = Poor structure; paragraphing absent or arbitrary; weak coherence.
+  1 = Very disorganised; ideas don't connect.
+  0 = No discernible structure; incoherent.
+
+GRAMMAR (0–2):
+  2 = Correct grammatical structures throughout; subject–verb agreement, tense, articles, prepositions all accurate.
+  1 = Mostly correct with one or two errors that don't impede meaning.
+  0 = Multiple errors, or any error that obscures meaning.
+
+GENERAL LINGUISTIC RANGE (0–6) — Complexity and flexibility of sentence structures:
+  6 = Excellent range — complex and varied sentence structures (subordination, embedding, varied connectors); confidently controlled.
+  5 = Good range with a mix of simple and complex sentences; some sophistication.
+  4 = Adequate range; mix of simple and a few complex sentences but with some control issues.
+  3 = Limited range; mostly simple sentences with occasional attempts at complexity.
+  2 = Very limited range; almost entirely simple, repetitive structures.
+  1 = Minimal range; one-clause sentences throughout.
+  0 = No control of sentence structures.
+
+VOCABULARY RANGE (0–2) — Academic vocabulary richness:
+  2 = Wide, appropriate, and varied vocabulary; uses academic register confidently; precise word choice.
+  1 = Adequate vocabulary with some variety; occasional imprecision or repetition.
+  0 = Limited or inappropriate vocabulary; heavy repetition; informal register.
+
+SPELLING (0–2):
+  2 = No spelling errors, or only one or two trivial typos.
+  1 = A few spelling errors that don't impede meaning.
+  0 = Multiple spelling errors, or errors that impede meaning.
+
+For each sub-score, give the integer score AND a one-sentence reasoning that cites specific evidence (a sentence pattern, a word, an error, a paragraph). Keep reasoning under 30 words. Be honest about errors — students rely on the feedback.
+
+Return JSON only, in this exact shape:
+{
+  "content":    {"score": <int 0-6>, "reasoning": "<one sentence>"},
+  "dsc":        {"score": <int 0-6>, "reasoning": "<one sentence>"},
+  "grammar":    {"score": <int 0-2>, "reasoning": "<one sentence>"},
+  "glr":        {"score": <int 0-6>, "reasoning": "<one sentence>"},
+  "vocabulary": {"score": <int 0-2>, "reasoning": "<one sentence>"},
+  "spelling":   {"score": <int 0-2>, "reasoning": "<one sentence>"}
+}
+"""
+
+
+def score_we_subscores_with_claude(prompt: str, user_text: str) -> dict:
+    """Score WE sub-scores via Claude Haiku 4.5.
+
+    Returns six `{score, reasoning}` blocks (content, dsc, grammar, glr,
+    vocabulary, spelling) plus the `scored` / `warning_code` partial-success
+    flags. Form is scored deterministically upstream and is NOT in the
+    Claude prompt or response.
+
+    On any failure (auth, parse, timeout) returns scored=False so the caller
+    can fall back to a heuristic. Never raises.
+    """
+    if not prompt or not prompt.strip():
+        return _we_failure("content_llm_unavailable", reason="empty prompt")
+    if not user_text or not user_text.strip():
+        # No student text — all zeros, no LLM call needed.
+        return {
+            "content":    {"score": 0.0, "reasoning": None},
+            "dsc":        {"score": 0.0, "reasoning": None},
+            "grammar":    {"score": 0.0, "reasoning": None},
+            "glr":        {"score": 0.0, "reasoning": None},
+            "vocabulary": {"score": 0.0, "reasoning": None},
+            "spelling":   {"score": 0.0, "reasoning": None},
+            "scored": True,
+            "warning_code": None,
+        }
+
+    last_exc: Exception = RuntimeError("score_we_subscores_with_claude: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            response = _client.messages.create(
+                model=_MODEL,
+                max_tokens=1500,
+                system=[
+                    {
+                        "type": "text",
+                        "text": _WE_SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"ESSAY PROMPT:\n{prompt}",
+                                "cache_control": {"type": "ephemeral"},
+                            },
+                            {
+                                "type": "text",
+                                "text": f"STUDENT ESSAY:\n{user_text}",
+                            },
+                        ],
+                    }
+                ],
+                timeout=45.0,
+            )
+
+            text = ""
+            for block in response.content:
+                if block.type == "text":
+                    text = block.text
+                    break
+            if not text:
+                last_exc = RuntimeError("Claude returned no text content")
+                if attempt < 3:
+                    time.sleep(2)
+                continue
+
+            text = text.strip()
+            if text.startswith("```"):
+                parts = text.split("```")
+                text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
+
+            parsed = json.loads(text)
+
+            content_sub    = _we_parse_sub(parsed, "content", 6)
+            dsc_sub        = _we_parse_sub(parsed, "dsc", 6)
+            grammar_sub    = _we_parse_sub(parsed, "grammar", 2)
+            glr_sub        = _we_parse_sub(parsed, "glr", 6)
+            vocabulary_sub = _we_parse_sub(parsed, "vocabulary", 2)
+            spelling_sub   = _we_parse_sub(parsed, "spelling", 2)
+
+            cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+            cache_write = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+            log.info(
+                "[CLAUDE-WE] content=%.1f dsc=%.1f grammar=%.1f glr=%.1f "
+                "vocab=%.1f spelling=%.1f in=%d out=%d cache_read=%d cache_write=%d",
+                content_sub["score"], dsc_sub["score"], grammar_sub["score"],
+                glr_sub["score"], vocabulary_sub["score"], spelling_sub["score"],
+                response.usage.input_tokens, response.usage.output_tokens,
+                cache_read, cache_write,
+            )
+
+            return {
+                "content":    content_sub,
+                "dsc":        dsc_sub,
+                "grammar":    grammar_sub,
+                "glr":        glr_sub,
+                "vocabulary": vocabulary_sub,
+                "spelling":   spelling_sub,
+                "scored": True,
+                "warning_code": None,
+            }
+        except anthropic.AuthenticationError as exc:
+            log.error("[CLAUDE-WE] AuthenticationError — not retrying: %s", exc)
+            return _we_failure("content_llm_unavailable", reason=f"auth: {exc}")
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "[CLAUDE-WE] attempt=%d/3 failed — %s: %s",
+                attempt, type(exc).__name__, exc,
+            )
+            if attempt < 3:
+                time.sleep(2)
+
+    log.error(
+        "[CLAUDE-WE] failed after 3 attempts — exception=%s: %s",
+        type(last_exc).__name__, last_exc,
+    )
+    return _we_failure("content_llm_unavailable", reason=str(last_exc))
+
+
+def _we_parse_sub(parsed: dict, key: str, max_value: int) -> dict:
+    """Extract a sub-score block from the Claude JSON response, clamped."""
+    entry = parsed.get(key, {}) or {}
+    return {
+        "score": _clamp(entry.get("score"), 0, max_value),
+        "reasoning": _reasoning(entry.get("reasoning")),
+    }
+
+
+def _we_failure(warning_code: str, reason: str = "") -> dict:
+    return {
+        "content":    {"score": 0.0, "reasoning": None},
+        "dsc":        {"score": 0.0, "reasoning": None},
+        "grammar":    {"score": 0.0, "reasoning": None},
+        "glr":        {"score": 0.0, "reasoning": None},
+        "vocabulary": {"score": 0.0, "reasoning": None},
+        "spelling":   {"score": 0.0, "reasoning": None},
+        "scored": False,
+        "warning_code": warning_code,
+    }
