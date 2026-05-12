@@ -20,7 +20,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 log = logging.getLogger(__name__)
 
@@ -312,6 +312,89 @@ def get_new_practice_since(user_id: int, db: Session, since: Optional[datetime])
     return result
 
 
+# ── Tool: get_scoring_contributions ──────────────────────────────────────────
+#
+# Returns, for each PTE section (speaking/writing/reading/listening), the max
+# points each task can contribute to that section's pte_score (10–90 scale).
+#
+# Formula mirrors services/mock_service.py:
+#   full_S        = Σ weight_T_S  over all tasks T contributing to section S
+#   max_pts_T_S   = (weight_T_S / full_S) × 80
+# The 80 comes from: pte_score = 10 + weighted_pct × 80.
+#
+# Baked into build_rich_context so the coach never has to retrieve this from
+# the vector store — keeps it authoritative and in sync with the scoring engine.
+
+_CONTRIBUTIONS_CACHE: Optional[dict] = None
+
+_TASK_LABELS = {
+    "read_aloud":                 "Read Aloud",
+    "repeat_sentence":            "Repeat Sentence",
+    "describe_image":             "Describe Image",
+    "retell_lecture":             "Re-tell Lecture",
+    "answer_short_question":      "Answer Short Question",
+    "summarize_group_discussion": "Summarize Group Discussion",
+    "respond_to_situation":       "Respond to a Situation",
+    "summarize_written_text":     "Summarize Written Text",
+    "write_essay":                "Write Essay",
+    "mcq_single":                 "Reading MCQ (Single)",
+    "mcq_multiple":               "Reading MCQ (Multiple)",
+    "reading_fib_dropdown":       "Reading Fill in the Blanks (Dropdown)",
+    "fib_drag_drop":              "Reading FIB (Drag & Drop)",
+    "reorder_paragraph":          "Re-order Paragraphs",
+    "listening_wfd":              "Write from Dictation",
+    "listening_fib":              "Listening Fill in the Blanks",
+    "listening_hcs":              "Highlight Correct Summary",
+    "listening_smw":              "Select Missing Word",
+    "listening_mcq_single":       "Listening MCQ (Single)",
+    "listening_mcq_multiple":     "Listening MCQ (Multiple)",
+    "summarize_spoken_text":      "Summarize Spoken Text",
+    "listening_hiw":              "Highlight Incorrect Words",
+}
+
+
+def get_scoring_contributions(db: Session) -> dict:
+    global _CONTRIBUTIONS_CACHE
+    if _CONTRIBUTIONS_CACHE is not None:
+        return _CONTRIBUTIONS_CACHE
+    try:
+        rows = db.execute(text(
+            "SELECT task, overall_percent, listening_percent, reading_percent, "
+            "speaking_percent, writing_percent FROM pte_question_weightage"
+        )).fetchall()
+    except Exception as e:
+        log.warning("[MCP] scoring_contributions fetch failed: %s", e)
+        return {}
+
+    sections = ["speaking", "writing", "reading", "listening"]
+    weights: dict[str, dict[str, float]] = {}
+    for r in rows:
+        weights[r[0]] = {
+            "listening": float(r[2] or 0),
+            "reading":   float(r[3] or 0),
+            "speaking":  float(r[4] or 0),
+            "writing":   float(r[5] or 0),
+        }
+
+    full = {s: sum(v.get(s, 0) for v in weights.values()) for s in sections}
+
+    per_section: dict[str, list] = {s: [] for s in sections}
+    for task, w in weights.items():
+        for s in sections:
+            if w.get(s, 0) > 0 and full.get(s, 0) > 0:
+                max_pts = (w[s] / full[s]) * 80.0
+                per_section[s].append({
+                    "task":    task,
+                    "label":   _TASK_LABELS.get(task, task.replace("_", " ").title()),
+                    "max_pts": round(max_pts, 2),
+                })
+    for s in sections:
+        per_section[s].sort(key=lambda x: -x["max_pts"])
+
+    _CONTRIBUTIONS_CACHE = per_section
+    return per_section
+
+
 # ── Public: build_rich_context ────────────────────────────────────────────────
 
 def build_rich_context(user, user_id: int, db: Session) -> dict:
@@ -319,8 +402,7 @@ def build_rich_context(user, user_id: int, db: Session) -> dict:
     Calls all MCP tools in parallel and assembles a rich context dict.
     """
     try:
-        # Run the 6 independent DB queries in parallel threads
-        with ThreadPoolExecutor(max_workers=6) as executor:
+        with ThreadPoolExecutor(max_workers=7) as executor:
             futures = {
                 executor.submit(get_user_profile,             user, db):       "profile",
                 executor.submit(get_recent_scores,            user_id, db, 3): "recent",
@@ -328,6 +410,7 @@ def build_rich_context(user, user_id: int, db: Session) -> dict:
                 executor.submit(get_exam_history,             user_id, db):    "history",
                 executor.submit(get_speaking_detail,          user_id, db):    "speaking",
                 executor.submit(get_speaking_task_breakdowns, user_id, db):    "speaking_tasks",
+                executor.submit(get_scoring_contributions,    db):             "contributions",
             }
             results = {}
             for future in as_completed(futures):
@@ -346,6 +429,7 @@ def build_rich_context(user, user_id: int, db: Session) -> dict:
             "exam_history":             results.get("history") or [],
             "speaking_detail":          results.get("speaking"),
             "speaking_task_breakdowns": results.get("speaking_tasks"),
+            "scoring_contributions":    results.get("contributions") or {},
         }
 
     except Exception as e:

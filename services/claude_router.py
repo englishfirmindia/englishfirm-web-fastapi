@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from services.tool_registry import (
     ToolContext,
     TOOL_CALL_LIMITS,
+    execute_tool,
     execute_tools_parallel,
     get_tool_schemas,
 )
@@ -79,6 +80,30 @@ Then answer their question.""",
 # Prompt helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _fmt_scoring_contributions(data: Optional[dict]) -> str:
+    """Format the canonical task→section contribution table for the system prompt."""
+    if not data:
+        return ""
+    section_order = ["speaking", "writing", "reading", "listening"]
+    lines = [
+        "\nPTE SCORING CONTRIBUTIONS — CANONICAL (derived from RDS pte_question_weightage):",
+        "Max points each task can contribute to each section's pte_score (10–90 scale).",
+        "A task only contributes to the sections listed below for it. Sections not listed = zero contribution.",
+    ]
+    any_section = False
+    for s in section_order:
+        items = data.get(s) or []
+        if not items:
+            continue
+        any_section = True
+        lines.append(f"  {s.title()}:")
+        for it in items:
+            lines.append(f"    • {it['label']}: up to ~{it['max_pts']:.1f} pts")
+    if not any_section:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
 def _fmt_speaking_task_breakdowns(data: Optional[dict]) -> str:
     if not data or not data.get("tasks"):
         return ""
@@ -120,6 +145,7 @@ def _build_system_prompt(
     phase:              str,
     completeness_flags: list,
     new_practice:       list,
+    pre_retrieved:      Optional[str] = None,
 ) -> str:
     name    = context.get("username", "Student")
     target  = context.get("score_requirement", "unknown")
@@ -180,6 +206,23 @@ def _build_system_prompt(
         context.get("speaking_task_breakdowns")
     )
 
+    # ── Canonical task→section contribution table ────────────────────────────
+    contributions_block = _fmt_scoring_contributions(
+        context.get("scoring_contributions")
+    )
+
+    # ── Pre-retrieved knowledge (forced search on factual keywords) ──────────
+    pre_retrieved_block = ""
+    if pre_retrieved:
+        pre_retrieved_block = (
+            "\nPRE-RETRIEVED KNOWLEDGE — already searched on behalf of this question:\n"
+            "Use this as your authoritative source. Do NOT call search_pte_knowledge\n"
+            "again unless this content is clearly insufficient for the student's question.\n"
+            "---\n"
+            f"{pre_retrieved}\n"
+            "---\n"
+        )
+
     # ── Phase instruction ─────────────────────────────────────────────────────
     phase_block = _PHASE_INSTRUCTIONS.get(phase, _PHASE_INSTRUCTIONS["coaching"])
 
@@ -213,11 +256,13 @@ Exam history:
 
 Weak areas (from practice data, worst first):
 {weak_lines}
-{speaking_tasks_block}{summary_block}{proactive_block}
+{speaking_tasks_block}{contributions_block}{pre_retrieved_block}{summary_block}{proactive_block}
 {phase_block}
 {gaps_block}
 KNOWLEDGE BASE RULES (mandatory — no exceptions):
-- You MUST call search_pte_knowledge for ANY factual question about PTE tasks, scoring, strategies, exam format, or preparation advice. Never answer such questions from general training knowledge.
+- The PTE SCORING CONTRIBUTIONS block above is canonical and authoritative. For ANY question about which tasks contribute to which section, or how many points a task is worth, answer directly from that block. NEVER call search_pte_knowledge for contribution/weighting questions.
+- If a PRE-RETRIEVED KNOWLEDGE block is present above, treat it as the authoritative source for this turn. Answer from it. Only call search_pte_knowledge if it is clearly insufficient.
+- For OTHER factual questions about PTE (strategies, tips, exam format, prep advice) that are not covered by the blocks above, you MUST call search_pte_knowledge. Never answer such questions from general training knowledge.
 - If search_pte_knowledge returns "NO_RELEVANT_CONTENT" or "SEARCH_UNAVAILABLE", respond with exactly: "I don't have information on that in my knowledge base." Do not supplement with general knowledge under any circumstances.
 - After 2 searches with no relevant results, respond: "I don't have information on that in my knowledge base." Do not fall back to general knowledge.
 
@@ -239,6 +284,84 @@ FORMATTING:
 - Under 220 words for factual answers. Plans can be longer.
 - Short follow-up replies: skip heading and tip, answer naturally.
 - Trainer tone: encouraging, direct, specific. Address {name} by name occasionally."""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Forced retrieval — keyword-triggered eager search_pte_knowledge
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Why: Claude has been observed to ignore the "MUST search" guardrail and answer
+# factual scoring/strategy questions from training data (e.g. claiming Read Aloud
+# contributes to Reading). We run the search eagerly on the server before Claude
+# ever sees the message, then inject the result into the system prompt as
+# PRE-RETRIEVED KNOWLEDGE so it can't be skipped.
+
+_FACTUAL_KEYWORDS = (
+    # scoring / contribution terms
+    "contribute", "contribution", "contributes", "counts toward", "counts towards",
+    "feed into", "feeds into", "affect reading", "affect speaking", "affect writing",
+    "affect listening", "weight", "weighted", "weighting", "weightage",
+    "max points", "maximum points", "max marks", "points to", "how many points",
+    "scoring", "how is it scored", "how scored", "score breakdown", "scoring rule",
+    "reading score", "speaking score", "writing score", "listening score",
+    "pte formula", "score formula", "scaled score", "raw score",
+    # task-format / strategy
+    "strategy", "tips", "rules", "format", "how to score",
+    "time limit", "word limit", "recording time", "prep time",
+    "scoring criteria", "judging", "judged on", "judge",
+    # explicit fact-check phrasing
+    "is it true", "does it contribute", "does it affect",
+)
+
+_TASK_NAME_PATTERNS = (
+    "read aloud", "repeat sentence", "describe image", "retell lecture",
+    "re-tell lecture", "answer short question", "summarize group discussion",
+    "respond to a situation", "respond to situation",
+    "summarize written text", "swt", "write essay",
+    "fill in the blanks", "fib", "reorder paragraph", "re-order paragraph",
+    "highlight incorrect words", "hiw", "highlight correct summary", "hcs",
+    "select missing word", "smw", "write from dictation", "wfd",
+    "summarize spoken text", "sst",
+    "multiple choice", "mcq", "drag and drop",
+)
+
+_SECTION_WORDS = ("reading", "speaking", "writing", "listening", "score", "scores")
+
+
+def _should_force_retrieval(message: str) -> bool:
+    m = (message or "").lower().strip()
+    if not m or len(m) < 4:
+        return False
+    if any(kw in m for kw in _FACTUAL_KEYWORDS):
+        return True
+    if any(t in m for t in _TASK_NAME_PATTERNS) and any(w in m for w in _SECTION_WORDS):
+        return True
+    return False
+
+
+def _pre_retrieve_knowledge(user_message: str, ctx: ToolContext) -> Optional[str]:
+    """
+    Eagerly call search_pte_knowledge if the user message looks like a factual
+    PTE question. Returns the retrieved text on success, None otherwise.
+    """
+    if not _should_force_retrieval(user_message):
+        return None
+    try:
+        result = execute_tool(
+            "search_pte_knowledge",
+            {"query": user_message[:200]},
+            ctx,
+        )
+    except Exception as e:
+        log.warning("[CLAUDE_ROUTER] pre-retrieve failed: %s", e)
+        return None
+    if not result:
+        return None
+    if result.startswith("NO_RELEVANT_CONTENT") or result.startswith("SEARCH_UNAVAILABLE"):
+        log.info("[CLAUDE_ROUTER] pre-retrieve: %s", result[:60])
+        return None
+    log.info("[CLAUDE_ROUTER] pre-retrieve hit (%d chars)", len(result))
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -280,11 +403,15 @@ async def get_reply(
     db:                 Session,
     username:           str = "Student",
 ) -> str:
-    system_prompt = _build_system_prompt(
-        context, trainer_profile, phase, completeness_flags, new_practice
-    )
-
     ctx = ToolContext(user_id=user_id, db=db, username=username)
+
+    # ── Forced retrieval for factual questions (Lever 1) ──────────────────────
+    pre_retrieved = await asyncio.to_thread(_pre_retrieve_knowledge, user_message, ctx)
+
+    system_prompt = _build_system_prompt(
+        context, trainer_profile, phase, completeness_flags, new_practice,
+        pre_retrieved=pre_retrieved,
+    )
 
     # Build message history
     messages = []
@@ -294,6 +421,11 @@ async def get_reply(
 
     tool_call_counts: dict[str, int] = {k: 0 for k in TOOL_CALL_LIMITS}
     total_tool_calls = 0
+    # Pre-retrieval consumed one search_pte_knowledge call — Claude may do at
+    # most 1 more (per TOOL_CALL_LIMITS["search_pte_knowledge"] = 2).
+    if pre_retrieved is not None:
+        tool_call_counts["search_pte_knowledge"] = 1
+        total_tool_calls = 1
 
     for roundtrip in range(MAX_ROUNDTRIPS + 1):
         log.info("[CLAUDE_ROUTER] roundtrip=%d", roundtrip)
@@ -377,11 +509,15 @@ async def stream_reply(
     db:                 Session,
     username:           str = "Student",
 ) -> AsyncGenerator[str, None]:
-    system_prompt = _build_system_prompt(
-        context, trainer_profile, phase, completeness_flags, new_practice
-    )
-
     ctx = ToolContext(user_id=user_id, db=db, username=username)
+
+    # ── Forced retrieval for factual questions (Lever 1) ──────────────────────
+    pre_retrieved = await asyncio.to_thread(_pre_retrieve_knowledge, user_message, ctx)
+
+    system_prompt = _build_system_prompt(
+        context, trainer_profile, phase, completeness_flags, new_practice,
+        pre_retrieved=pre_retrieved,
+    )
 
     messages = []
     for m in conversation_messages[-10:]:
@@ -390,6 +526,9 @@ async def stream_reply(
 
     tool_call_counts: dict[str, int] = {k: 0 for k in TOOL_CALL_LIMITS}
     total_tool_calls = 0
+    if pre_retrieved is not None:
+        tool_call_counts["search_pte_knowledge"] = 1
+        total_tool_calls = 1
 
     for roundtrip in range(MAX_ROUNDTRIPS + 1):
         log.info("[CLAUDE_ROUTER/STREAM] roundtrip=%d", roundtrip)
