@@ -146,10 +146,13 @@ def submit(
         },
     )
     mark_submitted(session_id, question_id, result.pte_score)
+    persisted_result = dict(result.breakdown or {})
+    if req.time_on_question_seconds is not None:
+        persisted_result["time_on_question_seconds"] = req.time_on_question_seconds
     persist_answer_to_db(
         session=session, question_id=question_id, question_type="reading_drag_and_drop",
         user_answer_json={"user_answers": user_answers},
-        correct_answer_json={}, result_json=result.breakdown or {}, score=result.pte_score,
+        correct_answer_json={}, result_json=persisted_result, score=result.pte_score,
     )
 
     eval_json = question.evaluation.evaluation_json or {}

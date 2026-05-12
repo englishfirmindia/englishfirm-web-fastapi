@@ -141,16 +141,19 @@ def submit(
     total_score = session.get("score", 0)
 
     mark_submitted(session_id, question_id, result.pte_score)
+    persisted_result = {
+        **breakdown,
+        "correct_sequence": correct_sequence,
+        "pair_results": pair_results,
+        "is_correct": is_correct,
+    }
+    if req.time_on_question_seconds is not None:
+        persisted_result["time_on_question_seconds"] = req.time_on_question_seconds
     persist_answer_to_db(
         session=session, question_id=question_id, question_type="reorder_paragraphs",
         user_answer_json={"user_sequence": list(user_sequence or [])},
         correct_answer_json={"correct_sequence": correct_sequence},
-        result_json={
-            **breakdown,
-            "correct_sequence": correct_sequence,
-            "pair_results": pair_results,
-            "is_correct": is_correct,
-        },
+        result_json=persisted_result,
         score=result.pte_score,
     )
 

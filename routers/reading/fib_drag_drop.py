@@ -168,16 +168,19 @@ def submit(
     blank_results = breakdown.get("blank_results", {}) or {}
     is_correct = bool(blank_results) and all(blank_results.values())
 
+    persisted_result = {
+        **breakdown,
+        "correct_answers": correct_answers,
+        "pte_score": result.pte_score,
+        "is_correct": is_correct,
+    }
+    if req.time_on_question_seconds is not None:
+        persisted_result["time_on_question_seconds"] = req.time_on_question_seconds
     persist_answer_to_db(
         session=session, question_id=question_id, question_type="reading_fib_drop_down",
         user_answer_json={"user_answers": user_answers},
         correct_answer_json={},
-        result_json={
-            **breakdown,
-            "correct_answers": correct_answers,
-            "pte_score": result.pte_score,
-            "is_correct": is_correct,
-        },
+        result_json=persisted_result,
         score=result.pte_score,
     )
     total_score = session.get("score", 0)

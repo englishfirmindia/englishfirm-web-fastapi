@@ -157,6 +157,8 @@ def submit(
         "scoreForQuestion": result.pte_score,
     }
 
+    if req.time_on_question_seconds is not None:
+        response["time_on_question_seconds"] = req.time_on_question_seconds
     persist_answer_to_db(
         session=session, question_id=question_id, question_type="reading_mcs",
         user_answer_json={"selected_option": selected_option},

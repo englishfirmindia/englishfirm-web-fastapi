@@ -21,6 +21,11 @@ from pydantic import BaseModel, Field
 class _BaseSubmit(BaseModel):
     session_id: str = Field(..., min_length=1)
     question_id: int
+    # Reading practice stopwatch sends elapsed seconds spent on this question.
+    # Persisted into result_json so trainer review and analytics can see speed
+    # per question. None when the client doesn't send it (e.g. mock / sectional
+    # submits, mobile clients that haven't been updated).
+    time_on_question_seconds: Optional[int] = None
 
 
 # ── Text answer (SWT, WE, SST, WFD) ───────────────────────────────────────────
