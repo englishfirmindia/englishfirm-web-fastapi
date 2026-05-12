@@ -228,3 +228,87 @@ def get_sst_form_score(word_count: int) -> int:
 def get_sst_form_max() -> int:
     """Maximum achievable form sub-score for SST (used for the total max)."""
     return get_rubric_max("summarize_spoken_text", "form_50_70")
+
+
+# ── Section weight cache (pte_question_weightage) ─────────────────────────
+#
+# Separate cache from the rubric one because it lives in a different table
+# and has a different shape (one row per task with four section percents).
+# Used for cross-section contribution math — e.g. a speaking task can also
+# contribute to listening per PTE's enabling-skill rules.
+
+_SECTION_WEIGHT_DEFAULTS: Dict[str, Dict[str, int]] = {
+    "read_aloud":                 {"speaking_percent": 9,  "listening_percent": 0,  "reading_percent": 0, "writing_percent": 0},
+    "repeat_sentence":            {"speaking_percent": 16, "listening_percent": 17, "reading_percent": 0, "writing_percent": 0},
+    "describe_image":             {"speaking_percent": 31, "listening_percent": 0,  "reading_percent": 0, "writing_percent": 0},
+    "retell_lecture":             {"speaking_percent": 13, "listening_percent": 13, "reading_percent": 0, "writing_percent": 0},
+    "respond_to_situation":       {"speaking_percent": 13, "listening_percent": 0,  "reading_percent": 0, "writing_percent": 0},
+    "ptea_respond_situation":     {"speaking_percent": 13, "listening_percent": 0,  "reading_percent": 0, "writing_percent": 0},
+    "summarize_group_discussion": {"speaking_percent": 19, "listening_percent": 20, "reading_percent": 0, "writing_percent": 0},
+    "answer_short_question":      {"speaking_percent": 0,  "listening_percent": 4,  "reading_percent": 0, "writing_percent": 0},
+}
+
+
+class _SectionWeightCache:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._data: Dict[str, Dict[str, int]] = {}
+        self._loaded_at: float = 0.0
+
+    def _refresh(self) -> None:
+        s = SessionLocal()
+        try:
+            rows = s.execute(
+                _sql(
+                    "SELECT task, speaking_percent, listening_percent, "
+                    "reading_percent, writing_percent "
+                    "FROM pte_question_weightage"
+                )
+            ).fetchall()
+            new_data: Dict[str, Dict[str, int]] = {}
+            for r in rows:
+                new_data[r.task] = {
+                    "speaking_percent": int(r.speaking_percent or 0),
+                    "listening_percent": int(r.listening_percent or 0),
+                    "reading_percent": int(r.reading_percent or 0),
+                    "writing_percent": int(r.writing_percent or 0),
+                }
+            with self._lock:
+                self._data = new_data
+                self._loaded_at = time.time()
+            log.info(
+                "[WEIGHTAGE] refreshed cache tasks=%d", len(new_data)
+            )
+        except Exception as e:
+            log.error(
+                f"[WEIGHTAGE] cache refresh failed (using defaults): {e}"
+            )
+        finally:
+            s.close()
+
+    def get_weightage(self, task: str) -> Dict[str, int]:
+        """Return the section-weight dict for [task]. Falls back to hardcoded
+        defaults when RDS is empty / unreachable."""
+        now = time.time()
+        if now - self._loaded_at > _REFRESH_SECONDS:
+            self._refresh()
+        with self._lock:
+            row = self._data.get(task)
+        if row:
+            return row
+        return _SECTION_WEIGHT_DEFAULTS.get(task, {
+            "speaking_percent": 0, "listening_percent": 0,
+            "reading_percent": 0, "writing_percent": 0,
+        })
+
+
+_weightage_cache = _SectionWeightCache()
+
+
+def get_task_weightage(task: str) -> Dict[str, int]:
+    """Read section-weight percentages for [task] from RDS via cache.
+
+    Returns `{speaking_percent, listening_percent, reading_percent, writing_percent}`.
+    Falls back to hardcoded defaults on DB outage. Unknown tasks return zeros.
+    """
+    return _weightage_cache.get_weightage(task)

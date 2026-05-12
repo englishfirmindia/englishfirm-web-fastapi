@@ -611,6 +611,70 @@ def get_speaking_sectional_results(session_id: str, user_id: int, db: Session) -
             "correct":         correct,
         })
 
+    # ── Cross-section: listening contribution from each speaking question ──
+    # In a real PTE test, speaking tasks with audio stimuli (RS / RL / SGD /
+    # ASQ) also contribute to the listening score per pte_question_weightage.
+    # Annotate per-question + sum across the sectional so the feedback screen
+    # can show "you earned X listening points from these speaking questions".
+    from services.rubric_cache import get_task_weightage
+    listening_total_earned = 0.0
+    listening_total_max = 0.0
+    per_type_breakdown: dict = {}
+
+    for q in questions:
+        w = get_task_weightage(q["question_type"])
+        listening_pct = w.get("listening_percent", 0)
+        if listening_pct <= 0:
+            continue
+        # task_pct = (pte_score - floor) / 80 — earned fraction in [0, 1].
+        # Treat unscored / pending questions as 0 contribution so a partial
+        # sectional doesn't inflate the total.
+        score = q.get("score") or 0
+        task_pct = max(0.0, min(1.0, (score - config.PTE_FLOOR) / float(config.PTE_SCALE)))
+        earned = round(task_pct * listening_pct, 2)
+        q["listening_contribution"] = {
+            "earned_pts":       earned,
+            "max_pts":          listening_pct,   # this question's slice
+            "listening_percent": listening_pct,  # the underlying weightage
+            "task_pct":         round(task_pct, 3),
+        }
+        listening_total_earned += earned
+        listening_total_max += listening_pct
+        bucket = per_type_breakdown.setdefault(q["question_type"], {
+            "questions": 0, "earned_pts": 0.0, "max_pts": 0.0,
+            "listening_percent": listening_pct,
+        })
+        bucket["questions"] += 1
+        bucket["earned_pts"] = round(bucket["earned_pts"] + earned, 2)
+        bucket["max_pts"] = round(bucket["max_pts"] + listening_pct, 2)
+
+    # Projected PTE listening score *from this speaking sectional only*.
+    # Honest framing: the speaking sectional covers ~54% of total listening
+    # weight; the rest comes from dedicated listening tasks. We project the
+    # earned-fraction onto the standard PTE formula but tell the UI this is
+    # a partial-coverage projection so it can render the caveat clearly.
+    projected_pte_listening = None
+    if listening_total_max > 0:
+        earned_pct = listening_total_earned / listening_total_max
+        projected_pte_listening = max(
+            config.PTE_FLOOR,
+            min(config.PTE_CEILING,
+                round(config.PTE_BASE + earned_pct * config.PTE_SCALE))
+        )
+
+    listening_summary = {
+        "total_earned_pts":         round(listening_total_earned, 2),
+        "total_max_pts":            round(listening_total_max, 2),
+        "projected_pte_listening":  projected_pte_listening,
+        "per_type_breakdown":       per_type_breakdown,
+        # Honest framing for the UI tooltip / disclaimer.
+        "coverage_note": (
+            "These speaking questions cover the listening enabling-skill "
+            "portion of the listening score. The full listening section "
+            "also includes dedicated listening tasks (SST, WFD, MCQs, etc.)."
+        ),
+    }
+
     return {
         "attempt_id":         attempt.id,
         "session_id":         session_id,
@@ -621,4 +685,5 @@ def get_speaking_sectional_results(session_id: str, user_id: int, db: Session) -
         "questions_answered": attempt.questions_answered,
         "completed_at":       attempt.completed_at.isoformat() if attempt.completed_at else None,
         "questions":          questions,
+        "listening_summary":  listening_summary,
     }
