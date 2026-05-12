@@ -43,15 +43,27 @@ CONTENT (0–4):
   1 = Mentions only a tangential aspect; mostly off-topic.
   0 = Completely off-topic, irrelevant, or a near-verbatim copy of the source passage.
 
-GRAMMAR & SPELLING (0–2):
-  2 = Correct grammatical structure and spelling throughout.
-  1 = One or two minor grammar/spelling errors (e.g. a typo, a capitalisation slip, a single agreement issue).
-  0 = Three or more errors, or any error that obscures meaning.
+GRAMMAR + SPELLING (0–2) — combined score. Two-step process:
 
-VOCABULARY (0–2):
-  2 = Appropriate, varied word choice that demonstrates paraphrasing of the passage.
-  1 = Mostly appropriate but limited paraphrasing or some imprecise word choices.
-  0 = Inappropriate word choice, or near-verbatim vocabulary copied from the passage.
+  STEP 1 — Base grammar score (0–2), by COMMUNICATION IMPACT:
+    2 = Has correct grammatical structure. Stylistic choppiness or stacked conjunctions are fine if the sentence is grammatically valid.
+    1 = Contains grammatical errors (subject–verb disagreement, wrong tense, broken clause), but the meaning is still clear.
+    0 = Has defective grammatical structure which could hinder communication — the reader has to re-parse or guess at meaning.
+  Important: a run-on sentence is NOT automatically a 0 or 1. SWT is a single-sentence task, so long sentences with multiple clauses are expected and normal. Only mark down when an actual grammatical rule is broken or comprehension is impeded.
+
+  STEP 2 — Spelling deduction (applied to the base score, floored at 0):
+    0 spelling errors → no deduction
+    1 spelling error  → subtract 1
+    2 or more         → grammar score = 0 regardless of base
+
+  Final grammar score = max(0, base − spelling_deduction).
+  In the reasoning, state the spelling-error count explicitly so the deduction is auditable.
+
+VOCABULARY (0–2) — score by APPROPRIATENESS, not paraphrasing:
+  2 = Has appropriate choice of words. The vocabulary fits the meaning.
+  1 = Contains lexical errors (wrong word for the context, awkward collocation), but with no hindrance to communication.
+  0 = Has defective word choice which could hinder communication — a wrong-meaning word that confuses the reader.
+Important: PTE demands "appropriate choice of words" for vocabulary. Using original words from the passage does NOT lower the score — paraphrasing is NOT required and verbatim phrase reuse is NOT penalised here. Only mark down if a chosen word is wrong, awkward, or inappropriate for the context.
 
 For each sub-score, give the integer score AND a one-sentence reasoning that cites specific evidence (a word, an error, an aspect of the response). Keep reasoning under 25 words. Be honest about errors — students rely on the feedback.
 
