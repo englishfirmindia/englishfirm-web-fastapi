@@ -287,6 +287,30 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
         grammar_sub    = llm_result["grammar"]
         vocabulary_sub = llm_result["vocabulary"]
 
+    # ── Grammar heuristic floor: min(heuristic, llm) ─────────────────────
+    # Catches deterministic failure modes (extra spaces, missing terminal
+    # period, lowercase sentence start, improper ALL-CAPS) that the LLM
+    # tends to overlook. Cannot raise the score, only lower it.
+    from services.grammar_heuristic import grammar_heuristic, format_findings
+    heur_score, heur_findings = grammar_heuristic(body)
+    llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
+    final_grammar = min(float(heur_score), llm_grammar_score)
+    if final_grammar < llm_grammar_score:
+        # Heuristic was the binding constraint — annotate so trainer review
+        # can see why grammar landed below the LLM's read.
+        grammar_sub = {
+            "score": final_grammar,
+            "reasoning": (
+                f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
+                f"= {int(final_grammar)}. "
+                f"Heuristic: {format_findings(heur_findings)}. "
+                f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
+            ),
+            "heuristic_score": heur_score,
+            "heuristic_findings": heur_findings,
+            "llm_score": llm_grammar_score,
+        }
+
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
     if llm_result.get("scored") and content_sub["score"] == 0:
         breakdown = {
@@ -514,6 +538,25 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         vocabulary_sub = llm_result["vocabulary"]
         spelling_sub   = llm_result["spelling"]
 
+    # ── Grammar heuristic floor: min(heuristic, llm) ─────────────────────
+    from services.grammar_heuristic import grammar_heuristic, format_findings
+    heur_score, heur_findings = grammar_heuristic(body)
+    llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
+    final_grammar = min(float(heur_score), llm_grammar_score)
+    if final_grammar < llm_grammar_score:
+        grammar_sub = {
+            "score": final_grammar,
+            "reasoning": (
+                f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
+                f"= {int(final_grammar)}. "
+                f"Heuristic: {format_findings(heur_findings)}. "
+                f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
+            ),
+            "heuristic_score": heur_score,
+            "heuristic_findings": heur_findings,
+            "llm_score": llm_grammar_score,
+        }
+
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
     if llm_result.get("scored") and content_sub["score"] == 0:
         breakdown = {
@@ -712,6 +755,25 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         grammar_sub    = llm_result["grammar"]
         vocabulary_sub = llm_result["vocabulary"]
         spelling_sub   = llm_result["spelling"]
+
+    # ── Grammar heuristic floor: min(heuristic, llm) ─────────────────────
+    from services.grammar_heuristic import grammar_heuristic, format_findings
+    heur_score, heur_findings = grammar_heuristic(body)
+    llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
+    final_grammar = min(float(heur_score), llm_grammar_score)
+    if final_grammar < llm_grammar_score:
+        grammar_sub = {
+            "score": final_grammar,
+            "reasoning": (
+                f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
+                f"= {int(final_grammar)}. "
+                f"Heuristic: {format_findings(heur_findings)}. "
+                f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
+            ),
+            "heuristic_score": heur_score,
+            "heuristic_findings": heur_findings,
+            "llm_score": llm_grammar_score,
+        }
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ──────────────
     if llm_result.get("scored") and content_sub["score"] == 0:
