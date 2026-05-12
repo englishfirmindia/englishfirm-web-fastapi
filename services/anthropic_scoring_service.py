@@ -418,3 +418,170 @@ def _we_failure(warning_code: str, reason: str = "") -> dict:
         "scored": False,
         "warning_code": warning_code,
     }
+
+
+# ── Summarize Spoken Text (SST) ──────────────────────────────────────────────
+
+_SST_SYSTEM_PROMPT = """You are scoring a PTE Academic Summarize Spoken Text response.
+
+The student listens to a 60–90 second academic lecture and must summarise it in 50–70 words. You score four sub-scores — Form is scored deterministically by the system before reaching you (based on word count) and is not your job.
+
+CONTENT (0–4):
+  4 = Accurately captures the main idea AND key supporting details from the lecture.
+  3 = Captures the main idea and most details, with minor gaps.
+  2 = Captures some main ideas but misses important points, or includes some inaccuracies.
+  1 = Mentions only a tangential or secondary aspect of the lecture.
+  0 = Completely off-topic, irrelevant, or fails to address the lecture content.
+
+GRAMMAR (0–2):
+  2 = Correct grammatical structures throughout (subject–verb agreement, tense, articles, prepositions).
+  1 = One or two minor errors that don't impede meaning.
+  0 = Multiple errors, or any error that obscures meaning.
+
+VOCABULARY (0–2):
+  2 = Appropriate, varied academic vocabulary; precise word choice.
+  1 = Mostly appropriate but limited variety or some imprecise word choices.
+  0 = Inappropriate, repetitive, or informal vocabulary; or near-verbatim copying from the reference.
+
+SPELLING (0–2):
+  2 = No spelling errors, or only one or two trivial typos.
+  1 = A few spelling errors that don't impede meaning.
+  0 = Multiple spelling errors, or errors that impede meaning.
+
+For each sub-score, give the integer score AND a one-sentence reasoning that cites specific evidence (a word, an error, an aspect of the response). Keep reasoning under 25 words. Be honest about errors — students rely on the feedback.
+
+Return JSON only, in this exact shape:
+{
+  "content":    {"score": <int 0-4>, "reasoning": "<one sentence>"},
+  "grammar":    {"score": <int 0-2>, "reasoning": "<one sentence>"},
+  "vocabulary": {"score": <int 0-2>, "reasoning": "<one sentence>"},
+  "spelling":   {"score": <int 0-2>, "reasoning": "<one sentence>"}
+}
+"""
+
+
+def score_sst_subscores_with_claude(reference: str, user_text: str) -> dict:
+    """Score SST sub-scores via Claude Haiku 4.5.
+
+    Returns four `{score, reasoning}` blocks (content, grammar, vocabulary,
+    spelling) plus `scored` / `warning_code` partial-success flags. Form is
+    scored deterministically upstream and is NOT in the Claude prompt or
+    response.
+
+    On any failure (auth, parse, timeout) returns scored=False so the caller
+    can fall back to a heuristic. Never raises.
+    """
+    if not reference or not reference.strip():
+        return _sst_failure("content_llm_unavailable", reason="empty reference")
+    if not user_text or not user_text.strip():
+        return {
+            "content":    {"score": 0.0, "reasoning": None},
+            "grammar":    {"score": 0.0, "reasoning": None},
+            "vocabulary": {"score": 0.0, "reasoning": None},
+            "spelling":   {"score": 0.0, "reasoning": None},
+            "scored": True,
+            "warning_code": None,
+        }
+
+    last_exc: Exception = RuntimeError("score_sst_subscores_with_claude: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            response = _client.messages.create(
+                model=_MODEL,
+                max_tokens=800,
+                system=[
+                    {
+                        "type": "text",
+                        "text": _SST_SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"REFERENCE (what the audio was about):\n{reference}",
+                                "cache_control": {"type": "ephemeral"},
+                            },
+                            {
+                                "type": "text",
+                                "text": f"STUDENT SUMMARY:\n{user_text}",
+                            },
+                        ],
+                    }
+                ],
+                timeout=30.0,
+            )
+
+            text = ""
+            for block in response.content:
+                if block.type == "text":
+                    text = block.text
+                    break
+            if not text:
+                last_exc = RuntimeError("Claude returned no text content")
+                if attempt < 3:
+                    time.sleep(2)
+                continue
+
+            text = text.strip()
+            if text.startswith("```"):
+                parts = text.split("```")
+                text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
+
+            parsed = json.loads(text)
+
+            content_sub    = _we_parse_sub(parsed, "content", 4)
+            grammar_sub    = _we_parse_sub(parsed, "grammar", 2)
+            vocabulary_sub = _we_parse_sub(parsed, "vocabulary", 2)
+            spelling_sub   = _we_parse_sub(parsed, "spelling", 2)
+
+            cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+            cache_write = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+            log.info(
+                "[CLAUDE-SST] content=%.1f grammar=%.1f vocab=%.1f spelling=%.1f "
+                "in=%d out=%d cache_read=%d cache_write=%d",
+                content_sub["score"], grammar_sub["score"],
+                vocabulary_sub["score"], spelling_sub["score"],
+                response.usage.input_tokens, response.usage.output_tokens,
+                cache_read, cache_write,
+            )
+
+            return {
+                "content":    content_sub,
+                "grammar":    grammar_sub,
+                "vocabulary": vocabulary_sub,
+                "spelling":   spelling_sub,
+                "scored": True,
+                "warning_code": None,
+            }
+        except anthropic.AuthenticationError as exc:
+            log.error("[CLAUDE-SST] AuthenticationError — not retrying: %s", exc)
+            return _sst_failure("content_llm_unavailable", reason=f"auth: {exc}")
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "[CLAUDE-SST] attempt=%d/3 failed — %s: %s",
+                attempt, type(exc).__name__, exc,
+            )
+            if attempt < 3:
+                time.sleep(2)
+
+    log.error(
+        "[CLAUDE-SST] failed after 3 attempts — exception=%s: %s",
+        type(last_exc).__name__, last_exc,
+    )
+    return _sst_failure("content_llm_unavailable", reason=str(last_exc))
+
+
+def _sst_failure(warning_code: str, reason: str = "") -> dict:
+    return {
+        "content":    {"score": 0.0, "reasoning": None},
+        "grammar":    {"score": 0.0, "reasoning": None},
+        "vocabulary": {"score": 0.0, "reasoning": None},
+        "spelling":   {"score": 0.0, "reasoning": None},
+        "scored": False,
+        "warning_code": warning_code,
+    }

@@ -49,10 +49,26 @@ _DEFAULTS: Dict[str, Dict[str, int]] = {
         "words_lt_120": 0,    # form-zero — kills the attempt
         "words_gt_380": 0,    # form-zero — kills the attempt
     },
+    "summarize_spoken_text": {
+        # Honours RDS values exactly — total max = 12 (form 2 + content 4 +
+        # grammar 2 + vocab 2 + spelling 2). Spelling is now a real sub-
+        # score (was absent in the pre-Claude scorer).
+        "content_max": 4,
+        "grammar_max": 2,
+        "vocabulary_max": 2,
+        "spelling_max": 2,
+        "form_50_70": 2,    # ideal range
+        "form_40_49": 1,    # below ideal
+        "form_71_100": 1,   # above ideal
+        "form_lt_40": 0,    # form-zero — kills the attempt
+        "form_gt_100": 0,   # form-zero — kills the attempt
+    },
 }
 
 # Fields read for each task. Kept separate from defaults so the SQL query
 # stays focused and doesn't pull columns that don't apply to the task.
+# Tasks are split by table since SST lives in pte_scoring_listening_rubric
+# whereas SWT/WE live in pte_scoring_reading_writing_rubric.
 _TASK_FIELDS: Dict[str, list] = {
     "summarize_written_text": [
         "form_max", "content_max", "grammar_max", "vocabulary_max",
@@ -63,7 +79,17 @@ _TASK_FIELDS: Dict[str, list] = {
         "words_200_300", "words_120_199", "words_301_380",
         "words_lt_120", "words_gt_380",
     ],
+    "summarize_spoken_text": [
+        "content_max", "grammar_max", "vocabulary_max", "spelling_max",
+        "form_50_70", "form_40_49", "form_71_100",
+        "form_lt_40", "form_gt_100",
+    ],
 }
+
+# Which RDS table each task lives in. SWT/WE share the reading/writing
+# rubric; SST is a listening-module task and lives in the listening rubric.
+_RW_TASKS = {"summarize_written_text", "write_essay"}
+_LIS_TASKS = {"summarize_spoken_text"}
 
 
 class _RubricCache:
@@ -74,38 +100,51 @@ class _RubricCache:
 
     def _refresh(self) -> None:
         """Refresh the rubric cache from RDS. Best-effort: errors are logged
-        and the previous cache (or defaults) keeps serving."""
-        # Union of all fields any task wants — keep the SQL one statement.
-        all_fields = sorted({
-            f for fields in _TASK_FIELDS.values() for f in fields
-        })
-        select_cols = ", ".join(["task"] + all_fields)
+        and the previous cache (or defaults) keeps serving. Pulls from both
+        the reading/writing rubric and the listening rubric in one pass."""
+        new_data: Dict[str, Dict[str, int]] = {}
+
+        def _load_from(table: str, tasks: set) -> None:
+            if not tasks:
+                return
+            # Only select the columns the tasks in this table actually use.
+            cols = sorted({
+                f for t in tasks for f in _TASK_FIELDS.get(t, [])
+            })
+            select_cols = ", ".join(["task"] + cols)
+            try:
+                rows = s.execute(
+                    _sql(
+                        f"SELECT {select_cols} FROM {table} "
+                        "WHERE task = ANY(:tasks)"
+                    ),
+                    {"tasks": list(tasks)},
+                ).fetchall()
+                for r in rows:
+                    task = r.task
+                    wanted = _TASK_FIELDS.get(task, cols)
+                    row_dict: Dict[str, int] = {}
+                    for field in wanted:
+                        db_value = getattr(r, field, None)
+                        if db_value is not None:
+                            row_dict[field] = db_value
+                        else:
+                            row_dict[field] = _DEFAULTS.get(task, {}).get(field, 0)
+                    new_data[task] = row_dict
+            except Exception as exc:
+                log.error(
+                    f"[RUBRIC] {table} query failed (using defaults for {tasks}): {exc}"
+                )
+
         s = SessionLocal()
         try:
-            rows = s.execute(
-                _sql(
-                    f"SELECT {select_cols} "
-                    "FROM pte_scoring_reading_writing_rubric "
-                    "WHERE task = ANY(:tasks)"
-                ),
-                {"tasks": list(_DEFAULTS.keys())},
-            ).fetchall()
-            new_data: Dict[str, Dict[str, int]] = {}
-            for r in rows:
-                task = r.task
-                wanted = _TASK_FIELDS.get(task, all_fields)
-                row_dict: Dict[str, int] = {}
-                for field in wanted:
-                    db_value = getattr(r, field, None)
-                    if db_value is not None:
-                        row_dict[field] = db_value
-                    else:
-                        row_dict[field] = _DEFAULTS.get(task, {}).get(field, 0)
-                new_data[task] = row_dict
-            with self._lock:
-                self._data = new_data
-                self._loaded_at = time.time()
-            log.info("[RUBRIC] refreshed cache tasks=%s", list(new_data.keys()))
+            _load_from("pte_scoring_reading_writing_rubric", _RW_TASKS)
+            _load_from("pte_scoring_listening_rubric", _LIS_TASKS)
+            if new_data:
+                with self._lock:
+                    self._data = new_data
+                    self._loaded_at = time.time()
+                log.info("[RUBRIC] refreshed cache tasks=%s", list(new_data.keys()))
         except Exception as e:
             log.error(f"[RUBRIC] cache refresh failed (will keep using prior cache / defaults): {e}")
         finally:
@@ -159,3 +198,33 @@ def get_we_form_score(word_count: int) -> int:
 def get_we_form_max() -> int:
     """Maximum achievable form sub-score for WE (used for the total max)."""
     return get_rubric_max("write_essay", "words_200_300")
+
+
+def get_sst_form_score(word_count: int) -> int:
+    """Map an SST summary word count to the form sub-score using RDS bands.
+
+    Bands (real PTE):
+      50–70  → form_50_70  (default 2)
+      40–49  → form_40_49  (default 1)
+      71–100 → form_71_100 (default 1)
+      < 40   → form_lt_40  (default 0 — form-zero kills the attempt)
+      > 100  → form_gt_100 (default 0 — form-zero kills the attempt)
+
+    Note: the RDS row also has a `form_t_40` column (likely a duplicate of
+    `form_lt_40`). It is intentionally ignored.
+    """
+    if 50 <= word_count <= 70:
+        return get_rubric_max("summarize_spoken_text", "form_50_70")
+    if 40 <= word_count <= 49:
+        return get_rubric_max("summarize_spoken_text", "form_40_49")
+    if 71 <= word_count <= 100:
+        return get_rubric_max("summarize_spoken_text", "form_71_100")
+    if word_count < 40:
+        return get_rubric_max("summarize_spoken_text", "form_lt_40")
+    # word_count > 100
+    return get_rubric_max("summarize_spoken_text", "form_gt_100")
+
+
+def get_sst_form_max() -> int:
+    """Maximum achievable form sub-score for SST (used for the total max)."""
+    return get_rubric_max("summarize_spoken_text", "form_50_70")
