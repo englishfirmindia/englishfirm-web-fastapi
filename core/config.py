@@ -66,6 +66,14 @@ PTE_CEILING = 90
 PTE_BASE = 10
 PTE_SCALE = 80
 
+# ── Content +1 generosity bump (SWT / WE / SST) ───────────────────────────────
+# When enabled, the LLM's content sub-score is bumped by 1 (capped at the
+# task's content_max) so the system runs slightly more generously than the
+# pure LLM read on borderline summaries. Skipped when llm_content == 0 so the
+# off-topic floor still fires. Flip with CONTENT_BUMP_ENABLED=false to disable
+# without redeploy.
+CONTENT_BUMP_ENABLED = os.getenv("CONTENT_BUMP_ENABLED", "true").lower() == "true"
+
 # ── Trainer (OTP login + sharing) ─────────────────────────────────────────────
 TRAINER_OTP_LENGTH = 6
 TRAINER_OTP_EXPIRY_MINUTES = 10

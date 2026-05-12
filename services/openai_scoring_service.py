@@ -71,7 +71,9 @@ _GRAMMAR_DEDUCTION_RULES = """GRAMMAR (0–2) — DEDUCTION-BASED, four-step pro
 
   STEP D — Output the integer score. In `reasoning`, list each counted mistake with its quoted text and rule tag, then state the arithmetic:
     "grammar=N [each: quoted + (rule x)] or 'none' -> grammar_remaining=max(0,2-N)=X"
-  The `score` field MUST equal X."""
+  The `score` field MUST equal X.
+
+  ALSO populate `mistake_quotes`: a JSON array of the exact verbatim substrings from the student response that you flagged. Each entry MUST appear verbatim in the student response (case-sensitive, exact characters) so the UI can locate it. Empty list if no mistakes."""
 
 _SPELLING_DEDUCTION_RULES = """SPELLING (0–2) — DEDUCTION-BASED, per-typo:
 
@@ -83,7 +85,9 @@ _SPELLING_DEDUCTION_RULES = """SPELLING (0–2) — DEDUCTION-BASED, per-typo:
 
   In `reasoning`, list each misspelled word quoted, then state the arithmetic:
     "spelling=M [\\"misspelled1\\", \\"misspelled2\\", ...] or 'none' -> spelling_remaining=max(0,2-M)=Y"
-  The `score` field MUST equal Y."""
+  The `score` field MUST equal Y.
+
+  ALSO populate `mistake_quotes`: a JSON array of each misspelled word as it appears verbatim in the student response (case-sensitive, exact characters). Empty list if no misspellings."""
 
 _VOCABULARY_APPROPRIATENESS_RULES = """VOCABULARY (0–2) — score by APPROPRIATENESS, not paraphrasing:
   2 = Has appropriate choice of words. The vocabulary fits the meaning.
@@ -129,7 +133,12 @@ GRAMMAR + SPELLING (0–2) — COMBINED sub-score, computed as min(grammar_remai
 Return JSON only, in this exact shape:
 {{
   "content":    {{"score": <number 0-4>, "reasoning": "<one sentence>"}},
-  "grammar":    {{"score": <number 0-2>, "reasoning": "grammar=N [...], spelling=M [...] -> grammar_remaining=X, spelling_remaining=Y -> min=Z"}},
+  "grammar":    {{
+    "score": <number 0-2>,
+    "reasoning": "grammar=N [...], spelling=M [...] -> grammar_remaining=X, spelling_remaining=Y -> min=Z",
+    "grammar_mistake_quotes":  [<exact verbatim substrings flagged as grammar>],
+    "spelling_mistake_quotes": [<exact verbatim misspelled words>]
+  }},
   "vocabulary": {{"score": <number 0-2>, "reasoning": "<one sentence>"}}
 }}
 """
@@ -179,10 +188,18 @@ Return JSON only, in this exact shape:
 {{
   "content":    {{"score": <number 0-6>, "reasoning": "<one sentence>"}},
   "dsc":        {{"score": <number 0-6>, "reasoning": "<one sentence>"}},
-  "grammar":    {{"score": <number 0-2>, "reasoning": "grammar=N [...] -> grammar_remaining=X"}},
+  "grammar":    {{
+    "score": <number 0-2>,
+    "reasoning": "grammar=N [...] -> grammar_remaining=X",
+    "mistake_quotes": [<exact verbatim substrings flagged as grammar>]
+  }},
   "glr":        {{"score": <number 0-6>, "reasoning": "<one sentence>"}},
   "vocabulary": {{"score": <number 0-2>, "reasoning": "<one sentence>"}},
-  "spelling":   {{"score": <number 0-2>, "reasoning": "spelling=M [...] -> spelling_remaining=Y"}}
+  "spelling":   {{
+    "score": <number 0-2>,
+    "reasoning": "spelling=M [...] -> spelling_remaining=Y",
+    "mistake_quotes": [<exact verbatim misspelled words>]
+  }}
 }}
 """
 
@@ -208,9 +225,17 @@ CONTENT (0–4):
 Return JSON only, in this exact shape:
 {{
   "content":    {{"score": <number 0-4>, "reasoning": "<one sentence>"}},
-  "grammar":    {{"score": <number 0-2>, "reasoning": "grammar=N [...] -> grammar_remaining=X"}},
+  "grammar":    {{
+    "score": <number 0-2>,
+    "reasoning": "grammar=N [...] -> grammar_remaining=X",
+    "mistake_quotes": [<exact verbatim substrings flagged as grammar>]
+  }},
   "vocabulary": {{"score": <number 0-2>, "reasoning": "<one sentence>"}},
-  "spelling":   {{"score": <number 0-2>, "reasoning": "spelling=M [...] -> spelling_remaining=Y"}}
+  "spelling":   {{
+    "score": <number 0-2>,
+    "reasoning": "spelling=M [...] -> spelling_remaining=Y",
+    "mistake_quotes": [<exact verbatim misspelled words>]
+  }}
 }}
 """
 
@@ -394,10 +419,19 @@ def _reasoning(value) -> Optional[str]:
 
 def _parse_sub(parsed: dict, key: str, max_value: int) -> dict:
     entry = parsed.get(key, {}) or {}
-    return {
+    out = {
         "score": _clamp(entry.get("score"), 0, max_value),
         "reasoning": _reasoning(entry.get("reasoning")),
     }
+    # Pass through any mistake-quote arrays the LLM emits for highlight
+    # builder. SWT grammar field returns two arrays (grammar_mistake_quotes,
+    # spelling_mistake_quotes) because it combines both sub-scores; WE/SST
+    # grammar and spelling each return a single mistake_quotes array.
+    for k in ("mistake_quotes", "grammar_mistake_quotes", "spelling_mistake_quotes"):
+        v = entry.get(k)
+        if isinstance(v, list):
+            out[k] = [str(x) for x in v if x]
+    return out
 
 
 def _swt_failure(warning_code: str, reason: str = "") -> dict:

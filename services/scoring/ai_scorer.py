@@ -14,6 +14,25 @@ import re
 from .base import ScoringResult, ScoringStrategy, to_pte_score
 
 
+def _apply_content_bump(content_sub: dict, content_max: int) -> dict:
+    """Apply the content +1 generosity bump (gated by CONTENT_BUMP_ENABLED
+    and skipped when llm_content == 0 so off-topic floor still fires).
+    Preserves the original LLM score in `llm_score` for trainer audit.
+    Returns a new dict; never mutates the input."""
+    from core.config import CONTENT_BUMP_ENABLED
+    llm_score = float(content_sub.get("score", 0) or 0)
+    if not CONTENT_BUMP_ENABLED or llm_score < 1:
+        return content_sub
+    final = min(float(content_max), llm_score + 1.0)
+    if final == llm_score:
+        return content_sub
+    out = dict(content_sub)
+    out["score"] = final
+    out["llm_score"] = llm_score
+    out["bump_applied"] = True
+    return out
+
+
 def _split_sentences(text: str) -> list:
     """Split into sentences while ignoring decimals (e.g. '$1.75') so a number
     like '1.75 billion' isn't counted as two sentences. Common bug surfaced
@@ -290,29 +309,35 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
     # ── Grammar heuristic floor: min(heuristic, llm) ─────────────────────
     # Catches deterministic failure modes (extra spaces, missing terminal
     # period, lowercase sentence start, improper ALL-CAPS) that the LLM
-    # tends to overlook. Cannot raise the score, only lower it.
+    # tends to overlook. Cannot raise the score, only lower it. Heuristic
+    # findings are ALWAYS attached so the highlight builder can render
+    # them even when the LLM already saw the same issues.
     from services.grammar_heuristic import grammar_heuristic, format_findings
     heur_score, heur_findings = grammar_heuristic(body)
     llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
     final_grammar = min(float(heur_score), llm_grammar_score)
+    grammar_sub = dict(grammar_sub)
+    grammar_sub["heuristic_findings"] = heur_findings
+    grammar_sub["heuristic_score"] = heur_score
+    grammar_sub["llm_score"] = llm_grammar_score
     if final_grammar < llm_grammar_score:
-        # Heuristic was the binding constraint — annotate so trainer review
-        # can see why grammar landed below the LLM's read.
-        grammar_sub = {
-            "score": final_grammar,
-            "reasoning": (
-                f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
-                f"= {int(final_grammar)}. "
-                f"Heuristic: {format_findings(heur_findings)}. "
-                f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
-            ),
-            "heuristic_score": heur_score,
-            "heuristic_findings": heur_findings,
-            "llm_score": llm_grammar_score,
-        }
+        # Heuristic was the binding constraint — rewrite reasoning to surface
+        # both reads.
+        grammar_sub["score"] = final_grammar
+        grammar_sub["reasoning"] = (
+            f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
+            f"= {int(final_grammar)}. "
+            f"Heuristic: {format_findings(heur_findings)}. "
+            f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
+        )
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
     if llm_result.get("scored") and content_sub["score"] == 0:
+        # Still build highlights for the student answer even on off-topic.
+        from services.highlight_builder import build_highlights
+        ot_spelling = grammar_sub.get("spelling_mistake_quotes") or []
+        ot_grammar = grammar_sub.get("grammar_mistake_quotes") or []
+        ot_highlights = build_highlights(body, heur_findings, ot_spelling, ot_grammar)
         breakdown = {
             "form": form_max,
             "content":    content_sub,
@@ -323,6 +348,8 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
             "task_type": "swt",
             "scorer": scorer_label,
             "scoring_warnings": ["content_off_topic"],
+            "highlights": ot_highlights,
+            "highlight_text": body,
         }
         return ScoringResult(
             pte_score=to_pte_score(0.0),
@@ -330,6 +357,12 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
             is_async=False,
             breakdown=breakdown,
         )
+
+    # ── Content +1 generosity bump ──────────────────────────────────────
+    # Applied after the off-topic check (so content==0 still floors PTE 10)
+    # and only when llm_content >= 1. Original LLM score is preserved for
+    # trainer audit.
+    content_sub = _apply_content_bump(content_sub, content_max)
 
     # ── Aggregate + PTE ────────────────────────────────────────────────────
     earned = (
@@ -341,6 +374,13 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
     earned = max(0.0, min(float(max_pts), earned))
     pct = earned / max_pts if max_pts > 0 else 0.0
 
+    # ── Build highlights (LLM mistake_quotes + heuristic positions) ─────
+    from services.highlight_builder import build_highlights
+    spelling_quotes = grammar_sub.get("spelling_mistake_quotes") or []
+    grammar_quotes = grammar_sub.get("grammar_mistake_quotes") or []
+    heur_findings = grammar_sub.get("heuristic_findings") or {}
+    highlights = build_highlights(body, heur_findings, spelling_quotes, grammar_quotes)
+
     breakdown = {
         "form": form_max,
         "content":    content_sub,
@@ -350,6 +390,8 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
         "max_pts": max_pts,
         "task_type": "swt",
         "scorer": scorer_label,
+        "highlights": highlights,
+        "highlight_text": body,
     }
     if scoring_warnings:
         breakdown["scoring_warnings"] = scoring_warnings
@@ -543,22 +585,25 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
     heur_score, heur_findings = grammar_heuristic(body)
     llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
     final_grammar = min(float(heur_score), llm_grammar_score)
+    grammar_sub = dict(grammar_sub)
+    grammar_sub["heuristic_findings"] = heur_findings
+    grammar_sub["heuristic_score"] = heur_score
+    grammar_sub["llm_score"] = llm_grammar_score
     if final_grammar < llm_grammar_score:
-        grammar_sub = {
-            "score": final_grammar,
-            "reasoning": (
-                f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
-                f"= {int(final_grammar)}. "
-                f"Heuristic: {format_findings(heur_findings)}. "
-                f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
-            ),
-            "heuristic_score": heur_score,
-            "heuristic_findings": heur_findings,
-            "llm_score": llm_grammar_score,
-        }
+        grammar_sub["score"] = final_grammar
+        grammar_sub["reasoning"] = (
+            f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
+            f"= {int(final_grammar)}. "
+            f"Heuristic: {format_findings(heur_findings)}. "
+            f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
+        )
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
     if llm_result.get("scored") and content_sub["score"] == 0:
+        from services.highlight_builder import build_highlights
+        ot_spelling = (spelling_sub.get("mistake_quotes") or [])
+        ot_grammar = (grammar_sub.get("mistake_quotes") or [])
+        ot_highlights = build_highlights(body, heur_findings, ot_spelling, ot_grammar)
         breakdown = {
             "form": form_score,
             "content":    content_sub,
@@ -572,6 +617,8 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
             "task_type": "we",
             "scorer": scorer_label,
             "scoring_warnings": ["content_off_topic"],
+            "highlights": ot_highlights,
+            "highlight_text": body,
         }
         return ScoringResult(
             pte_score=to_pte_score(0.0),
@@ -579,6 +626,9 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
             is_async=False,
             breakdown=breakdown,
         )
+
+    # ── Content +1 generosity bump ──────────────────────────────────────
+    content_sub = _apply_content_bump(content_sub, content_max)
 
     # ── Aggregate + PTE ────────────────────────────────────────────────────
     earned = (
@@ -593,6 +643,12 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
     earned = max(0.0, min(float(max_pts), earned))
     pct = earned / max_pts if max_pts > 0 else 0.0
 
+    # ── Build highlights ────────────────────────────────────────────────
+    from services.highlight_builder import build_highlights
+    spelling_quotes = spelling_sub.get("mistake_quotes") or []
+    grammar_quotes = grammar_sub.get("mistake_quotes") or []
+    highlights = build_highlights(body, heur_findings, spelling_quotes, grammar_quotes)
+
     breakdown = {
         "form": form_score,
         "content":    content_sub,
@@ -605,6 +661,8 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         "max_pts": max_pts,
         "task_type": "we",
         "scorer": scorer_label,
+        "highlights": highlights,
+        "highlight_text": body,
     }
     if scoring_warnings:
         breakdown["scoring_warnings"] = scoring_warnings
@@ -761,22 +819,25 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
     heur_score, heur_findings = grammar_heuristic(body)
     llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
     final_grammar = min(float(heur_score), llm_grammar_score)
+    grammar_sub = dict(grammar_sub)
+    grammar_sub["heuristic_findings"] = heur_findings
+    grammar_sub["heuristic_score"] = heur_score
+    grammar_sub["llm_score"] = llm_grammar_score
     if final_grammar < llm_grammar_score:
-        grammar_sub = {
-            "score": final_grammar,
-            "reasoning": (
-                f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
-                f"= {int(final_grammar)}. "
-                f"Heuristic: {format_findings(heur_findings)}. "
-                f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
-            ),
-            "heuristic_score": heur_score,
-            "heuristic_findings": heur_findings,
-            "llm_score": llm_grammar_score,
-        }
+        grammar_sub["score"] = final_grammar
+        grammar_sub["reasoning"] = (
+            f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
+            f"= {int(final_grammar)}. "
+            f"Heuristic: {format_findings(heur_findings)}. "
+            f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
+        )
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ──────────────
     if llm_result.get("scored") and content_sub["score"] == 0:
+        from services.highlight_builder import build_highlights
+        ot_spelling = (spelling_sub.get("mistake_quotes") or [])
+        ot_grammar = (grammar_sub.get("mistake_quotes") or [])
+        ot_highlights = build_highlights(body, heur_findings, ot_spelling, ot_grammar)
         breakdown = {
             "form": form_score,
             "content":    content_sub,
@@ -789,6 +850,8 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
             "scorer": scorer_label,
             "scoring_warnings": ["content_off_topic"],
             "word_count": wc,
+            "highlights": ot_highlights,
+            "highlight_text": body,
         }
         return ScoringResult(
             pte_score=to_pte_score(0.0),
@@ -796,6 +859,9 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
             is_async=False,
             breakdown=breakdown,
         )
+
+    # ── Content +1 generosity bump ──────────────────────────────────────
+    content_sub = _apply_content_bump(content_sub, content_max)
 
     # ── Aggregate + PTE ──────────────────────────────────────────────────
     earned = (
@@ -808,6 +874,12 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
     earned = max(0.0, min(float(max_pts), earned))
     pct = earned / max_pts if max_pts > 0 else 0.0
 
+    # Build highlights
+    from services.highlight_builder import build_highlights
+    spelling_quotes = spelling_sub.get("mistake_quotes") or []
+    grammar_quotes = grammar_sub.get("mistake_quotes") or []
+    highlights = build_highlights(body, heur_findings, spelling_quotes, grammar_quotes)
+
     breakdown = {
         "form": form_score,
         "content":    content_sub,
@@ -819,6 +891,8 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         "task_type": "sst",
         "scorer": scorer_label,
         "word_count": wc,
+        "highlights": highlights,
+        "highlight_text": body,
     }
     if scoring_warnings:
         breakdown["scoring_warnings"] = scoring_warnings

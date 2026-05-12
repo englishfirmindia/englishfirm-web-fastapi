@@ -22,6 +22,7 @@ trainer audit.
 This module is intentionally pure / stateless / no external deps.
 """
 import re
+from typing import Tuple
 
 # Words that are legitimately ALL-CAPS mid-sentence and should NOT count as
 # improper. Add to this list if false positives surface on real submissions.
@@ -35,37 +36,52 @@ _ABBREV_ALLOWLIST = frozenset({
 _MAX = 2
 
 
-def grammar_heuristic(text: str) -> tuple[int, dict]:
+def grammar_heuristic(text: str) -> Tuple[int, dict]:
     """Return (score, findings).
 
     score    — integer 0–2 (max minus deductions, floored at 0).
-    findings — dict with per-rule details for trainer audit.
+    findings — dict with per-rule details PLUS character positions for the
+               highlight builder. Position fields:
+                 extra_space_ranges      — list of (start, end) byte offsets
+                                           covering each run of 2+ spaces
+                                           (the whole run, not just the extras)
+                 improper_caps_ranges    — list of (start, end, word) for each
+                                           flagged ALL-CAPS word
+                 initial_cap_position    — int byte offset of the first
+                                           non-whitespace char, or None
+                 terminal_position       — int byte offset where the missing
+                                           terminal punctuation should be
+                                           inserted (end of body.rstrip()),
+                                           or None
     """
     findings: dict = {
         "extra_spaces": 0,
+        "extra_space_ranges": [],
         "missing_initial_cap": False,
+        "initial_cap_position": None,
         "improper_caps": [],
+        "improper_caps_ranges": [],
         "missing_terminal": False,
+        "terminal_position": None,
     }
     body = text or ""
     if not body.strip():
-        # Empty/whitespace-only response: heuristic floor. (The form gate
-        # upstream will have already flagged this; we mirror with score=0.)
         return 0, findings
 
     # Rule 1 — count extras beyond a single space within any run of 2+ spaces.
     for m in re.finditer(r" {2,}", body):
         findings["extra_spaces"] += len(m.group()) - 1
+        findings["extra_space_ranges"].append((m.start(), m.end()))
 
     # Rule 2 — first non-whitespace character must be uppercase.
     stripped = body.lstrip()
-    if stripped and not stripped[0].isupper():
-        findings["missing_initial_cap"] = True
+    if stripped:
+        first_pos = len(body) - len(stripped)
+        if not stripped[0].isupper():
+            findings["missing_initial_cap"] = True
+            findings["initial_cap_position"] = first_pos
 
     # Rule 3 — improper ALL-CAPS mid-sentence (Option A).
-    # Build the set of byte offsets that count as sentence starts: the first
-    # non-whitespace char of the response, plus the first non-whitespace char
-    # after any "[.!?]+\s+" run.
     sentence_starts = set()
     i = 0
     while i < len(body) and body[i].isspace():
@@ -82,11 +98,13 @@ def grammar_heuristic(text: str) -> tuple[int, dict]:
         if m.group() in _ABBREV_ALLOWLIST:
             continue
         findings["improper_caps"].append(m.group())
+        findings["improper_caps_ranges"].append((m.start(), m.end(), m.group()))
 
     # Rule 4 — terminal punctuation.
     rstripped = body.rstrip()
     if rstripped and rstripped[-1] not in ".!?":
         findings["missing_terminal"] = True
+        findings["terminal_position"] = len(rstripped)
 
     deduction = (
         findings["extra_spaces"]
