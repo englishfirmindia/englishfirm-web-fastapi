@@ -41,7 +41,15 @@ log = get_logger(__name__)
 
 _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 _MODEL = "gpt-5-nano"
-_MAX_COMPLETION_TOKENS = 6000  # gpt-5 family uses reasoning tokens; needs headroom
+# gpt-5 family burns "reasoning tokens" before emitting visible JSON. Default
+# reasoning_effort=medium routinely consumed 4500–6000 reasoning tokens per
+# SWT call, leaving little or no room for the JSON output — many calls hit
+# finish_reason=length with empty content. The deduction-based rubric is fully
+# spelled out in the prompt, so "minimal" reasoning is plenty: live testing
+# on Nimisha's last 5 SWTs showed identical sub-scores at ~12× the speed and
+# zero finish=length failures. 8000-token cap is the safety net.
+_MAX_COMPLETION_TOKENS = 8000
+_REASONING_EFFORT = "minimal"
 
 
 # ── Shared rubric language used in all three task prompts ────────────────────
@@ -355,6 +363,7 @@ def _call_openai(system_prompt: str, user_block: str, label: str) -> Optional[di
             resp = _client.chat.completions.create(
                 model=_MODEL,
                 max_completion_tokens=_MAX_COMPLETION_TOKENS,
+                reasoning_effort=_REASONING_EFFORT,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_block},
@@ -363,9 +372,19 @@ def _call_openai(system_prompt: str, user_block: str, label: str) -> Optional[di
             )
             raw = resp.choices[0].message.content
             if not raw:
-                last_exc = RuntimeError(
-                    f"empty content; finish_reason={resp.choices[0].finish_reason}"
-                )
+                finish = resp.choices[0].finish_reason
+                last_exc = RuntimeError(f"empty content; finish_reason={finish}")
+                # finish_reason=length is deterministic for a given (prompt, model,
+                # max_tokens) pair — retrying with identical inputs produces an
+                # identical empty response and just wastes ~30s per attempt before
+                # the Claude fallback finally runs. Break out early so the caller
+                # falls to Claude in seconds, not minutes.
+                if finish == "length":
+                    log.warning(
+                        "[OPENAI-%s] finish=length on attempt=%d/3 — skipping remaining retries (deterministic failure)",
+                        label, attempt,
+                    )
+                    break
                 if attempt < 3:
                     time.sleep(2)
                 continue
