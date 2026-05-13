@@ -17,3 +17,4 @@ openai>=1.40.0
 anthropic>=0.40.0
 azure-cognitiveservices-speech>=1.40.0
 pydub>=0.25.0
+pyspellchecker>=0.8.0
