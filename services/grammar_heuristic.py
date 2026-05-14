@@ -24,13 +24,25 @@ This module is intentionally pure / stateless / no external deps.
 import re
 from typing import Tuple
 
-# Words that are legitimately ALL-CAPS mid-sentence and should NOT count as
-# improper. Add to this list if false positives surface on real submissions.
+# Words that are legitimately ALL-CAPS (anywhere in the sentence, including
+# the first word) and should NOT count as improper. Extend this list if real
+# false positives surface on submissions.
 _ABBREV_ALLOWLIST = frozenset({
-    "I", "USA", "UK", "US", "UN", "EU", "UNEP", "NASA", "OECD",
-    "WHO", "WTO", "IMF", "BBC", "CNN", "PTE", "IELTS", "TOEFL",
-    "AI", "GDP", "CEO", "UAE", "USSR", "ASEAN", "APEC", "NATO",
+    # Pronouns / countries / unions
+    "I", "USA", "UK", "US", "UN", "EU", "UAE", "USSR", "PRC", "DPRK",
+    # International bodies
+    "UNEP", "NASA", "OECD", "WHO", "WTO", "IMF", "ASEAN", "APEC", "NATO",
     "BRICS", "G20", "G7", "FIFA", "IOC", "WWF",
+    # Media / press
+    "BBC", "CNN", "MSNBC", "CNBC", "ABC", "NBC", "CBS",
+    # Education / standards
+    "PTE", "IELTS", "TOEFL", "MIT", "UCLA", "MBA", "ISO", "IEEE", "ANSI",
+    "WCAG",
+    # Tech / business
+    "AI", "GDP", "CEO", "CTO", "COO", "CFO", "IBM", "AWS", "BMW", "HSBC",
+    "KFC", "AT&T",
+    "API", "CPU", "GPU", "RAM", "ROM", "URL", "URI", "JSON", "HTML", "CSS",
+    "SQL", "HTTP", "HTTPS", "FTP", "USB", "PDF", "GPS", "DNA", "RNA",
 })
 
 _MAX = 2
@@ -81,20 +93,11 @@ def grammar_heuristic(text: str) -> Tuple[int, dict]:
             findings["missing_initial_cap"] = True
             findings["initial_cap_position"] = first_pos
 
-    # Rule 3 — improper ALL-CAPS mid-sentence (Option A).
-    sentence_starts = set()
-    i = 0
-    while i < len(body) and body[i].isspace():
-        i += 1
-    sentence_starts.add(i)
-    for m in re.finditer(r"[.!?]+\s+", body):
-        j = m.end()
-        while j < len(body) and body[j].isspace():
-            j += 1
-        sentence_starts.add(j)
+    # Rule 3 — improper ALL-CAPS anywhere in the response (Option B).
+    # Sentence-start exemption removed: ALL-CAPS at sentence start (e.g.
+    # "MAJOR athletic events…") is just as wrong as mid-sentence ALL-CAPS
+    # in formal writing. Legitimate abbreviations are allowlisted above.
     for m in re.finditer(r"\b[A-Z]{3,}\b", body):
-        if m.start() in sentence_starts:
-            continue
         if m.group() in _ABBREV_ALLOWLIST:
             continue
         findings["improper_caps"].append(m.group())
