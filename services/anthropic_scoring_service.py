@@ -45,11 +45,23 @@ CONTENT (0–4):
 
 GRAMMAR + SPELLING (0–2) — combined score. Two-step process:
 
-  STEP 1 — Base grammar score (0–2), by COMMUNICATION IMPACT:
-    2 = Has correct grammatical structure. Stylistic choppiness or stacked conjunctions are fine if the sentence is grammatically valid.
-    1 = Contains grammatical errors (subject–verb disagreement, wrong tense, broken clause), but the meaning is still clear.
-    0 = Has defective grammatical structure which could hinder communication — the reader has to re-parse or guess at meaning.
-  Important: a run-on sentence is NOT automatically a 0 or 1. SWT is a single-sentence task, so long sentences with multiple clauses are expected and normal. Only mark down when an actual grammatical rule is broken or comprehension is impeded.
+  STEP 1 — Base grammar score (0–2). Score by COMMUNICATION IMPACT only.
+
+    WORKED EXAMPLES — calibrate against these:
+
+    Score 2/2 (long compound, valid):
+    "While major events worldwide are joining a climate network, the sporting events are the latest participants, and are important for inspiring global action, said Steiner, and organizers say they will spend one billion on infrastructure."
+    → Compound, multiple 'and', mid-sentence attribution. Grammatically valid. Score: 2.
+
+    Score 1/2 (real grammatical error):
+    "The organizers says they will spent one billion on infrastructure that are important."
+    → Subject-verb disagreement (organizers says, that are), wrong tense (spent for spend). Score: 1.
+
+    Score 0/2 (defective):
+    "While events striving carbon, the participants joining important inspire global, organizer say spend billion."
+    → Missing verbs/articles, broken clauses, reader cannot parse. Score: 0.
+
+  The "long sentence with many 'and's" pattern is NORMAL for SWT and is NOT a deduction trigger.
 
   STEP 2 — Spelling deduction (applied to the base score, floored at 0):
     0 spelling errors → no deduction
@@ -57,7 +69,7 @@ GRAMMAR + SPELLING (0–2) — combined score. Two-step process:
     2 or more         → grammar score = 0 regardless of base
 
   Final grammar score = max(0, base − spelling_deduction).
-  In the reasoning, state the spelling-error count explicitly so the deduction is auditable.
+  In the reasoning, name the specific violation type (or state "no violations") and the spelling-error count.
 
 VOCABULARY (0–2) — score by APPROPRIATENESS, not paraphrasing:
   2 = Has appropriate choice of words. The vocabulary fits the meaning.
@@ -123,6 +135,7 @@ def score_swt_subscores_with_claude(passage: str, user_text: str) -> dict:
         try:
             response = _client.messages.create(
                 model=_MODEL,
+                temperature=0,
                 max_tokens=600,
                 system=[
                     {
@@ -354,6 +367,7 @@ def score_grammar_and_vocab_with_claude(passage: str, user_text: str) -> dict:
         try:
             response = _client.messages.create(
                 model=_MODEL,
+                temperature=0,
                 max_tokens=600,
                 system=[
                     {
@@ -476,10 +490,23 @@ DEVELOPMENT, STRUCTURE & COHERENCE (0–6):
   1 = Very disorganised; ideas don't connect.
   0 = No discernible structure; incoherent.
 
-GRAMMAR (0–2):
-  2 = Correct grammatical structures throughout; subject–verb agreement, tense, articles, prepositions all accurate.
-  1 = Mostly correct with one or two errors that don't impede meaning.
-  0 = Multiple errors, or any error that obscures meaning.
+GRAMMAR (0–2). Score by COMMUNICATION IMPACT only.
+
+  WORKED EXAMPLES — calibrate against these:
+
+  Score 2/2 (varied, valid):
+  "While technology has transformed modern education, some argue that traditional methods remain essential, and many institutions are now adopting blended approaches that combine both. This shift, which has accelerated since 2020, demonstrates that pedagogical evolution requires balancing innovation with proven practice."
+  → Subordination, embedded clauses, varied structure, multiple 'and' connectors. All grammatically valid. Score: 2.
+
+  Score 1/2 (real grammatical error):
+  "Technology has transform modern education, and many institution is adopting new approach. This shift demonstrate that evolution require balance."
+  → Subject-verb disagreement (institution is, shift demonstrate, evolution require), wrong tense (has transform), missing articles. Score: 1.
+
+  Score 0/2 (defective):
+  "Technology transforming education, institution adopting approach, shift evolution requiring balance traditional innovation."
+  → Missing verbs, broken clauses, reader cannot parse. Score: 0.
+
+  Long sentences with subordination and multiple 'and' connectors are NORMAL essay style and NOT a deduction trigger.
 
 GENERAL LINGUISTIC RANGE (0–6) — Complexity and flexibility of sentence structures:
   6 = Excellent range — complex and varied sentence structures (subordination, embedding, varied connectors); confidently controlled.
@@ -556,6 +583,7 @@ def score_we_subscores_with_claude(prompt: str, user_text: str) -> dict:
         try:
             response = _client.messages.create(
                 model=_MODEL,
+                temperature=0,
                 max_tokens=1500,
                 system=[
                     {
@@ -684,10 +712,23 @@ CONTENT (0–4):
   1 = Mentions only a tangential or secondary aspect of the lecture.
   0 = Completely off-topic, irrelevant, or fails to address the lecture content.
 
-GRAMMAR (0–2):
-  2 = Correct grammatical structures throughout (subject–verb agreement, tense, articles, prepositions).
-  1 = One or two minor errors that don't impede meaning.
-  0 = Multiple errors, or any error that obscures meaning.
+GRAMMAR (0–2). Score by COMMUNICATION IMPACT only.
+
+  WORKED EXAMPLES — calibrate against these:
+
+  Score 2/2 (long compound, valid):
+  "The lecturer explains that climate change affects polar regions through melting ice, rising sea levels, and disrupted ecosystems, and notes that adaptation strategies must address both mitigation and resilience."
+  → Compound, multiple 'and', coordinated clauses. Grammatically valid. Score: 2.
+
+  Score 1/2 (real grammatical error):
+  "The lecturer explain that climate change affect polar region and adaptation strategies must addresses mitigation."
+  → Subject-verb disagreement (lecturer explain, change affect, strategies addresses), missing articles. Score: 1.
+
+  Score 0/2 (defective):
+  "Lecturer explaining climate affect polar, adaptation strategies addressing mitigation resilience."
+  → Missing verbs/articles, broken clauses, reader cannot parse. Score: 0.
+
+  The "long sentence with many 'and's" pattern is NORMAL for SST and is NOT a deduction trigger.
 
 VOCABULARY (0–2):
   2 = Appropriate, varied academic vocabulary; precise word choice.
@@ -750,6 +791,7 @@ def score_sst_subscores_with_claude(reference: str, user_text: str) -> dict:
         try:
             response = _client.messages.create(
                 model=_MODEL,
+                temperature=0,
                 max_tokens=800,
                 system=[
                     {
