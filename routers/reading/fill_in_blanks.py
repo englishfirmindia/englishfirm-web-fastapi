@@ -20,6 +20,9 @@ from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
 from services.scoring import get_scorer
 from schemas.submit_requests import AnswersDictSubmitRequest
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/reading/fill-in-blanks", tags=["Reading - Fill in the Blanks"])
 
@@ -137,14 +140,27 @@ def submit(
         raise HTTPException(status_code=404, detail="Question not found")
 
     scorer = get_scorer("reading_drag_and_drop")
-    result = scorer.score(
-        question_id=question_id,
-        session_id=session_id,
-        answer={
-            "user_answers": user_answers,
-            "evaluation_json": question.evaluation.evaluation_json,
-        },
-    )
+    try:
+        result = scorer.score(
+            question_id=question_id,
+            session_id=session_id,
+            answer={
+                "user_answers": user_answers,
+                "evaluation_json": question.evaluation.evaluation_json,
+            },
+        )
+    except Exception as e:
+        log.error(
+            "[Reading FIB] scoring failed q=%d sid=%s err=%s: %s",
+            question_id, session_id, type(e).__name__, e,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "scoring_failed",
+                "message": "We couldn't score your answer. Please try again.",
+            },
+        )
     mark_submitted(session_id, question_id, result.pte_score)
     persisted_result = dict(result.breakdown or {})
     if req.time_on_question_seconds is not None:

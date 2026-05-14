@@ -10,6 +10,9 @@ from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
 from services.scoring import get_scorer
 from schemas.submit_requests import SequenceSubmitRequest
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/reading/reorder-paragraphs", tags=["Reading - Reorder Paragraphs"])
 
@@ -141,14 +144,27 @@ def submit(
     ]
 
     scorer = get_scorer("reorder_paragraphs")
-    result = scorer.score(
-        question_id=question_id,
-        session_id=session_id,
-        answer={
-            "user_sequence": user_sequence_ids,
-            "evaluation_json": question.evaluation.evaluation_json,
-        },
-    )
+    try:
+        result = scorer.score(
+            question_id=question_id,
+            session_id=session_id,
+            answer={
+                "user_sequence": user_sequence_ids,
+                "evaluation_json": question.evaluation.evaluation_json,
+            },
+        )
+    except Exception as e:
+        log.error(
+            "[Reading Reorder] scoring failed q=%d sid=%s err=%s: %s",
+            question_id, session_id, type(e).__name__, e,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "scoring_failed",
+                "message": "We couldn't score your answer. Please try again.",
+            },
+        )
     eval_json = question.evaluation.evaluation_json or {}
     correct_answers = eval_json.get("correctAnswers", {}) or {}
     correct_sequence = list(correct_answers.get("correctSequence", []) or [])

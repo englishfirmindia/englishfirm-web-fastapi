@@ -10,6 +10,9 @@ from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
 from services.scoring import get_scorer
 from schemas.submit_requests import SingleOptionSubmitRequest
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/reading/mcs", tags=["Reading - MCS"])
 
@@ -123,14 +126,30 @@ def submit(
         raise HTTPException(status_code=404, detail="Question not found")
 
     scorer = get_scorer("reading_mcs")
-    result = scorer.score(
-        question_id=question_id,
-        session_id=session_id,
-        answer={
-            "selected_option": selected_option,
-            "evaluation_json": question.evaluation.evaluation_json,
-        },
-    )
+    try:
+        result = scorer.score(
+            question_id=question_id,
+            session_id=session_id,
+            answer={
+                "selected_option": selected_option,
+                "evaluation_json": question.evaluation.evaluation_json,
+            },
+        )
+    except Exception as e:
+        # Malformed evaluation_json or any other scorer crash. Surface a
+        # clean 500 instead of leaking the traceback; the answer is NOT
+        # persisted and NOT marked submitted, so the user can retry.
+        log.error(
+            "[Reading MCS] scoring failed q=%d sid=%s err=%s: %s",
+            question_id, session_id, type(e).__name__, e,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "scoring_failed",
+                "message": "We couldn't score your answer. Please try again.",
+            },
+        )
     mark_submitted(session_id, question_id, result.pte_score, question_type="reading_mcs")
 
     breakdown = result.breakdown or {}
