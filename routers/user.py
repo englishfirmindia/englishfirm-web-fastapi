@@ -56,11 +56,27 @@ def get_answered_questions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    query = db.query(UserQuestionAttempt.question_id).filter(
-        UserQuestionAttempt.user_id == current_user.id
+    """Question IDs the user has an actual recorded answer for.
+
+    Switched from user_question_attempts (UQA) → attempt_answers because
+    UQA records "ever touched" but never gets cleaned up, so old AA rows
+    that cascade-deleted with their parent PracticeAttempt leave UQA
+    entries with nothing behind them. That divergence was making the
+    practice list flag questions as "practiced ✓" — and the per-screen
+    restore path treat them as already-answered — even when
+    /user/last-answer/{qid} returned null on re-entry and the screen
+    fell back to a blank fresh question. Reading practice felt this
+    most (Nimisha had 69 UQA rows for reading_mcm but only 5 surviving
+    AA rows); speaking / writing / listening get the same correctness
+    benefit for any legacy ghosts.
+    """
+    query = (
+        db.query(AttemptAnswer.question_id)
+        .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
+        .filter(PracticeAttempt.user_id == current_user.id)
     )
     if question_type:
-        query = query.filter(UserQuestionAttempt.question_type == question_type)
+        query = query.filter(AttemptAnswer.question_type == question_type)
     ids = [row[0] for row in query.distinct().all()]
     return {"answered_question_ids": ids}
 
