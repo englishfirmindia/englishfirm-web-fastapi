@@ -98,40 +98,32 @@ def extract_key_points(transcript: str, question_type: str) -> dict:
         "Return a JSON array of strings only.\n\n"
         f"Text:\n{transcript}"
     ))
-    last_exc: Exception = RuntimeError("extract_key_points: no attempts made")
-    for attempt in range(1, 4):
-        try:
-            resp = _openai.chat.completions.create(
-                model=_LLM_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=500,
-                timeout=30,
-            )
-            raw = resp.choices[0].message.content.strip()
-            if raw.startswith("```"):
-                parts = raw.split("```")
-                raw = parts[1].lstrip("json").strip() if len(parts) > 1 else raw
-            result = json.loads(raw)
-            kp = result if isinstance(result, list) else []
-            return {"key_points": kp, "scored": True, "warning_code": None}
-        except _openai_module.AuthenticationError as exc:
-            log.error("[LLM] extract_key_points AuthenticationError: %s", exc)
-            return {
-                "key_points": [],
-                "scored": False,
-                "warning_code": "content_keypoints_unavailable",
-            }
-        except Exception as exc:
-            last_exc = exc
-            log.warning("[LLM] extract_key_points attempt=%d/3 failed: %s", attempt, exc)
-            if attempt < 3:
-                time.sleep(2)
-    log.error("[LLM] extract_key_points failed after 3 attempts: %s", last_exc)
+    # GPT primary → Claude backup. The prompts ask for a JSON array, not
+    # an object; the chain's `_strip_fences` handles either shape and the
+    # `isinstance(result, list)` check below stays the same.
+    from services.scoring.llm_chain import judge_json
+    out = judge_json(prompt, primary="gpt", backup="claude", max_tokens=500)
+    if out["data"] is None:
+        log.error("[LLM] extract_key_points: both providers failed for %s", question_type)
+        return {
+            "key_points": [],
+            "scored": False,
+            "warning_code": "content_keypoints_unavailable",
+        }
+    result = out["data"]
+    kp = result if isinstance(result, list) else []
+    log.info(
+        "[LLM] extract_key_points %s source=%s n=%d",
+        question_type, out["source"], len(kp),
+    )
     return {
-        "key_points": [],
-        "scored": False,
-        "warning_code": "content_keypoints_unavailable",
+        "key_points": kp,
+        "scored": True,
+        # On happy path warning is None; when backup scored we still set
+        # the audit field so trainer review can show which model produced
+        # the key points.
+        "warning_code": out["warning"],
+        "scored_by": out["source"],
     }
 
 
@@ -196,25 +188,35 @@ def score_content_with_llm(student_transcript: str, key_points: list, question_t
     }
     prompt = _prompts.get(question_type, _prompts["describe_image"])
 
-    try:
-        result = _call_llm(prompt)
-        score = max(0.0, min(100.0, float(result.get("score", 0))))
-        reasoning = (result.get("reasoning") or "").strip() or None
-        log.info("[LLM-CONTENT] %s score=%.1f reason=%s", question_type, score, reasoning or "")
-        return {
-            "score": score,
-            "scored": True,
-            "reasoning": reasoning,
-            "warning_code": None,
-        }
-    except Exception as e:
-        log.warning("[LLM-CONTENT] Fallback for %s: %s", question_type, e)
+    # GPT primary → Claude backup via the chain. If GPT exhausts retries,
+    # the same prompt is replayed against Claude Haiku 4.5; both providers
+    # failed → the caller receives scored=False + the unavailable warning,
+    # same as the legacy single-provider behaviour. Surfaces which model
+    # actually scored via `scored_by` for trainer review attribution.
+    from services.scoring.llm_chain import judge_json
+    out = judge_json(prompt, primary="gpt", backup="claude")
+    if out["data"] is None:
+        log.warning("[LLM-CONTENT] both providers failed for %s", question_type)
         return {
             "score": 0.0,
             "scored": False,
             "reasoning": None,
             "warning_code": "content_llm_unavailable",
         }
+    result = out["data"]
+    score = max(0.0, min(100.0, float(result.get("score", 0))))
+    reasoning = (result.get("reasoning") or "").strip() or None
+    log.info(
+        "[LLM-CONTENT] %s score=%.1f source=%s reason=%s",
+        question_type, score, out["source"], reasoning or "",
+    )
+    return {
+        "score": score,
+        "scored": True,
+        "reasoning": reasoning,
+        "warning_code": out["warning"],   # None on happy path, "primary_gpt_failed" on backup
+        "scored_by": out["source"],        # "gpt-4o-mini" or "claude-haiku-4-5"
+    }
 
 
 # ── SWT ───────────────────────────────────────────────────────────────────────

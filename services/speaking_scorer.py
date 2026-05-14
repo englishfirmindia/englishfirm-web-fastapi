@@ -831,6 +831,12 @@ def _score_speaking_v2(
                 code = kp_result.get("warning_code") or "content_keypoints_unavailable"
                 if code not in scoring_warnings:
                     scoring_warnings.append(code)
+            elif kp_result.get("warning_code"):
+                # Backup scored the key-points: still happy-path, but surface
+                # the audit trail so trainer review can see GPT was unreachable.
+                code = kp_result["warning_code"]
+                if code not in scoring_warnings:
+                    scoring_warnings.append(code)
         if key_points and transcript:
             from services.llm_content_scoring_service import score_content_with_llm
             llm_out = score_content_with_llm(transcript, key_points, task_type)
@@ -838,9 +844,15 @@ def _score_speaking_v2(
             if llm_out.get("scored"):
                 content_llm_scored = True
                 content_reasoning = llm_out.get("reasoning")
+                # Backup scored: still happy-path but flag for ops + trainer
+                # so the audit trail shows GPT was unreachable for this attempt.
+                if llm_out.get("warning_code"):
+                    code = llm_out["warning_code"]
+                    if code not in scoring_warnings:
+                        scoring_warnings.append(code)
             else:
-                # W8: LLM call failed — surface the warning so this 0 is
-                # distinguishable from a real off-topic 0.
+                # W8: both providers failed — surface the warning so this 0
+                # is distinguishable from a real off-topic 0.
                 code = llm_out.get("warning_code") or "content_llm_unavailable"
                 if code not in scoring_warnings:
                     scoring_warnings.append(code)
