@@ -1,10 +1,17 @@
 from typing import Optional
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 
 from db.database import get_db
-from db.models import User, UserQuestionAttempt, AttemptAnswer, PracticeAttempt
+from db.models import (
+    User,
+    UserQuestionAttempt,
+    AttemptAnswer,
+    PracticeAttempt,
+    QuestionFromApeuni,
+    QuestionEvaluationApeuni,
+)
 from core.dependencies import get_current_user
 
 router = APIRouter(prefix="/user", tags=["User"])
@@ -173,8 +180,101 @@ def get_evaluation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    from db.models import QuestionEvaluationApeuni
     ev = db.query(QuestionEvaluationApeuni).filter_by(question_id=question_id).first()
     if not ev:
         return None
     return {"evaluation_json": ev.evaluation_json}
+
+
+@router.get("/practice-attempts/by-session/{session_id}/answers")
+def get_practice_session_answers(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Per-question results for a practice attempt, looked up by session_id.
+
+    Powers the end-of-practice results screen — returns each answered
+    question with its content, the user's submission, the stored result
+    (score + breakdown + correct answer + time_on_question_seconds), and
+    the correctAnswers payload from the evaluation row so the UI can
+    render correct-answer overlays without a second round-trip per row.
+    """
+    attempt = (
+        db.query(PracticeAttempt)
+        .filter_by(session_id=session_id, user_id=current_user.id)
+        .first()
+    )
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Practice attempt not found")
+
+    answers = (
+        db.query(AttemptAnswer)
+        .filter_by(attempt_id=attempt.id)
+        .order_by(AttemptAnswer.submitted_at.asc().nullslast())
+        .all()
+    )
+    qids = [a.question_id for a in answers]
+    questions_by_id: dict = {}
+    evaluations_by_id: dict = {}
+    if qids:
+        for q in (
+            db.query(QuestionFromApeuni)
+            .filter(QuestionFromApeuni.question_id.in_(qids))
+            .all()
+        ):
+            questions_by_id[q.question_id] = q
+        for ev in (
+            db.query(QuestionEvaluationApeuni)
+            .filter(QuestionEvaluationApeuni.question_id.in_(qids))
+            .all()
+        ):
+            evaluations_by_id[ev.question_id] = ev
+
+    rows = []
+    for idx, a in enumerate(answers):
+        q = questions_by_id.get(a.question_id)
+        ev = evaluations_by_id.get(a.question_id)
+        rows.append(
+            {
+                "index": idx,
+                "question_id": a.question_id,
+                "question_type": a.question_type,
+                "score": a.score,
+                "scoring_status": a.scoring_status,
+                "user_answer_json": a.user_answer_json or {},
+                "result_json": a.result_json or {},
+                "submitted_at": (
+                    a.submitted_at.isoformat() if a.submitted_at else None
+                ),
+                "content_json": (q.content_json if q else {}) or {},
+                "title": (q.title if q else None),
+                "correct_answers": (
+                    ((ev.evaluation_json or {}).get("correctAnswers") or {})
+                    if ev else {}
+                ),
+            }
+        )
+
+    # Aggregate top-line stats. PTE average is over scored answers only;
+    # time-total uses the stopwatch field when present.
+    scored = [r["score"] for r in rows if isinstance(r["score"], int)]
+    avg_pte = round(sum(scored) / len(scored)) if scored else 0
+    total_time = sum(
+        int(r["result_json"].get("time_on_question_seconds") or 0) for r in rows
+    )
+
+    return {
+        "attempt_id": attempt.id,
+        "session_id": session_id,
+        "module": attempt.module,
+        "question_type": attempt.question_type,
+        "total_questions": attempt.total_questions,
+        "questions_answered": len(rows),
+        "started_at": (
+            attempt.started_at.isoformat() if attempt.started_at else None
+        ),
+        "average_pte": avg_pte,
+        "total_time_seconds": total_time,
+        "answers": rows,
+    }
