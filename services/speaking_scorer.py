@@ -788,8 +788,33 @@ def _score_speaking_v2(
     whisper = transcribe_with_whisper_words(audio_bytes)
     whisper_words = whisper.get("words", []) or []
     transcript = (whisper.get("transcript", "") or "").strip()
-    if not transcript and azure_free_transcript:
-        transcript = azure_free_transcript
+    whisper_fallback_used = False
+    if not transcript:
+        if azure_free_transcript:
+            transcript = azure_free_transcript
+            whisper_fallback_used = True
+        elif azure_words:
+            # RA / RS path: pronunciation_source is azure_assessment, so
+            # azure_free_transcript stays empty. We already paid for
+            # assess_pronunciation_with_timestamps which returns the
+            # recognised Word per element — reconstruct the transcript
+            # from that instead of leaving the user with content=0 just
+            # because Whisper hiccupped. Skip Omissions (words the user
+            # didn't say) since they have no spoken-side text.
+            reconstructed = " ".join(
+                (w.get("Word") or "").strip()
+                for w in azure_words
+                if w.get("ErrorType") != "Omission"
+                and (w.get("Word") or "").strip()
+            ).strip()
+            if reconstructed:
+                transcript = reconstructed
+                whisper_fallback_used = True
+                log.info(
+                    "[FALLBACK] axis=transcription primary=whisper backup=azure_assessment_words "
+                    "reason=whisper_empty q=%s type=%s len=%d",
+                    question_id, task_type, len(reconstructed),
+                )
 
     # ── Content score: strategy by cfg.content_method ──────────────────────
     # lcs_k2        — LCS recall + K-insertion dock vs reference (RA/RS).
@@ -811,6 +836,8 @@ def _score_speaking_v2(
     # a note ("content scoring temporarily unavailable") instead of letting
     # the user assume a real 0.
     scoring_warnings: list = []
+    if whisper_fallback_used:
+        scoring_warnings.append("primary_whisper_failed")
     is_correct = None
     if cfg.content_method == "lcs_k2" and ref_tokens:
         lcs_len, matched_idx = _lcs_with_matched_indices(ref_tokens, spoken_tokens)
