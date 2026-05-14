@@ -50,6 +50,19 @@ def get_dashboard(
     }
 
 
+# Question-type aliases — the FE and BE historically diverged on the
+# Reading FIB drag-drop name. Flutter ships `reading_fib` (route /practice/
+# reading-fib, HttpGenericPracticeApiService('reading_fib')), but the
+# fill_in_blanks.py submit handler persists AA rows with
+# `question_type='reading_drag_and_drop'`. Map both names to the same
+# bucket so /answered-questions returns the right set regardless of which
+# name the caller sends.
+_QUESTION_TYPE_ALIASES: dict[str, tuple[str, ...]] = {
+    "reading_fib": ("reading_fib", "reading_drag_and_drop"),
+    "reading_drag_and_drop": ("reading_fib", "reading_drag_and_drop"),
+}
+
+
 @router.get("/answered-questions")
 def get_answered_questions(
     question_type: Optional[str] = None,
@@ -69,6 +82,9 @@ def get_answered_questions(
     most (Nimisha had 69 UQA rows for reading_mcm but only 5 surviving
     AA rows); speaking / writing / listening get the same correctness
     benefit for any legacy ghosts.
+
+    `question_type` accepts both the Flutter screen's type string and
+    the backend's stored AA type — see _QUESTION_TYPE_ALIASES above.
     """
     query = (
         db.query(AttemptAnswer.question_id)
@@ -76,7 +92,8 @@ def get_answered_questions(
         .filter(PracticeAttempt.user_id == current_user.id)
     )
     if question_type:
-        query = query.filter(AttemptAnswer.question_type == question_type)
+        types = _QUESTION_TYPE_ALIASES.get(question_type, (question_type,))
+        query = query.filter(AttemptAnswer.question_type.in_(types))
     ids = [row[0] for row in query.distinct().all()]
     return {"answered_question_ids": ids}
 
