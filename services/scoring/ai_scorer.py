@@ -14,22 +14,86 @@ import re
 from .base import ScoringResult, ScoringStrategy, to_pte_score
 
 
+_BUMP_SYNONYMS_THRESHOLD = 4   # ≥ 4 synonym swaps qualifies for +1
+_BUMP_PHRASES_THRESHOLD  = 2   # OR ≥ 2 phrase rewrites qualifies for +1
+
+
 def _apply_content_bump(content_sub: dict, content_max: int) -> dict:
-    """Apply the content +1 generosity bump (gated by CONTENT_BUMP_ENABLED
-    and skipped when llm_content == 0 so off-topic floor still fires).
-    Preserves the original LLM score in `llm_score` for trainer audit.
-    Returns a new dict; never mutates the input."""
+    """Paraphrase-gated content bump.
+
+    The historical unconditional +1 was unfair to copy-paste submissions and
+    too stingy on light-rewording ones. Now the bump fires only when the LLM
+    reports meaningful paraphrasing effort against the source — either
+    ≥ _BUMP_SYNONYMS_THRESHOLD substantive synonym swaps OR
+    ≥ _BUMP_PHRASES_THRESHOLD multi-word phrase rewrites.
+
+    Still gated by CONTENT_BUMP_ENABLED and still skipped when content == 0
+    so the off-topic / verbatim-copy floor keeps firing. Preserves the
+    pre-bump LLM score in `llm_score` for trainer audit either way.
+    Returns a new dict; never mutates the input.
+    """
     from core.config import CONTENT_BUMP_ENABLED
     llm_score = float(content_sub.get("score", 0) or 0)
     if not CONTENT_BUMP_ENABLED or llm_score < 1:
         return content_sub
+
+    para = content_sub.get("paraphrasing") or {}
+    synonyms = int(para.get("synonyms_count") or 0)
+    phrases  = int(para.get("paraphrased_phrases_count") or 0)
+    qualifies = (synonyms >= _BUMP_SYNONYMS_THRESHOLD
+                 or phrases >= _BUMP_PHRASES_THRESHOLD)
+
+    if not qualifies:
+        out = dict(content_sub)
+        out["llm_score"] = llm_score
+        out["bump_applied"] = False
+        out["bump_reason"] = (
+            f"No bump — paraphrasing below threshold "
+            f"(synonyms={synonyms}, phrases={phrases})."
+        )
+        return out
+
     final = min(float(content_max), llm_score + 1.0)
     if final == llm_score:
-        return content_sub
+        return content_sub  # already at cap; nothing to bump
     out = dict(content_sub)
     out["score"] = final
     out["llm_score"] = llm_score
     out["bump_applied"] = True
+    out["bump_reason"] = (
+        f"+1 for paraphrasing — {synonyms} synonym(s), {phrases} phrase rewrite(s)."
+    )
+    return out
+
+
+def _apply_verbatim_copy_floor(content_sub: dict, passage: str, body: str,
+                                scoring_warnings: list) -> dict:
+    """If the student's text is a near-verbatim copy of the passage, force
+    content score to 0. Layered on top of the LLM's content rating because
+    the LLM is sometimes lenient on lifted submissions. Off-topic floor
+    downstream will then drop earned to 0 and PTE to 10.
+
+    Returns a new dict; never mutates the input. Always preserves the raw
+    LLM score in `llm_score` so the trainer audit reflects what the model
+    said before the floor fired.
+    """
+    from services.copy_detector import detect_verbatim_copy
+    is_copy, details = detect_verbatim_copy(passage or "", body or "")
+    if not is_copy:
+        return content_sub
+    out = dict(content_sub)
+    out["llm_score"] = float(content_sub.get("score", 0) or 0)
+    out["score"] = 0.0
+    out["verbatim_copy_detected"] = True
+    out["verbatim_copy_coverage_pct"] = details.get("coverage_pct")
+    pct = int(round((details.get("coverage_pct") or 0) * 100))
+    out["reasoning"] = (
+        f"Verbatim copy of the source detected — {pct}% of words sit inside "
+        f"verbatim {details.get('ngram_size')}-grams from the passage. "
+        f"Content floored to 0 per the PTE rubric."
+    )
+    if "verbatim_copy_detected" not in scoring_warnings:
+        scoring_warnings.append("verbatim_copy_detected")
     return out
 
 
@@ -384,6 +448,10 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
         f"Grammar: {grammar_reasoning}"
     )
 
+    # ── Verbatim-copy floor: force content=0 on near-verbatim copies. ─────
+    content_sub = _apply_verbatim_copy_floor(content_sub, prompt or "", body,
+                                             scoring_warnings)
+
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
     if llm_result.get("scored") and content_sub["score"] == 0:
         # Still build highlights for the student answer even on off-topic.
@@ -713,6 +781,11 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         f"{format_spelling_reasoning(spell_result.get('mistakes') or [])}"
     )
 
+    # ── Verbatim-copy floor (rarely fires for WE — prompt is short — but
+    # safe to apply uniformly). ───────────────────────────────────────────
+    content_sub = _apply_verbatim_copy_floor(content_sub, prompt or "", body,
+                                             scoring_warnings)
+
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
     if llm_result.get("scored") and content_sub["score"] == 0:
         from services.highlight_builder import build_highlights
@@ -1006,6 +1079,10 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         f"Spelling: {int(final_spelling)}/{spell_max}. "
         f"{format_spelling_reasoning(spell_result.get('mistakes') or [])}"
     )
+
+    # ── Verbatim-copy floor against the spoken-text transcript. ──────────
+    content_sub = _apply_verbatim_copy_floor(content_sub, prompt or "", body,
+                                             scoring_warnings)
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ──────────────
     if llm_result.get("scored") and content_sub["score"] == 0:

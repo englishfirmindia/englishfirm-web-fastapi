@@ -67,11 +67,22 @@ Important: PTE demands "appropriate choice of words" for vocabulary. Using origi
 
 For each sub-score, give the integer score AND a one-sentence reasoning that cites specific evidence (a word, an error, an aspect of the response). Keep reasoning under 25 words. Be honest about errors — students rely on the feedback.
 
+PARAPHRASING AUDIT (informational, not a sub-score):
+  Also count the student's paraphrasing effort vs the passage:
+    synonyms_count — substantive content words (nouns/verbs/adjectives/adverbs) from the passage that the student replaced with synonyms. Skip function words. Each distinct swap counts at most once.
+    paraphrased_phrases_count — multi-word phrases (2+ content words) from the passage that the student restructured. Single-word swaps don't count here.
+    examples — up to 5 short "src → user" audit strings.
+
 Return JSON only, in this exact shape:
 {
   "content":    {"score": <int 0-4>, "reasoning": "<one sentence>"},
   "grammar":    {"score": <int 0-2>, "reasoning": "<one sentence>"},
-  "vocabulary": {"score": <int 0-2>, "reasoning": "<one sentence>"}
+  "vocabulary": {"score": <int 0-2>, "reasoning": "<one sentence>"},
+  "paraphrasing": {
+    "synonyms_count": <int>,
+    "paraphrased_phrases_count": <int>,
+    "examples": [<short strings>]
+  }
 }
 """
 
@@ -176,7 +187,11 @@ def score_swt_subscores_with_claude(passage: str, user_text: str) -> dict:
             )
 
             return {
-                "content": {"score": content_score, "reasoning": content_reasoning},
+                "content": {
+                    "score": content_score,
+                    "reasoning": content_reasoning,
+                    "paraphrasing": _parse_paraphrasing_block(parsed),
+                },
                 "grammar": {"score": grammar_score, "reasoning": grammar_reasoning},
                 "vocabulary": {"score": vocab_score, "reasoning": vocab_reasoning},
                 "scored": True,
@@ -222,6 +237,26 @@ def _failure(warning_code: str, reason: str = "") -> dict:
         "vocabulary": {"score": 0.0, "reasoning": None},
         "scored": False,
         "warning_code": warning_code,
+    }
+
+
+def _parse_paraphrasing_block(parsed: dict) -> dict:
+    """Pull the paraphrasing-audit block off the Claude response. Mirrors
+    services.openai_scoring_service._parse_paraphrasing."""
+    p = parsed.get("paraphrasing") or {}
+    try:
+        synonyms = int(p.get("synonyms_count") or 0)
+    except (TypeError, ValueError):
+        synonyms = 0
+    try:
+        phrases = int(p.get("paraphrased_phrases_count") or 0)
+    except (TypeError, ValueError):
+        phrases = 0
+    examples = [str(x) for x in (p.get("examples") or []) if x][:5]
+    return {
+        "synonyms_count": max(0, synonyms),
+        "paraphrased_phrases_count": max(0, phrases),
+        "examples": examples,
     }
 
 
@@ -430,6 +465,12 @@ SPELLING (0–2):
 
 For each sub-score, give the integer score AND a one-sentence reasoning that cites specific evidence (a sentence pattern, a word, an error, a paragraph). Keep reasoning under 30 words. Be honest about errors — students rely on the feedback.
 
+PARAPHRASING AUDIT (informational, not a sub-score):
+  Also count the student's paraphrasing vs the essay PROMPT (and common-knowledge phrasing of the topic):
+    synonyms_count — substantive content words from the prompt/topic that the student replaced with synonyms.
+    paraphrased_phrases_count — multi-word phrases the student restructured rather than echoing verbatim.
+    examples — up to 5 short "src → user" audit strings.
+
 Return JSON only, in this exact shape:
 {
   "content":    {"score": <int 0-6>, "reasoning": "<one sentence>"},
@@ -437,7 +478,12 @@ Return JSON only, in this exact shape:
   "grammar":    {"score": <int 0-2>, "reasoning": "<one sentence>"},
   "glr":        {"score": <int 0-6>, "reasoning": "<one sentence>"},
   "vocabulary": {"score": <int 0-2>, "reasoning": "<one sentence>"},
-  "spelling":   {"score": <int 0-2>, "reasoning": "<one sentence>"}
+  "spelling":   {"score": <int 0-2>, "reasoning": "<one sentence>"},
+  "paraphrasing": {
+    "synonyms_count": <int>,
+    "paraphrased_phrases_count": <int>,
+    "examples": [<short strings>]
+  }
 }
 """
 
@@ -536,6 +582,7 @@ def score_we_subscores_with_claude(prompt: str, user_text: str) -> dict:
                 cache_read, cache_write,
             )
 
+            content_sub["paraphrasing"] = _parse_paraphrasing_block(parsed)
             return {
                 "content":    content_sub,
                 "dsc":        dsc_sub,
@@ -617,12 +664,23 @@ SPELLING (0–2):
 
 For each sub-score, give the integer score AND a one-sentence reasoning that cites specific evidence (a word, an error, an aspect of the response). Keep reasoning under 25 words. Be honest about errors — students rely on the feedback.
 
+PARAPHRASING AUDIT (informational, not a sub-score):
+  Also count the student's paraphrasing effort vs the spoken-text REFERENCE:
+    synonyms_count — substantive content words from the reference that the student replaced with synonyms.
+    paraphrased_phrases_count — multi-word phrases the student restructured.
+    examples — up to 5 short "src → user" audit strings.
+
 Return JSON only, in this exact shape:
 {
   "content":    {"score": <int 0-4>, "reasoning": "<one sentence>"},
   "grammar":    {"score": <int 0-2>, "reasoning": "<one sentence>"},
   "vocabulary": {"score": <int 0-2>, "reasoning": "<one sentence>"},
-  "spelling":   {"score": <int 0-2>, "reasoning": "<one sentence>"}
+  "spelling":   {"score": <int 0-2>, "reasoning": "<one sentence>"},
+  "paraphrasing": {
+    "synonyms_count": <int>,
+    "paraphrased_phrases_count": <int>,
+    "examples": [<short strings>]
+  }
 }
 """
 
@@ -716,6 +774,7 @@ def score_sst_subscores_with_claude(reference: str, user_text: str) -> dict:
                 cache_read, cache_write,
             )
 
+            content_sub["paraphrasing"] = _parse_paraphrasing_block(parsed)
             return {
                 "content":    content_sub,
                 "grammar":    grammar_sub,

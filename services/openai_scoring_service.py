@@ -97,6 +97,28 @@ _SPELLING_DEDUCTION_RULES = """SPELLING (0–2) — DEDUCTION-BASED, per-typo:
 
   ALSO populate `mistake_quotes`: a JSON array of each misspelled word as it appears verbatim in the student response (case-sensitive, exact characters). Empty list if no misspellings."""
 
+_PARAPHRASING_AUDIT_RULES = """PARAPHRASING AUDIT (not a sub-score — informational only):
+
+  Separately count the student's paraphrasing effort vs the source passage:
+
+    synonyms_count            — number of SUBSTANTIVE content words (nouns,
+      verbs, adjectives, adverbs) from the passage that the student replaced
+      with a clear synonym or near-synonym in their submission. Each distinct
+      word swap counts at most once. DO NOT count function words (and, the,
+      of, to, a, in, on, etc.).
+
+    paraphrased_phrases_count — number of multi-word phrases (2+ content
+      words) from the passage that the student restructured into their own
+      wording. Each distinct phrase rewrite counts at most once. A single
+      one-word swap is NOT a phrase rewrite — that belongs to synonyms_count.
+
+    examples — up to 5 short audit strings of the strongest cases. Format
+      "src → user". If the student copied verbatim, these counts are 0.
+
+  Count generously when the rewording is genuine; honestly when it isn't.
+  This is a paraphrasing-effort audit, not a score."""
+
+
 _VOCABULARY_APPROPRIATENESS_RULES = """VOCABULARY (0–2) — score by APPROPRIATENESS, not paraphrasing:
   2 = Has appropriate choice of words. The vocabulary fits the meaning.
   1 = Contains lexical errors (wrong word for context, awkward collocation), but with no hindrance to communication.
@@ -138,6 +160,8 @@ GRAMMAR + SPELLING (0–2) — COMBINED sub-score, computed as min(grammar_remai
 
 {_VOCABULARY_APPROPRIATENESS_RULES}
 
+{_PARAPHRASING_AUDIT_RULES}
+
 Return JSON only, in this exact shape:
 {{
   "content":    {{"score": <number 0-4>, "reasoning": "<one sentence>"}},
@@ -147,7 +171,12 @@ Return JSON only, in this exact shape:
     "grammar_mistake_quotes":  [<exact verbatim substrings flagged as grammar>],
     "spelling_mistake_quotes": [<exact verbatim misspelled words>]
   }},
-  "vocabulary": {{"score": <number 0-2>, "reasoning": "<one sentence>"}}
+  "vocabulary": {{"score": <number 0-2>, "reasoning": "<one sentence>"}},
+  "paraphrasing": {{
+    "synonyms_count": <int>,
+    "paraphrased_phrases_count": <int>,
+    "examples": [<short audit strings>]
+  }}
 }}
 """
 
@@ -192,6 +221,13 @@ GENERAL LINGUISTIC RANGE (GLR, 0–6) — Complexity and flexibility of sentence
 
 {_SPELLING_DEDUCTION_RULES}
 
+{_PARAPHRASING_AUDIT_RULES}
+
+For WE, "passage" means the essay PROMPT (a short topic question). Count
+synonyms / phrase rewrites against the wording of that prompt and against
+common-knowledge phrasings of the topic — generously when the student is
+genuinely rewording, honestly when they aren't.
+
 Return JSON only, in this exact shape:
 {{
   "content":    {{"score": <number 0-6>, "reasoning": "<one sentence>"}},
@@ -207,6 +243,11 @@ Return JSON only, in this exact shape:
     "score": <number 0-2>,
     "reasoning": "spelling=M [...] -> spelling_remaining=Y",
     "mistake_quotes": [<exact verbatim misspelled words>]
+  }},
+  "paraphrasing": {{
+    "synonyms_count": <int>,
+    "paraphrased_phrases_count": <int>,
+    "examples": [<short audit strings>]
   }}
 }}
 """
@@ -230,6 +271,11 @@ CONTENT (0–4):
 
 {_SPELLING_DEDUCTION_RULES}
 
+{_PARAPHRASING_AUDIT_RULES}
+
+For SST, "passage" means the spoken-text TRANSCRIPT supplied to you. Count
+synonyms and phrase rewrites against the transcript wording.
+
 Return JSON only, in this exact shape:
 {{
   "content":    {{"score": <number 0-4>, "reasoning": "<one sentence>"}},
@@ -243,6 +289,11 @@ Return JSON only, in this exact shape:
     "score": <number 0-2>,
     "reasoning": "spelling=M [...] -> spelling_remaining=Y",
     "mistake_quotes": [<exact verbatim misspelled words>]
+  }},
+  "paraphrasing": {{
+    "synonyms_count": <int>,
+    "paraphrased_phrases_count": <int>,
+    "examples": [<short audit strings>]
   }}
 }}
 """
@@ -280,8 +331,10 @@ def score_swt_subscores_with_openai(passage: str, user_text: str) -> dict:
     parsed = _call_openai(_SWT_SYSTEM_PROMPT, user_block, label="SWT")
     if parsed is None:
         return _swt_failure("content_llm_unavailable", reason="gpt-5-nano failed after retries")
+    content_sub = _parse_sub(parsed, "content", 4)
+    content_sub["paraphrasing"] = _parse_paraphrasing(parsed)
     return {
-        "content":    _parse_sub(parsed, "content", 4),
+        "content":    content_sub,
         "grammar":    _parse_sub(parsed, "grammar", 2),
         "vocabulary": _parse_sub(parsed, "vocabulary", 2),
         "scored": True,
@@ -311,8 +364,10 @@ def score_we_subscores_with_openai(prompt: str, user_text: str) -> dict:
     parsed = _call_openai(_WE_SYSTEM_PROMPT, user_block, label="WE")
     if parsed is None:
         return _we_failure("content_llm_unavailable", reason="gpt-5-nano failed after retries")
+    content_sub = _parse_sub(parsed, "content", 6)
+    content_sub["paraphrasing"] = _parse_paraphrasing(parsed)
     return {
-        "content":    _parse_sub(parsed, "content", 6),
+        "content":    content_sub,
         "dsc":        _parse_sub(parsed, "dsc", 6),
         "grammar":    _parse_sub(parsed, "grammar", 2),
         "glr":        _parse_sub(parsed, "glr", 6),
@@ -342,8 +397,10 @@ def score_sst_subscores_with_openai(reference: str, user_text: str) -> dict:
     parsed = _call_openai(_SST_SYSTEM_PROMPT, user_block, label="SST")
     if parsed is None:
         return _sst_failure("content_llm_unavailable", reason="gpt-5-nano failed after retries")
+    content_sub = _parse_sub(parsed, "content", 4)
+    content_sub["paraphrasing"] = _parse_paraphrasing(parsed)
     return {
-        "content":    _parse_sub(parsed, "content", 4),
+        "content":    content_sub,
         "grammar":    _parse_sub(parsed, "grammar", 2),
         "vocabulary": _parse_sub(parsed, "vocabulary", 2),
         "spelling":   _parse_sub(parsed, "spelling", 2),
@@ -451,6 +508,26 @@ def _parse_sub(parsed: dict, key: str, max_value: int) -> dict:
         if isinstance(v, list):
             out[k] = [str(x) for x in v if x]
     return out
+
+
+def _parse_paraphrasing(parsed: dict) -> dict:
+    """Pull the paraphrasing-audit block off the LLM response. Always returns
+    a dict with zeroed defaults so downstream code can read counts safely."""
+    p = parsed.get("paraphrasing") or {}
+    try:
+        synonyms = int(p.get("synonyms_count") or 0)
+    except (TypeError, ValueError):
+        synonyms = 0
+    try:
+        phrases = int(p.get("paraphrased_phrases_count") or 0)
+    except (TypeError, ValueError):
+        phrases = 0
+    examples = [str(x) for x in (p.get("examples") or []) if x][:5]
+    return {
+        "synonyms_count": max(0, synonyms),
+        "paraphrased_phrases_count": max(0, phrases),
+        "examples": examples,
+    }
 
 
 def _swt_failure(warning_code: str, reason: str = "") -> dict:
