@@ -80,9 +80,13 @@ def grammar_heuristic(text: str) -> Tuple[int, dict]:
     if not body.strip():
         return 0, findings
 
-    # Rule 1 — count extras beyond a single space within any run of 2+ spaces.
+    # Rule 1 — count each RUN of 2+ consecutive spaces as one occurrence,
+    # regardless of how many extra characters are in the run. "ab    cd"
+    # (4 spaces) and "ab  cd" (2 spaces) both deduct 1. Keeps the penalty
+    # proportional to the number of locations the student needs to fix, not
+    # to the length of any single offending run.
     for m in re.finditer(r" {2,}", body):
-        findings["extra_spaces"] += len(m.group()) - 1
+        findings["extra_spaces"] += 1
         findings["extra_space_ranges"].append((m.start(), m.end()))
 
     # Rule 2 — first non-whitespace character must be uppercase.
