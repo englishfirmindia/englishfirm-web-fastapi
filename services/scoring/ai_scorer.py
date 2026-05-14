@@ -66,35 +66,13 @@ def _apply_content_bump(content_sub: dict, content_max: int) -> dict:
     return out
 
 
-def _apply_verbatim_copy_floor(content_sub: dict, passage: str, body: str,
-                                scoring_warnings: list) -> dict:
-    """If the student's text is a near-verbatim copy of the passage, force
-    content score to 0. Layered on top of the LLM's content rating because
-    the LLM is sometimes lenient on lifted submissions. Off-topic floor
-    downstream will then drop earned to 0 and PTE to 10.
-
-    Returns a new dict; never mutates the input. Always preserves the raw
-    LLM score in `llm_score` so the trainer audit reflects what the model
-    said before the floor fired.
-    """
-    from services.copy_detector import detect_verbatim_copy
-    is_copy, details = detect_verbatim_copy(passage or "", body or "")
-    if not is_copy:
-        return content_sub
-    out = dict(content_sub)
-    out["llm_score"] = float(content_sub.get("score", 0) or 0)
-    out["score"] = 0.0
-    out["verbatim_copy_detected"] = True
-    out["verbatim_copy_coverage_pct"] = details.get("coverage_pct")
-    pct = int(round((details.get("coverage_pct") or 0) * 100))
-    out["reasoning"] = (
-        f"Verbatim copy of the source detected — {pct}% of words sit inside "
-        f"verbatim {details.get('ngram_size')}-grams from the passage. "
-        f"Content floored to 0 per the PTE rubric."
-    )
-    if "verbatim_copy_detected" not in scoring_warnings:
-        scoring_warnings.append("verbatim_copy_detected")
-    return out
+# NOTE: _apply_verbatim_copy_floor() lived here briefly. It was a deterministic
+# guard that floored Content to 0 when ≥70% of the student's words sat inside
+# verbatim 6-grams from the passage. Removed by product call — the LLM rubric
+# already covers near-verbatim copies, and the 70% threshold was creating
+# false-positive PTE 10s on submissions that were heavily quoted but
+# legitimate paraphrases. The detector module (services/copy_detector.py)
+# is kept around in case we want to bring this back behind a soft warning.
 
 
 def _split_sentences(text: str) -> list:
@@ -332,17 +310,16 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Three calls in parallel: nano (full SWT), Claude grammar judge,
-    # hybrid spelling check. Wall-clock = max of the three (~2s) instead of
-    # sum (~3.5s). Grammar uses Claude (catches issues nano misses under
-    # minimal reasoning); content + vocabulary stay on nano. ─────────────
+    # ── Three calls in parallel: nano (full SWT, used for content only),
+    # Claude grammar+vocab judge (overrides nano on both sub-scores),
+    # hybrid spelling check. Wall-clock = max of the three (~2s). ─────────
     from concurrent.futures import ThreadPoolExecutor
     from services.openai_scoring_service import score_swt_subscores_with_openai
-    from services.anthropic_scoring_service import score_grammar_only_with_claude
+    from services.anthropic_scoring_service import score_grammar_and_vocab_with_claude
     from services.spelling_checker import check_spelling, format_spelling_reasoning
 
     scoring_warnings: list = []
-    scorer_label = "nano(content+vocab)+claude(grammar)+hybrid(spell)"
+    scorer_label = "nano(content)+claude(grammar+vocab)+hybrid(spell)"
 
     def _run_nano():
         try:
@@ -352,23 +329,23 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
             get_logger(__name__).error(f"[SWT] OpenAI call raised unexpectedly: {e}")
             return {"scored": False, "warning_code": "content_llm_unavailable"}
 
-    def _run_claude_grammar():
+    def _run_claude_grammar_vocab():
         try:
-            return score_grammar_only_with_claude(prompt or '', body)
+            return score_grammar_and_vocab_with_claude(prompt or '', body)
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[SWT] Claude grammar raised unexpectedly: {e}")
-            return {"scored": False, "warning_code": "grammar_claude_unavailable"}
+            get_logger(__name__).error(f"[SWT] Claude grammar+vocab raised unexpectedly: {e}")
+            return {"scored": False, "warning_code": "grammar_vocab_claude_unavailable"}
 
     def _run_spell():
         return check_spelling(body, prompt or "")
 
     with ThreadPoolExecutor(max_workers=3) as _ex:
         f_llm = _ex.submit(_run_nano)
-        f_gram = _ex.submit(_run_claude_grammar)
+        f_gv = _ex.submit(_run_claude_grammar_vocab)
         f_spell = _ex.submit(_run_spell)
         llm_result = f_llm.result()
-        gram_result = f_gram.result()
+        gv_result = f_gv.result()
         spell_result = f_spell.result()
 
     # Nano fallback chain: if nano failed, fall back to Claude full SWT.
@@ -398,24 +375,34 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
         grammar_sub    = llm_result["grammar"]
         vocabulary_sub = llm_result["vocabulary"]
 
-    # Override grammar with Claude's grammar-only judgment when available.
+    # Override grammar + vocabulary with Claude's grammar+vocab judgment
+    # when available. Preserves nano scores in audit fields.
     nano_grammar_score = float(grammar_sub.get("score", 0) or 0)
-    if gram_result.get("scored"):
-        cg = gram_result["grammar"]
+    nano_vocab_score = float(vocabulary_sub.get("score", 0) or 0)
+    if gv_result.get("scored"):
+        cg = gv_result["grammar"]
+        cv = gv_result["vocabulary"]
         grammar_sub = dict(grammar_sub)
         grammar_sub["nano_grammar_score"] = nano_grammar_score
         grammar_sub["score"] = float(cg.get("score", 0) or 0)
         grammar_sub["reasoning"] = cg.get("reasoning") or grammar_sub.get("reasoning")
-        # Unify mistake-quote key for highlight builder (SWT legacy key kept too).
         cg_quotes = list(cg.get("mistake_quotes") or [])
         grammar_sub["mistake_quotes"] = cg_quotes
         grammar_sub["grammar_mistake_quotes"] = cg_quotes
         grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
+
+        vocabulary_sub = dict(vocabulary_sub)
+        vocabulary_sub["nano_vocab_score"] = nano_vocab_score
+        vocabulary_sub["score"] = float(cv.get("score", 0) or 0)
+        vocabulary_sub["reasoning"] = cv.get("reasoning") or vocabulary_sub.get("reasoning")
+        vocabulary_sub["vocab_scorer"] = "claude-haiku-4-5"
     else:
-        if gram_result.get("warning_code"):
-            scoring_warnings.append(gram_result["warning_code"])
+        if gv_result.get("warning_code"):
+            scoring_warnings.append(gv_result["warning_code"])
         grammar_sub = dict(grammar_sub)
         grammar_sub["grammar_scorer"] = "nano-fallback"
+        vocabulary_sub = dict(vocabulary_sub)
+        vocabulary_sub["vocab_scorer"] = "nano-fallback"
 
     # ── 3-way floor on Grammar & Spelling: min(heuristic, grammar_score,
     # spelling_remaining). The heuristic catches deterministic surface bugs
@@ -448,11 +435,8 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
         f"Grammar: {grammar_reasoning}"
     )
 
-    # ── Verbatim-copy floor: force content=0 on near-verbatim copies. ─────
-    content_sub = _apply_verbatim_copy_floor(content_sub, prompt or "", body,
-                                             scoring_warnings)
-
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
+    # (verbatim-copy floor removed — rely on LLM rubric to flag copies.)
     if llm_result.get("scored") and content_sub["score"] == 0:
         # Still build highlights for the student answer even on off-topic.
         from services.highlight_builder import build_highlights
@@ -661,14 +645,16 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Parallel: nano (full WE), Claude grammar judge, hybrid spelling. ─
+    # ── Parallel: nano (full WE — used for content/dsc/glr/spelling),
+    # Claude grammar+vocab judge (overrides nano on grammar AND vocab),
+    # hybrid spelling. ────────────────────────────────────────────────────
     from concurrent.futures import ThreadPoolExecutor
     from services.openai_scoring_service import score_we_subscores_with_openai
-    from services.anthropic_scoring_service import score_grammar_only_with_claude
+    from services.anthropic_scoring_service import score_grammar_and_vocab_with_claude
     from services.spelling_checker import check_spelling, format_spelling_reasoning
 
     scoring_warnings: list = []
-    scorer_label = "nano(content+dsc+glr+vocab+spell)+claude(grammar)+hybrid(spell)"
+    scorer_label = "nano(content+dsc+glr+spell)+claude(grammar+vocab)+hybrid(spell)"
 
     def _run_nano_we():
         try:
@@ -678,23 +664,23 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
             get_logger(__name__).error(f"[WE] OpenAI raised: {e}")
             return {"scored": False, "warning_code": "content_llm_unavailable"}
 
-    def _run_claude_grammar_we():
+    def _run_claude_grammar_vocab_we():
         try:
-            return score_grammar_only_with_claude(prompt or '', body)
+            return score_grammar_and_vocab_with_claude(prompt or '', body)
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[WE] Claude grammar raised: {e}")
-            return {"scored": False, "warning_code": "grammar_claude_unavailable"}
+            get_logger(__name__).error(f"[WE] Claude grammar+vocab raised: {e}")
+            return {"scored": False, "warning_code": "grammar_vocab_claude_unavailable"}
 
     def _run_spell_we():
         return check_spelling(body, prompt or "")
 
     with ThreadPoolExecutor(max_workers=3) as _ex:
         f_llm = _ex.submit(_run_nano_we)
-        f_gram = _ex.submit(_run_claude_grammar_we)
+        f_gv = _ex.submit(_run_claude_grammar_vocab_we)
         f_spell = _ex.submit(_run_spell_we)
         llm_result = f_llm.result()
-        gram_result = f_gram.result()
+        gv_result = f_gv.result()
         spell_result = f_spell.result()
 
     if not llm_result.get("scored"):
@@ -729,17 +715,19 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         vocabulary_sub = llm_result["vocabulary"]
         spelling_sub   = llm_result["spelling"]
 
-    # ── Grammar: override nano with Claude grammar judge + heuristic floor.
+    # ── Grammar + vocab: override nano with Claude judge + heuristic floor.
     from services.grammar_heuristic import grammar_heuristic, format_findings
     heur_score, heur_findings = grammar_heuristic(body)
     nano_grammar_score = float(grammar_sub.get("score", 0) or 0)
+    nano_vocab_score = float(vocabulary_sub.get("score", 0) or 0)
     grammar_sub = dict(grammar_sub)
     grammar_sub["heuristic_findings"] = heur_findings
     grammar_sub["heuristic_score"] = heur_score
     grammar_sub["nano_grammar_score"] = nano_grammar_score
 
-    if gram_result.get("scored"):
-        cg = gram_result["grammar"]
+    if gv_result.get("scored"):
+        cg = gv_result["grammar"]
+        cv = gv_result["vocabulary"]
         claude_g_score = float(cg.get("score", 0) or 0)
         cg_quotes = list(cg.get("mistake_quotes") or [])
         grammar_sub["llm_score"] = claude_g_score
@@ -747,13 +735,21 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
         chosen_g_score = claude_g_score
         chosen_g_reasoning = cg.get("reasoning") or grammar_sub.get("reasoning")
+
+        vocabulary_sub = dict(vocabulary_sub)
+        vocabulary_sub["nano_vocab_score"] = nano_vocab_score
+        vocabulary_sub["score"] = float(cv.get("score", 0) or 0)
+        vocabulary_sub["reasoning"] = cv.get("reasoning") or vocabulary_sub.get("reasoning")
+        vocabulary_sub["vocab_scorer"] = "claude-haiku-4-5"
     else:
-        if gram_result.get("warning_code"):
-            scoring_warnings.append(gram_result["warning_code"])
+        if gv_result.get("warning_code"):
+            scoring_warnings.append(gv_result["warning_code"])
         grammar_sub["llm_score"] = nano_grammar_score
         grammar_sub["grammar_scorer"] = "nano-fallback"
         chosen_g_score = nano_grammar_score
         chosen_g_reasoning = grammar_sub.get("reasoning") or "no grammar reasoning"
+        vocabulary_sub = dict(vocabulary_sub)
+        vocabulary_sub["vocab_scorer"] = "nano-fallback"
 
     final_grammar = min(float(heur_score), chosen_g_score)
     grammar_sub["score"] = final_grammar
@@ -781,10 +777,8 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         f"{format_spelling_reasoning(spell_result.get('mistakes') or [])}"
     )
 
-    # ── Verbatim-copy floor (rarely fires for WE — prompt is short — but
-    # safe to apply uniformly). ───────────────────────────────────────────
-    content_sub = _apply_verbatim_copy_floor(content_sub, prompt or "", body,
-                                             scoring_warnings)
+    # ── Verbatim-copy floor REMOVED — rely on LLM rubric to flag copies.
+    # (Off-topic floor below still fires when LLM content == 0.)
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
     if llm_result.get("scored") and content_sub["score"] == 0:
@@ -965,14 +959,15 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Parallel: nano (full SST), Claude grammar judge, hybrid spelling. ─
+    # ── Parallel: nano (full SST — used for content/spelling), Claude
+    # grammar+vocab judge (overrides nano on both), hybrid spelling. ──────
     from concurrent.futures import ThreadPoolExecutor
     from services.openai_scoring_service import score_sst_subscores_with_openai
-    from services.anthropic_scoring_service import score_grammar_only_with_claude
+    from services.anthropic_scoring_service import score_grammar_and_vocab_with_claude
     from services.spelling_checker import check_spelling, format_spelling_reasoning
 
     scoring_warnings: list = []
-    scorer_label = "nano(content+vocab+spell)+claude(grammar)+hybrid(spell)"
+    scorer_label = "nano(content+spell)+claude(grammar+vocab)+hybrid(spell)"
 
     def _run_nano_sst():
         try:
@@ -982,23 +977,23 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
             get_logger(__name__).error(f"[SST] OpenAI raised: {e}")
             return {"scored": False, "warning_code": "content_llm_unavailable"}
 
-    def _run_claude_grammar_sst():
+    def _run_claude_grammar_vocab_sst():
         try:
-            return score_grammar_only_with_claude(prompt or '', body)
+            return score_grammar_and_vocab_with_claude(prompt or '', body)
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[SST] Claude grammar raised: {e}")
-            return {"scored": False, "warning_code": "grammar_claude_unavailable"}
+            get_logger(__name__).error(f"[SST] Claude grammar+vocab raised: {e}")
+            return {"scored": False, "warning_code": "grammar_vocab_claude_unavailable"}
 
     def _run_spell_sst():
         return check_spelling(body, prompt or "")
 
     with ThreadPoolExecutor(max_workers=3) as _ex:
         f_llm = _ex.submit(_run_nano_sst)
-        f_gram = _ex.submit(_run_claude_grammar_sst)
+        f_gv = _ex.submit(_run_claude_grammar_vocab_sst)
         f_spell = _ex.submit(_run_spell_sst)
         llm_result = f_llm.result()
-        gram_result = f_gram.result()
+        gv_result = f_gv.result()
         spell_result = f_spell.result()
 
     if not llm_result.get("scored"):
@@ -1029,17 +1024,19 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         vocabulary_sub = llm_result["vocabulary"]
         spelling_sub   = llm_result["spelling"]
 
-    # ── Grammar: override nano with Claude grammar judge + heuristic floor.
+    # ── Grammar + vocab: override nano with Claude judge + heuristic floor.
     from services.grammar_heuristic import grammar_heuristic, format_findings
     heur_score, heur_findings = grammar_heuristic(body)
     nano_grammar_score = float(grammar_sub.get("score", 0) or 0)
+    nano_vocab_score = float(vocabulary_sub.get("score", 0) or 0)
     grammar_sub = dict(grammar_sub)
     grammar_sub["heuristic_findings"] = heur_findings
     grammar_sub["heuristic_score"] = heur_score
     grammar_sub["nano_grammar_score"] = nano_grammar_score
 
-    if gram_result.get("scored"):
-        cg = gram_result["grammar"]
+    if gv_result.get("scored"):
+        cg = gv_result["grammar"]
+        cv = gv_result["vocabulary"]
         claude_g_score = float(cg.get("score", 0) or 0)
         cg_quotes = list(cg.get("mistake_quotes") or [])
         grammar_sub["llm_score"] = claude_g_score
@@ -1047,13 +1044,21 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
         chosen_g_score = claude_g_score
         chosen_g_reasoning = cg.get("reasoning") or grammar_sub.get("reasoning")
+
+        vocabulary_sub = dict(vocabulary_sub)
+        vocabulary_sub["nano_vocab_score"] = nano_vocab_score
+        vocabulary_sub["score"] = float(cv.get("score", 0) or 0)
+        vocabulary_sub["reasoning"] = cv.get("reasoning") or vocabulary_sub.get("reasoning")
+        vocabulary_sub["vocab_scorer"] = "claude-haiku-4-5"
     else:
-        if gram_result.get("warning_code"):
-            scoring_warnings.append(gram_result["warning_code"])
+        if gv_result.get("warning_code"):
+            scoring_warnings.append(gv_result["warning_code"])
         grammar_sub["llm_score"] = nano_grammar_score
         grammar_sub["grammar_scorer"] = "nano-fallback"
         chosen_g_score = nano_grammar_score
         chosen_g_reasoning = grammar_sub.get("reasoning") or "no grammar reasoning"
+        vocabulary_sub = dict(vocabulary_sub)
+        vocabulary_sub["vocab_scorer"] = "nano-fallback"
 
     final_grammar = min(float(heur_score), chosen_g_score)
     grammar_sub["score"] = final_grammar
@@ -1080,9 +1085,7 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         f"{format_spelling_reasoning(spell_result.get('mistakes') or [])}"
     )
 
-    # ── Verbatim-copy floor against the spoken-text transcript. ──────────
-    content_sub = _apply_verbatim_copy_floor(content_sub, prompt or "", body,
-                                             scoring_warnings)
+    # ── Verbatim-copy floor REMOVED — rely on LLM rubric to flag copies.
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ──────────────
     if llm_result.get("scored") and content_sub["score"] == 0:

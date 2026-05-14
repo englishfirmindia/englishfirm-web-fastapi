@@ -266,13 +266,17 @@ def _parse_paraphrasing_block(parsed: dict) -> dict:
 # real grammar errors are present (subject-verb agreement, wrong tense,
 # awkward word choice). Claude catches those reliably in ~0.8s.
 
-_GRAMMAR_ONLY_SYSTEM_PROMPT = """You are a grammar judge for a PTE Academic writing response.
+_GRAMMAR_VOCAB_SYSTEM_PROMPT = """You are a grammar AND vocabulary judge for a PTE Academic writing response.
 
-Score GRAMMAR ONLY (0–2). Spelling and content are scored separately — IGNORE them.
+You return TWO sub-scores, GRAMMAR (0-2) and VOCABULARY (0-2). Each follows its own strict rubric.
+
+══════════════════════════════════════════════════════════════════════════════
+GRAMMAR (0-2) — STRUCTURAL ERRORS ONLY
+══════════════════════════════════════════════════════════════════════════════
 
 A word being misspelled does NOT count under grammar. Only structural errors count.
 
-Categories of grammar errors to count (one deduction per distinct error):
+Categories to count (one deduction per distinct error):
   (a) CAPITALISATION — sentence start lowercase; proper noun lowercase; mid-sentence common noun capitalised without reason.
   (b) PUNCTUATION — missing terminal mark; wrong punctuation; obviously required comma missing (between independent clauses without a conjunction).
   (c) SPACING — double space; missing space after punctuation.
@@ -287,9 +291,27 @@ DO NOT count any of these as grammar errors:
   - Word choice that is inappropriate or imprecise — that's vocabulary, not grammar.
   - Spelling typos — handled separately.
 
-Scoring:
-  grammar_count = number of distinct grammar errors found
-  grammar_score = max(0, 2 - grammar_count)
+grammar_score = max(0, 2 - grammar_count)
+
+══════════════════════════════════════════════════════════════════════════════
+VOCABULARY (0-2) — APPROPRIATENESS OF WORD CHOICE ONLY
+══════════════════════════════════════════════════════════════════════════════
+
+  2 = Appropriate choice of words. Vocabulary fits the meaning.
+  1 = Contains lexical errors (wrong word for context, awkward collocation), but with no hindrance to communication.
+  0 = Defective word choice which could hinder communication — a wrong-meaning word that confuses the reader.
+
+HARD EXCLUSIONS — do NOT deduct vocabulary for any of these:
+  • Spelling mistakes (typos) — that is the Spelling sub-score, NOT vocabulary. A correctly-chosen but misspelled word like "Whilew" is correct word choice and should not affect vocabulary.
+  • Numerical or factual omissions ("one billion" vs "$1.75 billion") — that is the Content sub-score, NOT vocabulary. The student picked the right word ("billion"); the wrong number is a content/accuracy issue.
+  • Using verbatim words from the passage — paraphrasing is NOT required. Verbatim phrase reuse must NOT lower vocabulary.
+  • Awkward or choppy sentence flow caused by structure rather than word choice — that is Grammar / GLR, not vocabulary.
+
+Only mark down vocabulary when an actual word is wrong, awkward, or inappropriate for its context.
+
+══════════════════════════════════════════════════════════════════════════════
+OUTPUT
+══════════════════════════════════════════════════════════════════════════════
 
 Return JSON ONLY in this exact shape:
 {
@@ -297,19 +319,24 @@ Return JSON ONLY in this exact shape:
     "score": <int 0-2>,
     "reasoning": "<one short sentence citing the specific error(s); say 'no errors' if none>",
     "mistake_quotes": ["exact substring 1", "exact substring 2", ...]
+  },
+  "vocabulary": {
+    "score": <int 0-2>,
+    "reasoning": "<one short sentence justifying the score>"
   }
 }
 
-Each mistake_quotes entry MUST appear verbatim in the student's text (case-sensitive). Empty list if no errors."""
+Each grammar.mistake_quotes entry MUST appear verbatim in the student's text (case-sensitive). Empty list if no errors."""
 
 
-def score_grammar_only_with_claude(passage: str, user_text: str) -> dict:
-    """Grammar-only judge via Claude Haiku 4.5.
+def score_grammar_and_vocab_with_claude(passage: str, user_text: str) -> dict:
+    """Grammar + vocabulary judge via Claude Haiku 4.5 in one call.
 
     Returns:
         {
-          "grammar": {"score": float, "reasoning": str|None, "mistake_quotes": [str, ...]},
-          "scored": bool,
+          "grammar":    {"score": float, "reasoning": str|None, "mistake_quotes": [str, ...]},
+          "vocabulary": {"score": float, "reasoning": str|None},
+          "scored":     bool,
           "warning_code": Optional[str],
         }
     Never raises.
@@ -317,20 +344,21 @@ def score_grammar_only_with_claude(passage: str, user_text: str) -> dict:
     if not user_text or not user_text.strip():
         return {
             "grammar": {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+            "vocabulary": {"score": 0.0, "reasoning": None},
             "scored": True,
             "warning_code": None,
         }
 
-    last_exc: Exception = RuntimeError("score_grammar_only_with_claude: no attempts made")
+    last_exc: Exception = RuntimeError("score_grammar_and_vocab_with_claude: no attempts made")
     for attempt in range(1, 4):
         try:
             response = _client.messages.create(
                 model=_MODEL,
-                max_tokens=400,
+                max_tokens=600,
                 system=[
                     {
                         "type": "text",
-                        "text": _GRAMMAR_ONLY_SYSTEM_PROMPT,
+                        "text": _GRAMMAR_VOCAB_SYSTEM_PROMPT,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
@@ -358,7 +386,7 @@ def score_grammar_only_with_claude(passage: str, user_text: str) -> dict:
                     text = block.text
                     break
             if not text:
-                last_exc = RuntimeError("Claude grammar judge returned no text")
+                last_exc = RuntimeError("Claude grammar+vocab judge returned no text")
                 if attempt < 3:
                     time.sleep(2)
                 continue
@@ -370,48 +398,57 @@ def score_grammar_only_with_claude(passage: str, user_text: str) -> dict:
 
             parsed = json.loads(text)
             g = parsed.get("grammar") or {}
-            score = _clamp(g.get("score"), 0, 2)
-            reasoning = _reasoning(g.get("reasoning"))
+            v = parsed.get("vocabulary") or {}
+            g_score = _clamp(g.get("score"), 0, 2)
+            g_reasoning = _reasoning(g.get("reasoning"))
             quotes = [str(q) for q in (g.get("mistake_quotes") or []) if q]
+            v_score = _clamp(v.get("score"), 0, 2)
+            v_reasoning = _reasoning(v.get("reasoning"))
 
             log.info(
-                "[CLAUDE-GRAMMAR] score=%s mistakes=%d in_tok=%s out_tok=%s",
-                int(score), len(quotes),
+                "[CLAUDE-GRAMMAR-VOCAB] g=%s v=%s mistakes=%d in_tok=%s out_tok=%s",
+                int(g_score), int(v_score), len(quotes),
                 getattr(response.usage, "input_tokens", 0),
                 getattr(response.usage, "output_tokens", 0),
             )
             return {
                 "grammar": {
-                    "score": score,
-                    "reasoning": reasoning,
+                    "score": g_score,
+                    "reasoning": g_reasoning,
                     "mistake_quotes": quotes,
+                },
+                "vocabulary": {
+                    "score": v_score,
+                    "reasoning": v_reasoning,
                 },
                 "scored": True,
                 "warning_code": None,
             }
         except anthropic.AuthenticationError as exc:
-            log.error("[CLAUDE-GRAMMAR] AuthenticationError — not retrying: %s", exc)
+            log.error("[CLAUDE-GRAMMAR-VOCAB] AuthenticationError — not retrying: %s", exc)
             return {
                 "grammar": {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+                "vocabulary": {"score": 0.0, "reasoning": None},
                 "scored": False,
-                "warning_code": "grammar_claude_unavailable",
+                "warning_code": "grammar_vocab_claude_unavailable",
             }
         except Exception as exc:
             last_exc = exc
             log.warning(
-                "[CLAUDE-GRAMMAR] attempt=%d/3 failed — %s: %s",
+                "[CLAUDE-GRAMMAR-VOCAB] attempt=%d/3 failed — %s: %s",
                 attempt, type(exc).__name__, exc,
             )
             if attempt < 3:
                 time.sleep(2)
     log.error(
-        "[CLAUDE-GRAMMAR] failed after 3 attempts — %s: %s",
+        "[CLAUDE-GRAMMAR-VOCAB] failed after 3 attempts — %s: %s",
         type(last_exc).__name__, last_exc,
     )
     return {
         "grammar": {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+        "vocabulary": {"score": 0.0, "reasoning": None},
         "scored": False,
-        "warning_code": "grammar_claude_unavailable",
+        "warning_code": "grammar_vocab_claude_unavailable",
     }
 
 
