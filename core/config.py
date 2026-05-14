@@ -37,7 +37,14 @@ REFRESH_COOKIE_MAX_AGE_SECONDS = JWT_REFRESH_EXPIRY_DAYS * 24 * 60 * 60
 # Grace window after rotation: the just-rotated refresh token still works
 # for this many seconds, so two tabs racing /auth/refresh don't trigger a
 # spurious family revocation.
-REFRESH_ROTATION_GRACE_SECONDS = int(os.getenv("REFRESH_ROTATION_GRACE_SECONDS", "10"))
+#
+# Was 10s — too tight for flaky-network retries, where the browser auto-
+# retry typically lands 20-40s after the original successful-but-lost
+# response. 60s covers the realistic retry envelope without materially
+# widening the window in which a stolen token could co-exist with the
+# legitimate user (Postgres SELECT … FOR UPDATE on rotate_refresh_token
+# closes the same-token concurrent-rotation race regardless of grace).
+REFRESH_ROTATION_GRACE_SECONDS = int(os.getenv("REFRESH_ROTATION_GRACE_SECONDS", "60"))
 
 # ── Auth (web session cookie) ─────────────────────────────────────────────────
 # Web clients use an httpOnly cookie holding the same JWT, so the token is not

@@ -113,7 +113,19 @@ def rotate_refresh_token(
     revoked — the chain is presumed compromised.
     """
     h = _hash_token(raw_refresh)
-    row = db.query(AuthRefreshToken).filter(AuthRefreshToken.token_hash == h).first()
+    # Lock the row for the duration of this transaction so two concurrent
+    # tabs presenting the same refresh token can't both run the rotation
+    # logic and produce inconsistent `revoked_at` + `replaced_by` chains.
+    # Postgres SELECT … FOR UPDATE serialises the rotators: the second
+    # request waits, then sees the row already revoked + replaced_by set,
+    # and goes through the grace-window branch instead of stomping the
+    # first rotator's chain.
+    row = (
+        db.query(AuthRefreshToken)
+        .filter(AuthRefreshToken.token_hash == h)
+        .with_for_update()
+        .first()
+    )
     if row is None:
         log.warning("[AUTH_REFRESH] unknown token presented")
         return None
@@ -139,9 +151,17 @@ def rotate_refresh_token(
             access_token = issue_access_token(row.user_id)
             # Issue a new refresh that piggybacks on the existing replacement
             # — keeps families coherent without adding another revoked row.
-            replacement = db.query(AuthRefreshToken).filter(
-                AuthRefreshToken.id == row.replaced_by
-            ).first()
+            # Same FOR UPDATE pattern on the replacement row — guards
+            # against two concurrent grace-path requests both reading the
+            # replacement, both generating new raw bytes, and both
+            # overwriting `replacement.token_hash` (last commit wins, the
+            # other user's token becomes orphaned).
+            replacement = (
+                db.query(AuthRefreshToken)
+                .filter(AuthRefreshToken.id == row.replaced_by)
+                .with_for_update()
+                .first()
+            )
             if replacement and replacement.revoked_at is None:
                 # Hand the caller the most recent live token in this family.
                 # Rare path; we generate fresh raw bytes and replace the
