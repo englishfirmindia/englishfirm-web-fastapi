@@ -122,12 +122,30 @@ def submit(
     if not question or not question.evaluation:
         raise HTTPException(status_code=404, detail="Question not found")
 
+    # The frontend ships the user's order as a list of paragraph TEXTS,
+    # but correctSequence in evaluation_json is paragraph IDs (e.g. ["2",
+    # "4", "3"]). The rule scorer compares element-by-element, so passing
+    # texts produced pair_results=[False, ...] on every submission — 100%
+    # of historic RP attempts sat at PTE floor 10 because of this.
+    # Map text → id here so the scorer sees ID lists on both sides.
+    paragraphs = ((question.content_json or {}).get("paragraphs") or [])
+    text_to_id = {}
+    for p in paragraphs:
+        if isinstance(p, dict):
+            pid = p.get("id") or p.get("paragraphId")
+            ptext = (p.get("text") or "").strip()
+            if pid is not None and ptext:
+                text_to_id[ptext] = str(pid)
+    user_sequence_ids = [
+        text_to_id.get((s or "").strip(), s) for s in user_sequence
+    ]
+
     scorer = get_scorer("reorder_paragraphs")
     result = scorer.score(
         question_id=question_id,
         session_id=session_id,
         answer={
-            "user_sequence": user_sequence,
+            "user_sequence": user_sequence_ids,
             "evaluation_json": question.evaluation.evaluation_json,
         },
     )
