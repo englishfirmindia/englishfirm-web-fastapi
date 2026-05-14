@@ -225,6 +225,161 @@ def _failure(warning_code: str, reason: str = "") -> dict:
     }
 
 
+# ── Grammar-only judge (SWT / WE / SST) ───────────────────────────────────────
+# Routed through Claude because benchmarking showed gpt-5-nano (with
+# reasoning_effort=minimal) gives full marks on 17/20 submissions even when
+# real grammar errors are present (subject-verb agreement, wrong tense,
+# awkward word choice). Claude catches those reliably in ~0.8s.
+
+_GRAMMAR_ONLY_SYSTEM_PROMPT = """You are a grammar judge for a PTE Academic writing response.
+
+Score GRAMMAR ONLY (0–2). Spelling and content are scored separately — IGNORE them.
+
+A word being misspelled does NOT count under grammar. Only structural errors count.
+
+Categories of grammar errors to count (one deduction per distinct error):
+  (a) CAPITALISATION — sentence start lowercase; proper noun lowercase; mid-sentence common noun capitalised without reason.
+  (b) PUNCTUATION — missing terminal mark; wrong punctuation; obviously required comma missing (between independent clauses without a conjunction).
+  (c) SPACING — double space; missing space after punctuation.
+  (d) VERB USE — wrong tense; subject-verb disagreement; broken auxiliary chain ("did had", "have went").
+  (e) AGREEMENT / DETERMINERS — wrong article; pronoun mismatch ("there" vs "their"); count/non-count mismatch.
+  (f) WORD-FORM — wrong part of speech ("becoming environmental performance better"), awkward verb-noun pairing.
+  (g) PLURALS — wrong plural ("transportations", "electricitys", "infrastructures" when "infrastructure" is the standard mass noun).
+
+DO NOT count any of these as grammar errors:
+  - Stylistic length / "lacks subordination" / "choppy flow" — long single-sentence answers are expected in SWT.
+  - Optional commas before "and", "so", "but", "because".
+  - Word choice that is inappropriate or imprecise — that's vocabulary, not grammar.
+  - Spelling typos — handled separately.
+
+Scoring:
+  grammar_count = number of distinct grammar errors found
+  grammar_score = max(0, 2 - grammar_count)
+
+Return JSON ONLY in this exact shape:
+{
+  "grammar": {
+    "score": <int 0-2>,
+    "reasoning": "<one short sentence citing the specific error(s); say 'no errors' if none>",
+    "mistake_quotes": ["exact substring 1", "exact substring 2", ...]
+  }
+}
+
+Each mistake_quotes entry MUST appear verbatim in the student's text (case-sensitive). Empty list if no errors."""
+
+
+def score_grammar_only_with_claude(passage: str, user_text: str) -> dict:
+    """Grammar-only judge via Claude Haiku 4.5.
+
+    Returns:
+        {
+          "grammar": {"score": float, "reasoning": str|None, "mistake_quotes": [str, ...]},
+          "scored": bool,
+          "warning_code": Optional[str],
+        }
+    Never raises.
+    """
+    if not user_text or not user_text.strip():
+        return {
+            "grammar": {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+            "scored": True,
+            "warning_code": None,
+        }
+
+    last_exc: Exception = RuntimeError("score_grammar_only_with_claude: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            response = _client.messages.create(
+                model=_MODEL,
+                max_tokens=400,
+                system=[
+                    {
+                        "type": "text",
+                        "text": _GRAMMAR_ONLY_SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"PASSAGE (context only, do NOT score):\n{passage or '(none)'}\n\n"
+                                    f"STUDENT TEXT:\n{user_text}\n\n"
+                                    "Reply with ONLY the JSON object."
+                                ),
+                            }
+                        ],
+                    }
+                ],
+                timeout=20.0,
+            )
+
+            text = ""
+            for block in response.content:
+                if block.type == "text":
+                    text = block.text
+                    break
+            if not text:
+                last_exc = RuntimeError("Claude grammar judge returned no text")
+                if attempt < 3:
+                    time.sleep(2)
+                continue
+
+            text = text.strip()
+            if text.startswith("```"):
+                parts = text.split("```")
+                text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
+
+            parsed = json.loads(text)
+            g = parsed.get("grammar") or {}
+            score = _clamp(g.get("score"), 0, 2)
+            reasoning = _reasoning(g.get("reasoning"))
+            quotes = [str(q) for q in (g.get("mistake_quotes") or []) if q]
+
+            log.info(
+                "[CLAUDE-GRAMMAR] score=%s mistakes=%d in_tok=%s out_tok=%s",
+                int(score), len(quotes),
+                getattr(response.usage, "input_tokens", 0),
+                getattr(response.usage, "output_tokens", 0),
+            )
+            return {
+                "grammar": {
+                    "score": score,
+                    "reasoning": reasoning,
+                    "mistake_quotes": quotes,
+                },
+                "scored": True,
+                "warning_code": None,
+            }
+        except anthropic.AuthenticationError as exc:
+            log.error("[CLAUDE-GRAMMAR] AuthenticationError — not retrying: %s", exc)
+            return {
+                "grammar": {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+                "scored": False,
+                "warning_code": "grammar_claude_unavailable",
+            }
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "[CLAUDE-GRAMMAR] attempt=%d/3 failed — %s: %s",
+                attempt, type(exc).__name__, exc,
+            )
+            if attempt < 3:
+                time.sleep(2)
+    log.error(
+        "[CLAUDE-GRAMMAR] failed after 3 attempts — %s: %s",
+        type(last_exc).__name__, last_exc,
+    )
+    return {
+        "grammar": {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+        "scored": False,
+        "warning_code": "grammar_claude_unavailable",
+    }
+
+
 # ── Write Essay (WE) ─────────────────────────────────────────────────────────
 
 _WE_SYSTEM_PROMPT = """You are scoring a PTE Academic Write Essay response.

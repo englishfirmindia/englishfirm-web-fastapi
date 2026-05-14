@@ -268,28 +268,56 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Primary: gpt-5-nano. Fallback chain: Claude Haiku 4.5 → heuristic ──
-    scoring_warnings: list = []
-    scorer_label = "gpt-5-nano"
-    try:
-        from services.openai_scoring_service import score_swt_subscores_with_openai
-        llm_result = score_swt_subscores_with_openai(prompt or '', body)
-    except Exception as e:
-        from core.logging_config import get_logger
-        get_logger(__name__).error(f"[SWT] OpenAI call raised unexpectedly: {e}")
-        llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+    # ── Three calls in parallel: nano (full SWT), Claude grammar judge,
+    # hybrid spelling check. Wall-clock = max of the three (~2s) instead of
+    # sum (~3.5s). Grammar uses Claude (catches issues nano misses under
+    # minimal reasoning); content + vocabulary stay on nano. ─────────────
+    from concurrent.futures import ThreadPoolExecutor
+    from services.openai_scoring_service import score_swt_subscores_with_openai
+    from services.anthropic_scoring_service import score_grammar_only_with_claude
+    from services.spelling_checker import check_spelling, format_spelling_reasoning
 
+    scoring_warnings: list = []
+    scorer_label = "nano(content+vocab)+claude(grammar)+hybrid(spell)"
+
+    def _run_nano():
+        try:
+            return score_swt_subscores_with_openai(prompt or '', body)
+        except Exception as e:
+            from core.logging_config import get_logger
+            get_logger(__name__).error(f"[SWT] OpenAI call raised unexpectedly: {e}")
+            return {"scored": False, "warning_code": "content_llm_unavailable"}
+
+    def _run_claude_grammar():
+        try:
+            return score_grammar_only_with_claude(prompt or '', body)
+        except Exception as e:
+            from core.logging_config import get_logger
+            get_logger(__name__).error(f"[SWT] Claude grammar raised unexpectedly: {e}")
+            return {"scored": False, "warning_code": "grammar_claude_unavailable"}
+
+    def _run_spell():
+        return check_spelling(body, prompt or "")
+
+    with ThreadPoolExecutor(max_workers=3) as _ex:
+        f_llm = _ex.submit(_run_nano)
+        f_gram = _ex.submit(_run_claude_grammar)
+        f_spell = _ex.submit(_run_spell)
+        llm_result = f_llm.result()
+        gram_result = f_gram.result()
+        spell_result = f_spell.result()
+
+    # Nano fallback chain: if nano failed, fall back to Claude full SWT.
     if not llm_result.get("scored"):
-        # Fall back to Claude before going to heuristic.
         try:
             from services.anthropic_scoring_service import score_swt_subscores_with_claude
             llm_result = score_swt_subscores_with_claude(prompt or '', body)
             if llm_result.get("scored"):
-                scorer_label = "claude-haiku-4-5-fallback"
+                scorer_label = "claude-full-fallback+hybrid"
                 scoring_warnings.append("openai_unavailable_used_claude")
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[SWT] Claude fallback raised unexpectedly: {e}")
+            get_logger(__name__).error(f"[SWT] Claude SWT fallback raised: {e}")
             llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
 
     if not llm_result.get("scored"):
@@ -306,28 +334,38 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
         grammar_sub    = llm_result["grammar"]
         vocabulary_sub = llm_result["vocabulary"]
 
-    # ── Grammar heuristic floor: min(heuristic, llm) ─────────────────────
-    # Catches deterministic failure modes (extra spaces, missing terminal
-    # period, lowercase sentence start, improper ALL-CAPS) that the LLM
-    # tends to overlook. Cannot raise the score, only lower it. Heuristic
-    # findings are ALWAYS attached so the highlight builder can render
-    # them even when the LLM already saw the same issues.
+    # Override grammar with Claude's grammar-only judgment when available.
+    nano_grammar_score = float(grammar_sub.get("score", 0) or 0)
+    if gram_result.get("scored"):
+        cg = gram_result["grammar"]
+        grammar_sub = dict(grammar_sub)
+        grammar_sub["nano_grammar_score"] = nano_grammar_score
+        grammar_sub["score"] = float(cg.get("score", 0) or 0)
+        grammar_sub["reasoning"] = cg.get("reasoning") or grammar_sub.get("reasoning")
+        # Unify mistake-quote key for highlight builder (SWT legacy key kept too).
+        cg_quotes = list(cg.get("mistake_quotes") or [])
+        grammar_sub["mistake_quotes"] = cg_quotes
+        grammar_sub["grammar_mistake_quotes"] = cg_quotes
+        grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
+    else:
+        if gram_result.get("warning_code"):
+            scoring_warnings.append(gram_result["warning_code"])
+        grammar_sub = dict(grammar_sub)
+        grammar_sub["grammar_scorer"] = "nano-fallback"
+
+    # ── 3-way floor on Grammar & Spelling: min(heuristic, grammar_score,
+    # spelling_remaining). The heuristic catches deterministic surface bugs
+    # (extra spaces, missing initial cap, missing terminal, improper ALL-CAPS);
+    # the spelling check is the parallel hybrid pipeline result computed
+    # above. None of these can raise the score — only lower it. ─────────
     from services.grammar_heuristic import grammar_heuristic, format_findings
     heur_score, heur_findings = grammar_heuristic(body)
-    llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
-    grammar_only_score = min(float(heur_score), llm_grammar_score)
-    grammar_sub = dict(grammar_sub)
+    grammar_judge_score = float(grammar_sub.get("score", 0) or 0)
+    grammar_only_score = min(float(heur_score), grammar_judge_score)
     grammar_sub["heuristic_findings"] = heur_findings
     grammar_sub["heuristic_score"] = heur_score
-    grammar_sub["llm_score"] = llm_grammar_score
+    grammar_sub["llm_score"] = grammar_judge_score
 
-    # ── Hybrid spelling check (pyspell + passage filter + Claude judge) ──
-    # SWT's "Grammar & Spelling" sub-score (max grammar_max=2) is a min of
-    # grammar-remaining and spelling-remaining. The hybrid pipeline replaces
-    # the LLM's spelling judgement with a deterministic checker that has
-    # 100% recall on real typos and ~92% precision after the passage filter.
-    from services.spelling_checker import check_spelling, format_spelling_reasoning
-    spell_result = check_spelling(body, prompt or "")
     spell_count = len(spell_result.get("mistakes") or [])
     spell_remaining = float(max(0, grammar_max - spell_count))
     final_grammar = min(grammar_only_score, spell_remaining)
@@ -338,12 +376,12 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
     grammar_sub["score"] = final_grammar
     spell_summary = format_spelling_reasoning(spell_result.get("mistakes") or [])
     heur_summary = format_findings(heur_findings)
-    llm_reasoning = grammar_sub.get("reasoning") or "no LLM reasoning"
+    grammar_reasoning = grammar_sub.get("reasoning") or "no grammar reasoning"
     grammar_sub["reasoning"] = (
         f"Grammar & Spelling: {int(final_grammar)}/{grammar_max}. "
         f"Heuristic: {heur_summary}. "
         f"Spelling: {spell_summary} "
-        f"LLM: {llm_reasoning}"
+        f"Grammar: {grammar_reasoning}"
     )
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
@@ -555,27 +593,52 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Primary: gpt-5-nano. Fallback chain: Claude Haiku 4.5 → heuristic ──
+    # ── Parallel: nano (full WE), Claude grammar judge, hybrid spelling. ─
+    from concurrent.futures import ThreadPoolExecutor
+    from services.openai_scoring_service import score_we_subscores_with_openai
+    from services.anthropic_scoring_service import score_grammar_only_with_claude
+    from services.spelling_checker import check_spelling, format_spelling_reasoning
+
     scoring_warnings: list = []
-    scorer_label = "gpt-5-nano"
-    try:
-        from services.openai_scoring_service import score_we_subscores_with_openai
-        llm_result = score_we_subscores_with_openai(prompt or '', body)
-    except Exception as e:
-        from core.logging_config import get_logger
-        get_logger(__name__).error(f"[WE] OpenAI call raised unexpectedly: {e}")
-        llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+    scorer_label = "nano(content+dsc+glr+vocab+spell)+claude(grammar)+hybrid(spell)"
+
+    def _run_nano_we():
+        try:
+            return score_we_subscores_with_openai(prompt or '', body)
+        except Exception as e:
+            from core.logging_config import get_logger
+            get_logger(__name__).error(f"[WE] OpenAI raised: {e}")
+            return {"scored": False, "warning_code": "content_llm_unavailable"}
+
+    def _run_claude_grammar_we():
+        try:
+            return score_grammar_only_with_claude(prompt or '', body)
+        except Exception as e:
+            from core.logging_config import get_logger
+            get_logger(__name__).error(f"[WE] Claude grammar raised: {e}")
+            return {"scored": False, "warning_code": "grammar_claude_unavailable"}
+
+    def _run_spell_we():
+        return check_spelling(body, prompt or "")
+
+    with ThreadPoolExecutor(max_workers=3) as _ex:
+        f_llm = _ex.submit(_run_nano_we)
+        f_gram = _ex.submit(_run_claude_grammar_we)
+        f_spell = _ex.submit(_run_spell_we)
+        llm_result = f_llm.result()
+        gram_result = f_gram.result()
+        spell_result = f_spell.result()
 
     if not llm_result.get("scored"):
         try:
             from services.anthropic_scoring_service import score_we_subscores_with_claude
             llm_result = score_we_subscores_with_claude(prompt or '', body)
             if llm_result.get("scored"):
-                scorer_label = "claude-haiku-4-5-fallback"
+                scorer_label = "claude-full-fallback+hybrid"
                 scoring_warnings.append("openai_unavailable_used_claude")
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[WE] Claude fallback raised unexpectedly: {e}")
+            get_logger(__name__).error(f"[WE] Claude full fallback raised: {e}")
             llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
 
     if not llm_result.get("scored"):
@@ -598,29 +661,41 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         vocabulary_sub = llm_result["vocabulary"]
         spelling_sub   = llm_result["spelling"]
 
-    # ── Grammar heuristic floor: min(heuristic, llm) ─────────────────────
+    # ── Grammar: override nano with Claude grammar judge + heuristic floor.
     from services.grammar_heuristic import grammar_heuristic, format_findings
     heur_score, heur_findings = grammar_heuristic(body)
-    llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
-    final_grammar = min(float(heur_score), llm_grammar_score)
+    nano_grammar_score = float(grammar_sub.get("score", 0) or 0)
     grammar_sub = dict(grammar_sub)
     grammar_sub["heuristic_findings"] = heur_findings
     grammar_sub["heuristic_score"] = heur_score
-    grammar_sub["llm_score"] = llm_grammar_score
-    if final_grammar < llm_grammar_score:
-        grammar_sub["score"] = final_grammar
-        grammar_sub["reasoning"] = (
-            f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
-            f"= {int(final_grammar)}. "
-            f"Heuristic: {format_findings(heur_findings)}. "
-            f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
-        )
+    grammar_sub["nano_grammar_score"] = nano_grammar_score
 
-    # ── Hybrid spelling check (pyspell + Claude judge). WE has no source
-    # passage (only an essay prompt/topic), so the passage filter is a
-    # no-op and all pyspell candidates flow to Claude. ─────────────────
-    from services.spelling_checker import check_spelling, format_spelling_reasoning
-    spell_result = check_spelling(body, prompt or "")
+    if gram_result.get("scored"):
+        cg = gram_result["grammar"]
+        claude_g_score = float(cg.get("score", 0) or 0)
+        cg_quotes = list(cg.get("mistake_quotes") or [])
+        grammar_sub["llm_score"] = claude_g_score
+        grammar_sub["mistake_quotes"] = cg_quotes
+        grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
+        chosen_g_score = claude_g_score
+        chosen_g_reasoning = cg.get("reasoning") or grammar_sub.get("reasoning")
+    else:
+        if gram_result.get("warning_code"):
+            scoring_warnings.append(gram_result["warning_code"])
+        grammar_sub["llm_score"] = nano_grammar_score
+        grammar_sub["grammar_scorer"] = "nano-fallback"
+        chosen_g_score = nano_grammar_score
+        chosen_g_reasoning = grammar_sub.get("reasoning") or "no grammar reasoning"
+
+    final_grammar = min(float(heur_score), chosen_g_score)
+    grammar_sub["score"] = final_grammar
+    grammar_sub["reasoning"] = (
+        f"Grammar: {int(final_grammar)}/2. "
+        f"Heuristic: {format_findings(heur_findings)}. "
+        f"Judge: {chosen_g_reasoning}"
+    )
+
+    # ── Hybrid spelling override on WE's dedicated spelling sub-score. ──
     spell_count = len(spell_result.get("mistakes") or [])
     spell_max_pts = 2  # WE spelling sub-score max
     spell_remaining = float(max(0, spell_max_pts - spell_count))
@@ -635,8 +710,7 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
     spelling_sub["score"] = final_spelling
     spelling_sub["reasoning"] = (
         f"Spelling: {int(final_spelling)}/{spell_max_pts}. "
-        f"{format_spelling_reasoning(spell_result.get('mistakes') or [])} "
-        f"LLM: {spelling_sub.get('reasoning') or 'no LLM reasoning'}"
+        f"{format_spelling_reasoning(spell_result.get('mistakes') or [])}"
     )
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ───────────────
@@ -818,27 +892,52 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Primary: gpt-5-nano. Fallback chain: Claude Haiku 4.5 → heuristic ──
+    # ── Parallel: nano (full SST), Claude grammar judge, hybrid spelling. ─
+    from concurrent.futures import ThreadPoolExecutor
+    from services.openai_scoring_service import score_sst_subscores_with_openai
+    from services.anthropic_scoring_service import score_grammar_only_with_claude
+    from services.spelling_checker import check_spelling, format_spelling_reasoning
+
     scoring_warnings: list = []
-    scorer_label = "gpt-5-nano"
-    try:
-        from services.openai_scoring_service import score_sst_subscores_with_openai
-        llm_result = score_sst_subscores_with_openai(prompt or '', body)
-    except Exception as e:
-        from core.logging_config import get_logger
-        get_logger(__name__).error(f"[SST] OpenAI call raised unexpectedly: {e}")
-        llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+    scorer_label = "nano(content+vocab+spell)+claude(grammar)+hybrid(spell)"
+
+    def _run_nano_sst():
+        try:
+            return score_sst_subscores_with_openai(prompt or '', body)
+        except Exception as e:
+            from core.logging_config import get_logger
+            get_logger(__name__).error(f"[SST] OpenAI raised: {e}")
+            return {"scored": False, "warning_code": "content_llm_unavailable"}
+
+    def _run_claude_grammar_sst():
+        try:
+            return score_grammar_only_with_claude(prompt or '', body)
+        except Exception as e:
+            from core.logging_config import get_logger
+            get_logger(__name__).error(f"[SST] Claude grammar raised: {e}")
+            return {"scored": False, "warning_code": "grammar_claude_unavailable"}
+
+    def _run_spell_sst():
+        return check_spelling(body, prompt or "")
+
+    with ThreadPoolExecutor(max_workers=3) as _ex:
+        f_llm = _ex.submit(_run_nano_sst)
+        f_gram = _ex.submit(_run_claude_grammar_sst)
+        f_spell = _ex.submit(_run_spell_sst)
+        llm_result = f_llm.result()
+        gram_result = f_gram.result()
+        spell_result = f_spell.result()
 
     if not llm_result.get("scored"):
         try:
             from services.anthropic_scoring_service import score_sst_subscores_with_claude
             llm_result = score_sst_subscores_with_claude(prompt or '', body)
             if llm_result.get("scored"):
-                scorer_label = "claude-haiku-4-5-fallback"
+                scorer_label = "claude-full-fallback+hybrid"
                 scoring_warnings.append("openai_unavailable_used_claude")
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[SST] Claude fallback raised unexpectedly: {e}")
+            get_logger(__name__).error(f"[SST] Claude full fallback raised: {e}")
             llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
 
     if not llm_result.get("scored"):
@@ -857,29 +956,41 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         vocabulary_sub = llm_result["vocabulary"]
         spelling_sub   = llm_result["spelling"]
 
-    # ── Grammar heuristic floor: min(heuristic, llm) ─────────────────────
+    # ── Grammar: override nano with Claude grammar judge + heuristic floor.
     from services.grammar_heuristic import grammar_heuristic, format_findings
     heur_score, heur_findings = grammar_heuristic(body)
-    llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
-    final_grammar = min(float(heur_score), llm_grammar_score)
+    nano_grammar_score = float(grammar_sub.get("score", 0) or 0)
     grammar_sub = dict(grammar_sub)
     grammar_sub["heuristic_findings"] = heur_findings
     grammar_sub["heuristic_score"] = heur_score
-    grammar_sub["llm_score"] = llm_grammar_score
-    if final_grammar < llm_grammar_score:
-        grammar_sub["score"] = final_grammar
-        grammar_sub["reasoning"] = (
-            f"min(heuristic={heur_score}, llm={int(llm_grammar_score)}) "
-            f"= {int(final_grammar)}. "
-            f"Heuristic: {format_findings(heur_findings)}. "
-            f"LLM: {grammar_sub.get('reasoning') or 'no reasoning'}"
-        )
+    grammar_sub["nano_grammar_score"] = nano_grammar_score
 
-    # ── Hybrid spelling check (pyspell + passage filter + Claude judge).
-    # SST passes the spoken-text transcript as `prompt` so the passage
-    # filter can suppress correctly-spelled rare/technical words. ─────
-    from services.spelling_checker import check_spelling, format_spelling_reasoning
-    spell_result = check_spelling(body, prompt or "")
+    if gram_result.get("scored"):
+        cg = gram_result["grammar"]
+        claude_g_score = float(cg.get("score", 0) or 0)
+        cg_quotes = list(cg.get("mistake_quotes") or [])
+        grammar_sub["llm_score"] = claude_g_score
+        grammar_sub["mistake_quotes"] = cg_quotes
+        grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
+        chosen_g_score = claude_g_score
+        chosen_g_reasoning = cg.get("reasoning") or grammar_sub.get("reasoning")
+    else:
+        if gram_result.get("warning_code"):
+            scoring_warnings.append(gram_result["warning_code"])
+        grammar_sub["llm_score"] = nano_grammar_score
+        grammar_sub["grammar_scorer"] = "nano-fallback"
+        chosen_g_score = nano_grammar_score
+        chosen_g_reasoning = grammar_sub.get("reasoning") or "no grammar reasoning"
+
+    final_grammar = min(float(heur_score), chosen_g_score)
+    grammar_sub["score"] = final_grammar
+    grammar_sub["reasoning"] = (
+        f"Grammar: {int(final_grammar)}/2. "
+        f"Heuristic: {format_findings(heur_findings)}. "
+        f"Judge: {chosen_g_reasoning}"
+    )
+
+    # ── Hybrid spelling override on SST's dedicated spelling sub-score. ──
     spell_count = len(spell_result.get("mistakes") or [])
     spell_remaining = float(max(0, spell_max - spell_count))
     llm_spell_score = float(spelling_sub.get("score", 0) or 0)
@@ -893,8 +1004,7 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
     spelling_sub["score"] = final_spelling
     spelling_sub["reasoning"] = (
         f"Spelling: {int(final_spelling)}/{spell_max}. "
-        f"{format_spelling_reasoning(spell_result.get('mistakes') or [])} "
-        f"LLM: {spelling_sub.get('reasoning') or 'no LLM reasoning'}"
+        f"{format_spelling_reasoning(spell_result.get('mistakes') or [])}"
     )
 
     # ── Off-topic floor: LLM content == 0 zeroes everything ──────────────
