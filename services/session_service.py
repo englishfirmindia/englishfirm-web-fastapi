@@ -623,6 +623,23 @@ def persist_answer_to_db(
                         audio_url=audio_url,
                         scoring_status=scoring_status,
                     ))
+                # Same-txn UQA upsert — guarantees the "Done" badge and "New"
+                # filter source-of-truth stays in sync with attempt_answers.
+                # The legacy fire-and-forget write in mark_submitted's _record
+                # was racy; rows went missing whenever the daemon thread died
+                # before commit. Doing it here means a successful answer write
+                # implies a successful UQA write.
+                if user_id:
+                    uqa_exists = db.query(UserQuestionAttempt).filter_by(
+                        user_id=user_id, question_id=question_id
+                    ).first()
+                    if not uqa_exists:
+                        db.add(UserQuestionAttempt(
+                            user_id=user_id,
+                            question_id=question_id,
+                            question_type=question_type,
+                            module=module or "",
+                        ))
                 db.commit()
                 return
             except Exception as e:
