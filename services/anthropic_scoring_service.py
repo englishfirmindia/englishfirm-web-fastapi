@@ -20,6 +20,7 @@ failure returns `scored=False` so the caller can fall back to the heuristic.
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import anthropic
@@ -99,48 +100,141 @@ Return JSON only, in this exact shape:
 """
 
 
-def score_swt_subscores_with_claude(passage: str, user_text: str) -> dict:
-    """Score SWT sub-scores via Claude Haiku 4.5.
+# ── Split SWT prompts (content v3 / grammar / vocab v3.1) ────────────────────
+# Each prompt is focused on ONE sub-score so the rubric can be iterated without
+# regression risk on the others. All three are fired in parallel via
+# ThreadPoolExecutor — see score_swt_subscores_with_claude below.
 
-    Returns a dict carrying per-sub-score `{score, reasoning}` plus a
-    `scored` flag and (when relevant) a `warning_code` for the partial-
-    success plumbing the rest of the pipeline already understands:
+_SWT_CONTENT_V3_PROMPT = """You are scoring CONTENT only for a PTE Academic Summarize Written Text response.
 
-        {
-            "content":    {"score": float, "reasoning": str|None},
-            "grammar":    {"score": float, "reasoning": str|None},
-            "vocabulary": {"score": float, "reasoning": str|None},
-            "scored":     bool,
-            "warning_code": Optional[str],  # "content_llm_unavailable" when scored=False
-        }
+The student is given a passage and writes a one-sentence summary in 5–75 words. Form, Grammar, and Vocabulary are scored separately — ignore them. Content is scored on coverage of key points AND paraphrasing effort.
 
-    On any failure (auth, parse, timeout) returns scored=False so the caller
-    can decide whether to fall back to a heuristic or surface a warning.
-    Never raises.
+CONTENT (0–4, half-point granularity allowed: 0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4):
+
+SCORE 4 — All key points covered AND paraphrasing threshold met (4+ content-word synonym swaps OR 2+ phrases visibly restructured — clause reorder, connector reshape, parenthetical → relative clause). Function-word changes don't count.
+
+SCORE 3.5 — Full key-point coverage AND partial paraphrasing (1–3 word swaps OR 1 phrase restructure). OR full verbatim coverage capturing BOTH the central insight AND the resolution.
+
+SCORE 3 — All key points covered, sentences copied exactly from the passage (verbatim phrasing throughout). No paraphrasing effort.
+
+SCORE 2.5 — Key points partially covered (more than "very few" but less than full), verbatim or near-verbatim. OR fact-listing without synthesis. OR ≥3 of 4 arc pieces verbatim, missing one.
+
+SCORE 2 — Very few key points conveyed (only 1–2 main propositions), OR full attempt <50 words. Generic mentions ("numerous advantages" without specifics) count as named-not-conveyed → here.
+
+SCORE 1.5 — Very few key points AND presentation issues (5+ spelling errors, broken connector chain) blocking comprehension.
+
+SCORE 1 — Very few key points AND (<30 words OR leads with illustrative content — metaphor/example/quote — while omitting the central thesis). OR has only half of a two-part central insight.
+
+SCORE 0 — Off-topic or blank.
+
+CRITICAL-MOVE RULES:
+  • Factual misrepresentation of source's central claim → cap at 0.5.
+  • Named-without-specifics: arc pieces that are NAMED ("numerous advantages") without ANY concrete content count as half-present, not present.
+  • List-style penalty: shallow named-only mentions chained with list connectors (and… furthermore… moreover…) cap at 2.5 regardless of how many arc pieces are nominally touched. Breadth without depth ≠ coverage.
+
+In the reasoning, name which key points were covered vs missing, paraphrasing evidence (cite a swap or note "verbatim"), and any rule applied.
+
+Return JSON only, exactly this shape:
+{
+  "content": {"score": <number 0-4 in 0.5 steps>, "reasoning": "<one sentence>"},
+  "paraphrasing": {
+    "synonyms_count": <int>,
+    "paraphrased_phrases_count": <int>,
+    "examples": [<up to 5 short "src → user" strings>]
+  }
+}
+"""
+
+_SWT_GRAMMAR_PROMPT = """You are scoring GRAMMAR + SPELLING only for a PTE Academic Summarize Written Text response.
+
+The student writes a one-sentence summary in 5–75 words. You return a single 0–2 score reflecting grammatical structure with a spelling deduction layered on top.
+
+GRAMMAR + SPELLING (0–2) — combined score. Two-step process:
+
+  STEP 1 — Base grammar score (0–2). Score by COMMUNICATION IMPACT only.
+
+    WORKED EXAMPLES — calibrate against these:
+
+    Score 2/2 (long compound, valid):
+    "While major events worldwide are joining a climate network, the sporting events are the latest participants, and are important for inspiring global action, said Steiner, and organizers say they will spend one billion on infrastructure."
+    → Compound, multiple 'and', mid-sentence attribution. Grammatically valid. Score: 2.
+
+    Score 1/2 (real grammatical error):
+    "The organizers says they will spent one billion on infrastructure that are important."
+    → Subject-verb disagreement (organizers says, that are), wrong tense (spent for spend). Score: 1.
+
+    Score 0/2 (defective):
+    "While events striving carbon, the participants joining important inspire global, organizer say spend billion."
+    → Missing verbs/articles, broken clauses, reader cannot parse. Score: 0.
+
+  The "long sentence with many 'and's" pattern is NORMAL for SWT and is NOT a deduction trigger.
+
+  STEP 2 — Spelling deduction (applied to the base score, floored at 0):
+    0 spelling errors → no deduction
+    1 spelling error  → subtract 1
+    2 or more         → grammar score = 0 regardless of base
+
+  Final grammar score = max(0, base − spelling_deduction).
+  In the reasoning, name the specific violation type (or state "no violations") and the spelling-error count.
+
+Return JSON only, exactly this shape:
+{
+  "grammar": {"score": <number 0-2 in 0.5 steps>, "reasoning": "<one sentence>"}
+}
+"""
+
+_SWT_VOCAB_V31_PROMPT = """You are scoring VOCABULARY only for a PTE Academic Summarize Written Text response.
+
+The student writes a one-sentence summary. You return a single 0–2 vocabulary score reflecting APPROPRIATENESS and PRECISION of word choice. Paraphrasing is NOT required and verbatim phrase reuse is NOT penalised here — that's a content-side concern.
+
+VOCABULARY (0–2, half-points allowed: 0, 0.5, 1, 1.5, 2):
+
+  SCORE 2.0 — 0 vocabulary errors. Word choices are appropriate and precise.
+
+  SCORE 1.5 — Exactly 1 minor issue: a single non-word typo (e.g. "noctural" for "nocturnal") OR one mildly awkward collocation. Meaning fully clear.
+
+  SCORE 1.0 — Either 1 wrong-meaning content word (e.g. "developed the public's imagination" when "captivated" is required) OR 2–3 awkward word choices. Meaning still recoverable.
+
+  SCORE 0.5 — 3 wrong-meaning / awkward choices, at least one comprehension-blocking. Reader has to re-parse.
+
+  SCORE 0 — 4+ wrong-meaning / awkward choices, OR pervasive non-word typos producing unparseable text.
+
+REPETITION PENALTY:
+  If the summary is short (≤60 words) AND mostly verbatim AND repeats the SAME content word ≥2× (e.g. "scientists" used twice, "advantages" used twice), subtract 1.0 from the base. This catches over-reliance on a single lexical anchor.
+
+TYPOS AS VOCAB ERRORS:
+  Typos that produce non-English non-words (e.g. "demirts", "carfull", "sustanblity", "prevelent") COUNT as vocabulary errors here. A typo that produces a different real word (e.g. "their" for "there") counts as grammar, not vocab.
+
+HARD EXCLUSIONS — do NOT deduct vocabulary for:
+  • Spelling that produces a real word ("their"/"there") — that's grammar.
+  • Verbatim reuse of source vocabulary — verbatim is not a vocab issue.
+  • Stylistic length / sentence structure — that's grammar.
+
+In the reasoning, count: "N vocab errors found: [list]; repetition penalty: yes/no."
+
+Return JSON only, exactly this shape:
+{
+  "vocabulary": {"score": <number 0-2 in 0.5 steps>, "reasoning": "<one sentence>"}
+}
+"""
+
+
+def _swt_call_one(system_prompt: str, passage: str, user_text: str,
+                  max_tokens: int, log_tag: str) -> Optional[dict]:
+    """Single Claude call for one SWT sub-score. Returns parsed dict on
+    success, None on failure after 3 retries. Never raises.
     """
-    if not passage or not passage.strip():
-        return _failure("content_llm_unavailable", reason="empty passage")
-    if not user_text or not user_text.strip():
-        # No student text to score — return zeros without an LLM call.
-        return {
-            "content": {"score": 0.0, "reasoning": None},
-            "grammar": {"score": 0.0, "reasoning": None},
-            "vocabulary": {"score": 0.0, "reasoning": None},
-            "scored": True,
-            "warning_code": None,
-        }
-
-    last_exc: Exception = RuntimeError("score_swt_subscores_with_claude: no attempts made")
+    last_exc: Exception = RuntimeError(f"{log_tag}: no attempts made")
     for attempt in range(1, 4):
         try:
             response = _client.messages.create(
                 model=_MODEL,
                 temperature=0,
-                max_tokens=600,
+                max_tokens=max_tokens,
                 system=[
                     {
                         "type": "text",
-                        "text": _SWT_SYSTEM_PROMPT,
+                        "text": system_prompt,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
@@ -162,71 +256,132 @@ def score_swt_subscores_with_claude(passage: str, user_text: str) -> dict:
                 ],
                 timeout=30.0,
             )
-
             text = ""
             for block in response.content:
                 if block.type == "text":
                     text = block.text
                     break
             if not text:
-                last_exc = RuntimeError("Claude returned no text content")
+                last_exc = RuntimeError(f"{log_tag}: empty response")
                 if attempt < 3:
                     time.sleep(2)
                 continue
-
-            # Strip markdown fences if present.
             text = text.strip()
             if text.startswith("```"):
                 parts = text.split("```")
                 text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
-
             parsed = json.loads(text)
-
-            content_score = _clamp(parsed.get("content", {}).get("score"), 0, 4)
-            content_reasoning = _reasoning(parsed.get("content", {}).get("reasoning"))
-            grammar_score = _clamp(parsed.get("grammar", {}).get("score"), 0, 2)
-            grammar_reasoning = _reasoning(parsed.get("grammar", {}).get("reasoning"))
-            vocab_score = _clamp(parsed.get("vocabulary", {}).get("score"), 0, 2)
-            vocab_reasoning = _reasoning(parsed.get("vocabulary", {}).get("reasoning"))
-
             cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
-            cache_write = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
             log.info(
-                "[CLAUDE-SWT] content=%.1f grammar=%.1f vocab=%.1f "
-                "in=%d out=%d cache_read=%d cache_write=%d",
-                content_score, grammar_score, vocab_score,
-                response.usage.input_tokens, response.usage.output_tokens,
-                cache_read, cache_write,
+                "[CLAUDE-SWT-%s] in=%d out=%d cache_read=%d",
+                log_tag, response.usage.input_tokens, response.usage.output_tokens, cache_read,
             )
-
-            return {
-                "content": {
-                    "score": content_score,
-                    "reasoning": content_reasoning,
-                    "paraphrasing": _parse_paraphrasing_block(parsed),
-                },
-                "grammar": {"score": grammar_score, "reasoning": grammar_reasoning},
-                "vocabulary": {"score": vocab_score, "reasoning": vocab_reasoning},
-                "scored": True,
-                "warning_code": None,
-            }
+            return parsed
         except anthropic.AuthenticationError as exc:
-            log.error("[CLAUDE-SWT] AuthenticationError — not retrying: %s", exc)
-            return _failure("content_llm_unavailable", reason=f"auth: {exc}")
+            log.error("[CLAUDE-SWT-%s] AuthenticationError — not retrying: %s", log_tag, exc)
+            return None
         except Exception as exc:
             last_exc = exc
             log.warning(
-                "[CLAUDE-SWT] attempt=%d/3 failed — %s: %s",
-                attempt, type(exc).__name__, exc,
+                "[CLAUDE-SWT-%s] attempt=%d/3 failed — %s: %s",
+                log_tag, attempt, type(exc).__name__, exc,
             )
             if attempt < 3:
                 time.sleep(2)
+    log.error("[CLAUDE-SWT-%s] failed after 3 attempts: %s", log_tag, last_exc)
+    return None
 
-    log.error(
-        "[CLAUDE-SWT] failed after 3 attempts — exception=%s: %s",
-        type(last_exc).__name__, last_exc,
+
+def score_swt_subscores_with_claude(passage: str, user_text: str) -> dict:
+    """Score SWT sub-scores via Claude Haiku 4.5.
+
+    Fires THREE parallel calls — content (v3 rubric), grammar (worked-examples
+    rubric), vocabulary (v3.1 rubric) — via ThreadPoolExecutor. Each rubric
+    lives in its own focused prompt so we can iterate on one without
+    regression risk on the others.
+
+    Returns a dict carrying per-sub-score `{score, reasoning}` plus a
+    `scored` flag and (when relevant) a `warning_code` for the partial-
+    success plumbing the rest of the pipeline already understands:
+
+        {
+            "content":    {"score": float, "reasoning": str|None},
+            "grammar":    {"score": float, "reasoning": str|None},
+            "vocabulary": {"score": float, "reasoning": str|None},
+            "scored":     bool,
+            "warning_code": Optional[str],  # "content_llm_unavailable" when content sub-call failed
+        }
+
+    `scored` follows the content sub-call only — that's the load-bearing one
+    that callers gate fallback paths on. Grammar/vocab failures are tolerated
+    by returning score=0 with reasoning=None.
+
+    Never raises.
+    """
+    if not passage or not passage.strip():
+        return _failure("content_llm_unavailable", reason="empty passage")
+    if not user_text or not user_text.strip():
+        # No student text to score — return zeros without any LLM call.
+        return {
+            "content": {"score": 0.0, "reasoning": None},
+            "grammar": {"score": 0.0, "reasoning": None},
+            "vocabulary": {"score": 0.0, "reasoning": None},
+            "scored": True,
+            "warning_code": None,
+        }
+
+    # Fire all three sub-calls in parallel. Each call has its own retry loop
+    # and returns None on failure. Total wall-time = max(per-call latency).
+    t0 = time.monotonic()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_content = pool.submit(_swt_call_one, _SWT_CONTENT_V3_PROMPT,
+                                passage, user_text, 300, "CONTENT")
+        f_grammar = pool.submit(_swt_call_one, _SWT_GRAMMAR_PROMPT,
+                                passage, user_text, 250, "GRAMMAR")
+        f_vocab   = pool.submit(_swt_call_one, _SWT_VOCAB_V31_PROMPT,
+                                passage, user_text, 200, "VOCAB")
+        content_parsed = f_content.result()
+        grammar_parsed = f_grammar.result()
+        vocab_parsed   = f_vocab.result()
+    dt_ms = int((time.monotonic() - t0) * 1000)
+
+    # Content is the load-bearing sub-call — its failure flips scored=False.
+    if content_parsed is None:
+        log.error("[CLAUDE-SWT] content sub-call failed; returning fallback")
+        return _failure("content_llm_unavailable", reason="content sub-call failed")
+
+    content_score = _clamp(content_parsed.get("content", {}).get("score"), 0, 4)
+    content_reasoning = _reasoning(content_parsed.get("content", {}).get("reasoning"))
+    paraphrasing = _parse_paraphrasing_block(content_parsed)
+
+    if grammar_parsed is not None:
+        grammar_score = _clamp(grammar_parsed.get("grammar", {}).get("score"), 0, 2)
+        grammar_reasoning = _reasoning(grammar_parsed.get("grammar", {}).get("reasoning"))
+    else:
+        grammar_score, grammar_reasoning = 0.0, None
+
+    if vocab_parsed is not None:
+        vocab_score = _clamp(vocab_parsed.get("vocabulary", {}).get("score"), 0, 2)
+        vocab_reasoning = _reasoning(vocab_parsed.get("vocabulary", {}).get("reasoning"))
+    else:
+        vocab_score, vocab_reasoning = 0.0, None
+
+    log.info(
+        "[CLAUDE-SWT] split-parallel content=%.1f grammar=%.1f vocab=%.1f total_ms=%d",
+        content_score, grammar_score, vocab_score, dt_ms,
     )
-    return _failure("content_llm_unavailable", reason=str(last_exc))
+
+    return {
+        "content": {
+            "score": content_score,
+            "reasoning": content_reasoning,
+            "paraphrasing": paraphrasing,
+        },
+        "grammar": {"score": grammar_score, "reasoning": grammar_reasoning},
+        "vocabulary": {"score": vocab_score, "reasoning": vocab_reasoning},
+        "scored": True,
+        "warning_code": None,
+    }
 
 
 def _clamp(value, lo: int, hi: int) -> float:
