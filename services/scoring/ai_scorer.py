@@ -310,57 +310,48 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Three calls in parallel: nano (full SWT, used for content only),
-    # Claude grammar+vocab judge (overrides nano on both sub-scores),
-    # hybrid spelling check. Wall-clock = max of the three (~2s). ─────────
+    # ── Two parallel calls: gpt-4o 3-prompt split (returns content + grammar
+    # + vocab in one result dict) and the deterministic spelling check. The
+    # gpt-4o split is the PRIMARY scorer; Claude split is fallback 1; the
+    # heuristic is fallback 2. ─────────────────────────────────────────────
     from concurrent.futures import ThreadPoolExecutor
-    from services.openai_scoring_service import score_swt_subscores_with_openai
-    from services.anthropic_scoring_service import score_grammar_and_vocab_with_claude
+    from services.openai_scoring_service import score_swt_subscores_with_gpt4o
+    from services.anthropic_scoring_service import score_swt_subscores_with_claude
     from services.spelling_checker import check_spelling, format_spelling_reasoning
 
     scoring_warnings: list = []
-    scorer_label = "nano(content)+claude(grammar+vocab)+hybrid(spell)"
+    scorer_label = "gpt-4o-split(content+grammar+vocab)+hybrid(spell)"
 
-    def _run_nano():
+    def _run_gpt4o():
         try:
-            return score_swt_subscores_with_openai(prompt or '', body)
+            return score_swt_subscores_with_gpt4o(prompt or '', body)
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[SWT] OpenAI call raised unexpectedly: {e}")
+            get_logger(__name__).error(f"[SWT] GPT-4o split raised unexpectedly: {e}")
             return {"scored": False, "warning_code": "content_llm_unavailable"}
-
-    def _run_claude_grammar_vocab():
-        try:
-            return score_grammar_and_vocab_with_claude(prompt or '', body)
-        except Exception as e:
-            from core.logging_config import get_logger
-            get_logger(__name__).error(f"[SWT] Claude grammar+vocab raised unexpectedly: {e}")
-            return {"scored": False, "warning_code": "grammar_vocab_claude_unavailable"}
 
     def _run_spell():
         return check_spelling(body, prompt or "")
 
-    with ThreadPoolExecutor(max_workers=3) as _ex:
-        f_llm = _ex.submit(_run_nano)
-        f_gv = _ex.submit(_run_claude_grammar_vocab)
+    with ThreadPoolExecutor(max_workers=2) as _ex:
+        f_llm = _ex.submit(_run_gpt4o)
         f_spell = _ex.submit(_run_spell)
         llm_result = f_llm.result()
-        gv_result = f_gv.result()
         spell_result = f_spell.result()
 
-    # Nano fallback chain: if nano failed, fall back to Claude full SWT.
+    # Fallback 1: Claude split (same 3 prompts, different model)
     if not llm_result.get("scored"):
         try:
-            from services.anthropic_scoring_service import score_swt_subscores_with_claude
             llm_result = score_swt_subscores_with_claude(prompt or '', body)
             if llm_result.get("scored"):
-                scorer_label = "claude-full-fallback+hybrid"
-                scoring_warnings.append("openai_unavailable_used_claude")
+                scorer_label = "claude-split(content+grammar+vocab)+hybrid(spell)"
+                scoring_warnings.append("gpt4o_unavailable_used_claude")
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[SWT] Claude SWT fallback raised: {e}")
+            get_logger(__name__).error(f"[SWT] Claude split fallback raised: {e}")
             llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
 
+    # Fallback 2: heuristic
     if not llm_result.get("scored"):
         fallback = _swt_heuristic_fallback(body, content_max, grammar_max, vocab_max)
         content_sub    = fallback["content"]
@@ -372,37 +363,15 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
         scorer_label = "heuristic-fallback"
     else:
         content_sub    = llm_result["content"]
-        grammar_sub    = llm_result["grammar"]
-        vocabulary_sub = llm_result["vocabulary"]
-
-    # Override grammar + vocabulary with Claude's grammar+vocab judgment
-    # when available. Preserves nano scores in audit fields.
-    nano_grammar_score = float(grammar_sub.get("score", 0) or 0)
-    nano_vocab_score = float(vocabulary_sub.get("score", 0) or 0)
-    if gv_result.get("scored"):
-        cg = gv_result["grammar"]
-        cv = gv_result["vocabulary"]
-        grammar_sub = dict(grammar_sub)
-        grammar_sub["nano_grammar_score"] = nano_grammar_score
-        grammar_sub["score"] = float(cg.get("score", 0) or 0)
-        grammar_sub["reasoning"] = cg.get("reasoning") or grammar_sub.get("reasoning")
-        cg_quotes = list(cg.get("mistake_quotes") or [])
-        grammar_sub["mistake_quotes"] = cg_quotes
-        grammar_sub["grammar_mistake_quotes"] = cg_quotes
-        grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
-
-        vocabulary_sub = dict(vocabulary_sub)
-        vocabulary_sub["nano_vocab_score"] = nano_vocab_score
-        vocabulary_sub["score"] = float(cv.get("score", 0) or 0)
-        vocabulary_sub["reasoning"] = cv.get("reasoning") or vocabulary_sub.get("reasoning")
-        vocabulary_sub["vocab_scorer"] = "claude-haiku-4-5"
-    else:
-        if gv_result.get("warning_code"):
-            scoring_warnings.append(gv_result["warning_code"])
-        grammar_sub = dict(grammar_sub)
-        grammar_sub["grammar_scorer"] = "nano-fallback"
-        vocabulary_sub = dict(vocabulary_sub)
-        vocabulary_sub["vocab_scorer"] = "nano-fallback"
+        grammar_sub    = dict(llm_result["grammar"])
+        vocabulary_sub = dict(llm_result["vocabulary"])
+        # Surface mistake_quotes under the legacy key the highlight builder reads.
+        gr_quotes = list(grammar_sub.get("mistake_quotes") or [])
+        grammar_sub["grammar_mistake_quotes"] = gr_quotes
+        # Tag scorer on each sub-score for trainer audit.
+        scorer_tag = "gpt-4o" if scorer_label.startswith("gpt-4o") else "claude-haiku-4-5"
+        grammar_sub["grammar_scorer"] = scorer_tag
+        vocabulary_sub["vocab_scorer"] = scorer_tag
 
     # ── 3-way floor on Grammar & Spelling: min(heuristic, grammar_score,
     # spelling_remaining). The heuristic catches deterministic surface bugs

@@ -177,9 +177,15 @@ GRAMMAR + SPELLING (0–2) — combined score. Two-step process:
   Final grammar score = max(0, base − spelling_deduction).
   In the reasoning, name the specific violation type (or state "no violations") and the spelling-error count.
 
+ALSO populate `mistake_quotes`: a JSON array of the exact verbatim substrings from the student summary that you flagged as grammar errors. Each entry MUST appear verbatim in the student text (case-sensitive, exact characters) so the UI can underline it. Empty list if no errors.
+
 Return JSON only, exactly this shape:
 {
-  "grammar": {"score": <number 0-2 in 0.5 steps>, "reasoning": "<one sentence>"}
+  "grammar": {
+    "score": <number 0-2 in 0.5 steps>,
+    "reasoning": "<one sentence>",
+    "mistake_quotes": [<exact verbatim substrings>]
+  }
 }
 """
 
@@ -334,12 +340,15 @@ def score_swt_subscores_with_claude(passage: str, user_text: str) -> dict:
     # and returns None on failure. Total wall-time = max(per-call latency).
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=3) as pool:
+        # Token budgets are headroomed: content reasoning + paraphrasing
+        # audit can easily exceed 400 tokens; first ship had 300 which
+        # truncated JSON mid-string → JSONDecodeError → false fallback.
         f_content = pool.submit(_swt_call_one, _SWT_CONTENT_V3_PROMPT,
-                                passage, user_text, 300, "CONTENT")
+                                passage, user_text, 800, "CONTENT")
         f_grammar = pool.submit(_swt_call_one, _SWT_GRAMMAR_PROMPT,
-                                passage, user_text, 250, "GRAMMAR")
+                                passage, user_text, 400, "GRAMMAR")
         f_vocab   = pool.submit(_swt_call_one, _SWT_VOCAB_V31_PROMPT,
-                                passage, user_text, 200, "VOCAB")
+                                passage, user_text, 400, "VOCAB")
         content_parsed = f_content.result()
         grammar_parsed = f_grammar.result()
         vocab_parsed   = f_vocab.result()
@@ -355,10 +364,12 @@ def score_swt_subscores_with_claude(passage: str, user_text: str) -> dict:
     paraphrasing = _parse_paraphrasing_block(content_parsed)
 
     if grammar_parsed is not None:
-        grammar_score = _clamp(grammar_parsed.get("grammar", {}).get("score"), 0, 2)
-        grammar_reasoning = _reasoning(grammar_parsed.get("grammar", {}).get("reasoning"))
+        gr = grammar_parsed.get("grammar", {})
+        grammar_score = _clamp(gr.get("score"), 0, 2)
+        grammar_reasoning = _reasoning(gr.get("reasoning"))
+        grammar_quotes = [str(x) for x in (gr.get("mistake_quotes") or []) if x]
     else:
-        grammar_score, grammar_reasoning = 0.0, None
+        grammar_score, grammar_reasoning, grammar_quotes = 0.0, None, []
 
     if vocab_parsed is not None:
         vocab_score = _clamp(vocab_parsed.get("vocabulary", {}).get("score"), 0, 2)
@@ -377,7 +388,11 @@ def score_swt_subscores_with_claude(passage: str, user_text: str) -> dict:
             "reasoning": content_reasoning,
             "paraphrasing": paraphrasing,
         },
-        "grammar": {"score": grammar_score, "reasoning": grammar_reasoning},
+        "grammar": {
+            "score": grammar_score,
+            "reasoning": grammar_reasoning,
+            "mistake_quotes": grammar_quotes,
+        },
         "vocabulary": {"score": vocab_score, "reasoning": vocab_reasoning},
         "scored": True,
         "warning_code": None,
