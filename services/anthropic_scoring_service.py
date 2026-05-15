@@ -636,7 +636,349 @@ def score_grammar_and_vocab_with_claude(passage: str, user_text: str) -> dict:
     }
 
 
-# ── Write Essay (WE) ─────────────────────────────────────────────────────────
+# ── Write Essay (WE) — 5-prompt split ────────────────────────────────────────
+# Mirrors the SWT split architecture. Each sub-score has its own focused
+# prompt so the rubric can be iterated without regression risk on the others.
+# Spelling is NOT here — that runs as a deterministic check in ai_scorer.py.
+# Form is computed deterministically upstream from word count.
+
+_WE_CONTENT_PROMPT = """You are scoring CONTENT only for a PTE Academic Write Essay response.
+
+The student is given a prompt and writes a 200–300 word essay in 20 minutes. DSC, Grammar, GLR, Vocabulary, and Spelling are scored separately — ignore them. Content is about RELEVANCE TO THE PROMPT and DEPTH OF ARGUMENT.
+
+CONTENT (0–6, half-point granularity allowed):
+
+  SCORE 6 — Fully addresses the prompt with a clear, well-developed position. Arguments are substantial and relevant throughout. Multiple supporting points with concrete examples.
+
+  SCORE 5 — Adequately addresses the prompt; position is clear with good supporting points; minor gaps in argument depth or relevance.
+
+  SCORE 4 — Addresses the prompt with a discernible position; arguments are present but some are shallow or partially off-topic.
+
+  SCORE 3 — Partial address of the prompt; position is unclear OR arguments are mostly underdeveloped OR drifts off-topic in places.
+
+  SCORE 2 — Minimal engagement with the prompt; relies heavily on generalities; off-topic for stretches.
+
+  SCORE 1 — Barely addresses the prompt; mostly tangential or filler.
+
+  SCORE 0 — Completely off-topic or fails to address the prompt at all.
+
+CRITICAL-MOVE RULES:
+  • Factual misrepresentation of the prompt's central claim → cap at 1.0.
+  • Off-prompt: if the essay answers a DIFFERENT question than the one asked → cap at 1.0.
+  • Generic filler ("technology has changed our lives", "many people think") without engaging the specific prompt → cap at 3.0.
+
+In the reasoning, name what the prompt asked, whether the student took a position, what their main arguments are, and whether examples support the position.
+
+Return JSON only, exactly this shape:
+{
+  "content": {"score": <number 0-6 in 0.5 steps>, "reasoning": "<one sentence>"}
+}
+"""
+
+_WE_DSC_PROMPT = """You are scoring DEVELOPMENT, STRUCTURE & COHERENCE (DSC) only for a PTE Academic Write Essay response.
+
+DSC measures PARAGRAPHING and how ideas connect within and across paragraphs. Content, Grammar, GLR, Vocabulary, and Spelling are scored separately — ignore them.
+
+DSC (0–6, half-point granularity allowed):
+
+  SCORE 6 — Clear introduction, body paragraphs, and conclusion. Multiple paragraphs separated by blank lines. Smooth transitions between paragraphs (connectives, topic sentences). Ideas flow naturally.
+
+  SCORE 5 — Clear paragraphed structure with logical flow. Minor lapses in transitions or coherence.
+
+  SCORE 4 — Identifiable paragraphed structure but uneven development or weak transitions in places.
+
+  SCORE 3 — HARD CAP for single-paragraph essays. Some structure within the block but no paragraph separation. Also fires when paragraphs exist but are disorganised in parts; coherence breaks down within or across paragraphs.
+
+  SCORE 2 — Poor structure; paragraphing absent or arbitrary; weak coherence throughout.
+
+  SCORE 1 — Very disorganised; ideas don't connect.
+
+  SCORE 0 — No discernible structure; incoherent.
+
+CRITICAL-MOVE RULE — SINGLE PARAGRAPH:
+  If the entire essay is written as ONE continuous block (no blank lines separating paragraphs), the DSC score CANNOT exceed 3.0 regardless of how well the ideas inside are organised. Paragraphing is a required signal in PTE essays.
+
+In the reasoning, name how many paragraphs you see, whether the intro/body/conclusion are distinguishable, and quality of transitions.
+
+Return JSON only, exactly this shape:
+{
+  "dsc": {"score": <number 0-6 in 0.5 steps>, "reasoning": "<one sentence>"}
+}
+"""
+
+_WE_GRAMMAR_PROMPT = """You are scoring GRAMMAR only for a PTE Academic Write Essay response.
+
+You return a single 0–2 score reflecting grammatical structure. Spelling is scored separately and is NOT your concern here.
+
+GRAMMAR (0–2, half-points allowed):
+
+  WORKED EXAMPLES — calibrate against these:
+
+  Score 2/2 (valid grammar throughout):
+  "Technology has transformed modern education in profound ways. Although traditional methods remain valuable, many institutions are now adopting blended approaches that combine both. This shift, which has accelerated since 2020, demonstrates that pedagogical evolution requires balancing innovation with proven practice."
+  → Subordination, varied structures, correct subject-verb agreement, correct tenses. Score: 2.
+
+  Score 1/2 (some real grammatical errors, meaning recoverable):
+  "Technology has transform education in many way. Many institution is adopting new approach. This shift demonstrate that evolution require balance."
+  → Subject-verb disagreement (institution is, shift demonstrate, evolution require), wrong tense (has transform), missing articles. Score: 1.
+
+  Score 0/2 (multiple errors blocking comprehension):
+  "Technology transforming education, institution adopting approach, shift evolution requiring balance traditional innovation."
+  → Missing verbs, broken clauses, reader cannot parse. Score: 0.
+
+Long sentences with subordination and multiple coordinating conjunctions are NORMAL essay style and NOT a deduction trigger.
+
+ALSO populate `mistake_quotes`: a JSON array of the exact verbatim substrings from the essay that you flagged as grammar errors. Each entry MUST appear verbatim in the student text (case-sensitive). Empty list if no errors.
+
+In the reasoning, name the specific violation types (or state "no violations").
+
+Return JSON only, exactly this shape:
+{
+  "grammar": {
+    "score": <number 0-2 in 0.5 steps>,
+    "reasoning": "<one sentence>",
+    "mistake_quotes": [<exact verbatim substrings>]
+  }
+}
+"""
+
+_WE_GLR_PROMPT = """You are scoring GENERAL LINGUISTIC RANGE (GLR) only for a PTE Academic Write Essay response.
+
+GLR measures COMPLEXITY AND VARIETY of sentence structures across the essay. Content, DSC, Grammar, Vocabulary, and Spelling are scored separately — ignore them.
+
+GLR (0–6, half-point granularity allowed):
+
+  SCORE 6 — Excellent range: complex and varied sentence structures (subordination, embedding, relative clauses, varied connectors); confidently controlled. Mix of simple, compound, complex, and compound-complex sentences.
+
+  SCORE 5 — Good range with a mix of simple and complex sentences; some sophistication.
+
+  SCORE 4 — Adequate range; mix of simple and a few complex sentences but with some control issues.
+
+  SCORE 3 — Limited range; mostly simple sentences with occasional attempts at complexity.
+
+  SCORE 2 — Very limited range; almost entirely simple, repetitive structures.
+
+  SCORE 1 — Minimal range; one-clause sentences throughout.
+
+  SCORE 0 — No control of sentence structures.
+
+In the reasoning, name examples of sentence variety (or lack thereof) — cite specific structures used.
+
+Return JSON only, exactly this shape:
+{
+  "glr": {"score": <number 0-6 in 0.5 steps>, "reasoning": "<one sentence>"}
+}
+"""
+
+_WE_VOCAB_PROMPT = """You are scoring VOCABULARY only for a PTE Academic Write Essay response.
+
+Vocabulary measures APPROPRIATENESS and PRECISION of word choice. Paraphrasing the prompt is NOT required — verbatim reuse of prompt vocabulary is NOT penalised here.
+
+VOCABULARY (0–2, half-points allowed: 0, 0.5, 1, 1.5, 2):
+
+  SCORE 2.0 — 0 vocabulary errors. Word choices are appropriate, varied, and precise. Academic register.
+
+  SCORE 1.5 — Exactly 1 minor issue: a single non-word typo (e.g. "noctural" for "nocturnal") OR one mildly awkward collocation. Meaning fully clear.
+
+  SCORE 1.0 — Either 1 wrong-meaning content word (e.g. "developed the public's imagination" when "captivated" is required) OR 2–3 awkward word choices. Meaning still recoverable.
+
+  SCORE 0.5 — 3 wrong-meaning / awkward choices, at least one comprehension-blocking.
+
+  SCORE 0 — 4+ wrong-meaning / awkward choices, OR pervasive non-word typos producing unparseable text.
+
+REPETITION PENALTY:
+  If the essay heavily repeats the same content word ≥5× (e.g. "important" used 6 times where synonyms would help), subtract 0.5. Essay-length texts have more room for repetition than summaries, so the threshold is higher than for SWT.
+
+TYPOS AS VOCAB ERRORS:
+  Typos that produce non-English non-words COUNT as vocabulary errors. A typo that produces a different real word counts as grammar, not vocab.
+
+HARD EXCLUSIONS — do NOT deduct vocabulary for:
+  • Spelling that produces a real word — that's grammar/spelling.
+  • Verbatim reuse of prompt vocabulary — verbatim is not a vocab issue.
+  • Stylistic length / sentence structure — that's GLR.
+
+In the reasoning, count: "N vocab errors found: [list]; repetition: yes/no."
+
+Return JSON only, exactly this shape:
+{
+  "vocabulary": {"score": <number 0-2 in 0.5 steps>, "reasoning": "<one sentence>"}
+}
+"""
+
+
+def _we_call_one(system_prompt: str, prompt: str, user_text: str,
+                 max_tokens: int, log_tag: str) -> Optional[dict]:
+    """Single Claude call for one WE sub-score. Returns parsed dict on
+    success, None on failure after 3 retries. Never raises.
+    """
+    last_exc: Exception = RuntimeError(f"{log_tag}: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            response = _client.messages.create(
+                model=_MODEL,
+                temperature=0,
+                max_tokens=max_tokens,
+                system=[
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"ESSAY PROMPT:\n{prompt}",
+                                "cache_control": {"type": "ephemeral"},
+                            },
+                            {
+                                "type": "text",
+                                "text": f"STUDENT ESSAY:\n{user_text}",
+                            },
+                        ],
+                    }
+                ],
+                timeout=60.0,
+            )
+            text = ""
+            for block in response.content:
+                if block.type == "text":
+                    text = block.text
+                    break
+            if not text:
+                last_exc = RuntimeError(f"{log_tag}: empty response")
+                if attempt < 3:
+                    time.sleep(2)
+                continue
+            text = text.strip()
+            if text.startswith("```"):
+                parts = text.split("```")
+                text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
+            parsed = json.loads(text)
+            return parsed
+        except anthropic.AuthenticationError as exc:
+            log.error("[CLAUDE-WE-%s] AuthenticationError — not retrying: %s", log_tag, exc)
+            return None
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "[CLAUDE-WE-%s] attempt=%d/3 failed — %s: %s",
+                log_tag, attempt, type(exc).__name__, exc,
+            )
+            if attempt < 3:
+                time.sleep(2)
+    log.error("[CLAUDE-WE-%s] failed after 3 attempts: %s", log_tag, last_exc)
+    return None
+
+
+def score_we_subscores_with_claude_split(prompt: str, user_text: str) -> dict:
+    """Score WE sub-scores via Claude Haiku 4.5, 5 parallel calls.
+
+    Returns content/dsc/grammar/glr/vocabulary sub-scores. Spelling is NOT
+    returned here — it's computed deterministically upstream in ai_scorer.py
+    and merged into the breakdown there.
+
+    Content is load-bearing — if it fails, scored=False; other sub-call
+    failures return 0/None for that sub-score.
+    """
+    if not prompt or not prompt.strip():
+        return _we_split_failure("empty prompt")
+    if not user_text or not user_text.strip():
+        return {
+            "content":    {"score": 0.0, "reasoning": None},
+            "dsc":        {"score": 0.0, "reasoning": None},
+            "grammar":    {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+            "glr":        {"score": 0.0, "reasoning": None},
+            "vocabulary": {"score": 0.0, "reasoning": None},
+            "scored": True,
+            "warning_code": None,
+        }
+
+    t0 = time.monotonic()
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        f_c = pool.submit(_we_call_one, _WE_CONTENT_PROMPT, prompt, user_text, 600, "CONTENT")
+        f_d = pool.submit(_we_call_one, _WE_DSC_PROMPT,     prompt, user_text, 400, "DSC")
+        f_g = pool.submit(_we_call_one, _WE_GRAMMAR_PROMPT, prompt, user_text, 500, "GRAMMAR")
+        f_l = pool.submit(_we_call_one, _WE_GLR_PROMPT,     prompt, user_text, 400, "GLR")
+        f_v = pool.submit(_we_call_one, _WE_VOCAB_PROMPT,   prompt, user_text, 400, "VOCAB")
+        content_parsed = f_c.result()
+        dsc_parsed     = f_d.result()
+        grammar_parsed = f_g.result()
+        glr_parsed     = f_l.result()
+        vocab_parsed   = f_v.result()
+    dt_ms = int((time.monotonic() - t0) * 1000)
+
+    if content_parsed is None:
+        log.error("[CLAUDE-WE-SPLIT] content sub-call failed; returning fallback")
+        return _we_split_failure("content sub-call failed")
+
+    def _r(v):
+        if v is None: return None
+        s = str(v).strip()
+        return s if s else None
+
+    content_score = _clamp(content_parsed.get("content", {}).get("score"), 0, 6)
+    content_reasoning = _r(content_parsed.get("content", {}).get("reasoning"))
+
+    if dsc_parsed is not None:
+        dsc_score = _clamp(dsc_parsed.get("dsc", {}).get("score"), 0, 6)
+        dsc_reasoning = _r(dsc_parsed.get("dsc", {}).get("reasoning"))
+    else:
+        dsc_score, dsc_reasoning = 0.0, None
+
+    if grammar_parsed is not None:
+        gr = grammar_parsed.get("grammar", {})
+        grammar_score = _clamp(gr.get("score"), 0, 2)
+        grammar_reasoning = _r(gr.get("reasoning"))
+        grammar_quotes = [str(x) for x in (gr.get("mistake_quotes") or []) if x]
+    else:
+        grammar_score, grammar_reasoning, grammar_quotes = 0.0, None, []
+
+    if glr_parsed is not None:
+        glr_score = _clamp(glr_parsed.get("glr", {}).get("score"), 0, 6)
+        glr_reasoning = _r(glr_parsed.get("glr", {}).get("reasoning"))
+    else:
+        glr_score, glr_reasoning = 0.0, None
+
+    if vocab_parsed is not None:
+        vocab_score = _clamp(vocab_parsed.get("vocabulary", {}).get("score"), 0, 2)
+        vocab_reasoning = _r(vocab_parsed.get("vocabulary", {}).get("reasoning"))
+    else:
+        vocab_score, vocab_reasoning = 0.0, None
+
+    log.info(
+        "[CLAUDE-WE-SPLIT] content=%.1f dsc=%.1f grammar=%.1f glr=%.1f vocab=%.1f total_ms=%d",
+        content_score, dsc_score, grammar_score, glr_score, vocab_score, dt_ms,
+    )
+
+    return {
+        "content":    {"score": content_score,    "reasoning": content_reasoning},
+        "dsc":        {"score": dsc_score,        "reasoning": dsc_reasoning},
+        "grammar":    {"score": grammar_score,    "reasoning": grammar_reasoning,
+                        "mistake_quotes": grammar_quotes},
+        "glr":        {"score": glr_score,        "reasoning": glr_reasoning},
+        "vocabulary": {"score": vocab_score,      "reasoning": vocab_reasoning},
+        "scored": True,
+        "warning_code": None,
+    }
+
+
+def _we_split_failure(reason: str) -> dict:
+    return {
+        "content":    {"score": 0.0, "reasoning": None},
+        "dsc":        {"score": 0.0, "reasoning": None},
+        "grammar":    {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+        "glr":        {"score": 0.0, "reasoning": None},
+        "vocabulary": {"score": 0.0, "reasoning": None},
+        "scored": False,
+        "warning_code": "content_llm_unavailable",
+    }
+
+
+# ── Legacy combined WE prompt (kept for the existing fallback path) ──────────
 
 _WE_SYSTEM_PROMPT = """You are scoring a PTE Academic Write Essay response.
 

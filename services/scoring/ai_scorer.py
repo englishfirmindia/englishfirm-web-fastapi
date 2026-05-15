@@ -614,55 +614,53 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Parallel: nano (full WE — used for content/dsc/glr/spelling),
-    # Claude grammar+vocab judge (overrides nano on grammar AND vocab),
-    # hybrid spelling. ────────────────────────────────────────────────────
+    # ── Parallel: GPT-4o 5-prompt split (returns content/dsc/grammar/glr/
+    # vocabulary in one result dict) + deterministic spelling check. The
+    # gpt-4o split is the PRIMARY scorer; Claude split is fallback 1; the
+    # heuristic is fallback 2. Spelling is NOT in the LLM result — it's
+    # computed deterministically and merged below. ────────────────────────
     from concurrent.futures import ThreadPoolExecutor
-    from services.openai_scoring_service import score_we_subscores_with_openai
-    from services.anthropic_scoring_service import score_grammar_and_vocab_with_claude
+    from services.openai_scoring_service import score_we_subscores_with_gpt4o
+    from services.anthropic_scoring_service import score_we_subscores_with_claude_split
     from services.spelling_checker import check_spelling, format_spelling_reasoning
 
     scoring_warnings: list = []
-    scorer_label = "nano(content+dsc+glr+spell)+claude(grammar+vocab)+hybrid(spell)"
+    scorer_label = "gpt-4o-split(content+dsc+grammar+glr+vocab)+hybrid(spell)"
 
-    def _run_nano_we():
+    def _run_gpt4o_we():
         try:
-            return score_we_subscores_with_openai(prompt or '', body)
+            return score_we_subscores_with_gpt4o(prompt or '', body)
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[WE] OpenAI raised: {e}")
+            get_logger(__name__).error(f"[WE] GPT-4o split raised: {e}")
             return {"scored": False, "warning_code": "content_llm_unavailable"}
-
-    def _run_claude_grammar_vocab_we():
-        try:
-            return score_grammar_and_vocab_with_claude(prompt or '', body)
-        except Exception as e:
-            from core.logging_config import get_logger
-            get_logger(__name__).error(f"[WE] Claude grammar+vocab raised: {e}")
-            return {"scored": False, "warning_code": "grammar_vocab_claude_unavailable"}
 
     def _run_spell_we():
         return check_spelling(body, prompt or "")
 
-    with ThreadPoolExecutor(max_workers=3) as _ex:
-        f_llm = _ex.submit(_run_nano_we)
-        f_gv = _ex.submit(_run_claude_grammar_vocab_we)
+    with ThreadPoolExecutor(max_workers=2) as _ex:
+        f_llm = _ex.submit(_run_gpt4o_we)
         f_spell = _ex.submit(_run_spell_we)
         llm_result = f_llm.result()
-        gv_result = f_gv.result()
         spell_result = f_spell.result()
 
+    # Fallback 1: Claude split (same 5 prompts, different model)
     if not llm_result.get("scored"):
         try:
-            from services.anthropic_scoring_service import score_we_subscores_with_claude
-            llm_result = score_we_subscores_with_claude(prompt or '', body)
+            llm_result = score_we_subscores_with_claude_split(prompt or '', body)
             if llm_result.get("scored"):
-                scorer_label = "claude-full-fallback+hybrid"
-                scoring_warnings.append("openai_unavailable_used_claude")
+                scorer_label = "claude-split(content+dsc+grammar+glr+vocab)+hybrid(spell)"
+                scoring_warnings.append("gpt4o_unavailable_used_claude")
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[WE] Claude full fallback raised: {e}")
+            get_logger(__name__).error(f"[WE] Claude split fallback raised: {e}")
             llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
+
+    # Synthesize an empty spelling sub-score — gets populated below from the
+    # deterministic check. The legacy combined-prompt scorer used to return a
+    # spelling sub-score from the LLM; the split scorers don't.
+    if llm_result.get("scored") and "spelling" not in llm_result:
+        llm_result["spelling"] = {"score": 0.0, "reasoning": None}
 
     if not llm_result.get("scored"):
         fallback = _we_heuristic_fallback(body)
@@ -684,49 +682,56 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         vocabulary_sub = llm_result["vocabulary"]
         spelling_sub   = llm_result["spelling"]
 
-    # ── Grammar + vocab: override nano with Claude judge + heuristic floor.
+    # ── Heuristic floor on grammar (deterministic spacing/caps/terminal
+    # checks) — only ever LOWERS the LLM score, never raises.
     from services.grammar_heuristic import grammar_heuristic, format_findings
     heur_score, heur_findings = grammar_heuristic(body)
-    nano_grammar_score = float(grammar_sub.get("score", 0) or 0)
-    nano_vocab_score = float(vocabulary_sub.get("score", 0) or 0)
+
     grammar_sub = dict(grammar_sub)
+    llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
+    chosen_g_reasoning = grammar_sub.get("reasoning") or "no grammar reasoning"
     grammar_sub["heuristic_findings"] = heur_findings
     grammar_sub["heuristic_score"] = heur_score
-    grammar_sub["nano_grammar_score"] = nano_grammar_score
+    grammar_sub["llm_score"] = llm_grammar_score
+    scorer_tag = "gpt-4o" if scorer_label.startswith("gpt-4o") else "claude-haiku-4-5"
+    grammar_sub["grammar_scorer"] = scorer_tag
 
-    if gv_result.get("scored"):
-        cg = gv_result["grammar"]
-        cv = gv_result["vocabulary"]
-        claude_g_score = float(cg.get("score", 0) or 0)
-        cg_quotes = list(cg.get("mistake_quotes") or [])
-        grammar_sub["llm_score"] = claude_g_score
-        grammar_sub["mistake_quotes"] = cg_quotes
-        grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
-        chosen_g_score = claude_g_score
-        chosen_g_reasoning = cg.get("reasoning") or grammar_sub.get("reasoning")
-
-        vocabulary_sub = dict(vocabulary_sub)
-        vocabulary_sub["nano_vocab_score"] = nano_vocab_score
-        vocabulary_sub["score"] = float(cv.get("score", 0) or 0)
-        vocabulary_sub["reasoning"] = cv.get("reasoning") or vocabulary_sub.get("reasoning")
-        vocabulary_sub["vocab_scorer"] = "claude-haiku-4-5"
-    else:
-        if gv_result.get("warning_code"):
-            scoring_warnings.append(gv_result["warning_code"])
-        grammar_sub["llm_score"] = nano_grammar_score
-        grammar_sub["grammar_scorer"] = "nano-fallback"
-        chosen_g_score = nano_grammar_score
-        chosen_g_reasoning = grammar_sub.get("reasoning") or "no grammar reasoning"
-        vocabulary_sub = dict(vocabulary_sub)
-        vocabulary_sub["vocab_scorer"] = "nano-fallback"
-
-    final_grammar = min(float(heur_score), chosen_g_score)
+    final_grammar = min(float(heur_score), llm_grammar_score)
     grammar_sub["score"] = final_grammar
     grammar_sub["reasoning"] = (
-        f"Grammar: {int(final_grammar)}/2. "
+        f"Grammar: {final_grammar:.1f}/2. "
         f"Heuristic: {format_findings(heur_findings)}. "
         f"Judge: {chosen_g_reasoning}"
     )
+
+    vocabulary_sub = dict(vocabulary_sub)
+    vocabulary_sub["vocab_scorer"] = scorer_tag
+
+    # ── Single-paragraph cap on DSC: if essay is one continuous block,
+    # cap DSC at 3.0 and surface a student-facing suggestion. ───────────
+    import re as _re_pg
+    body_paragraphs = [p.strip() for p in _re_pg.split(r'\n\s*\n', body or '') if p.strip()]
+    if len(body_paragraphs) <= 1:
+        dsc_sub = dict(dsc_sub)
+        original_dsc = float(dsc_sub.get("score", 0) or 0)
+        if original_dsc > 3.0:
+            dsc_sub["llm_score"] = original_dsc
+            dsc_sub["score"] = 3.0
+            dsc_sub["structure_cap_applied"] = True
+            dsc_sub["structure_cap_reason"] = "single_paragraph"
+            dsc_sub["suggestion"] = (
+                "Your essay was written as a single continuous paragraph. "
+                "PTE expects a clear introduction, body paragraphs, and a "
+                "conclusion. Break your essay into 3–4 distinct paragraphs "
+                "(separated by a blank line) to score above 3 on structure."
+            )
+            dsc_sub["reasoning"] = (
+                f"Capped at 3.0 — essay submitted as a single paragraph. "
+                f"Original LLM verdict was {original_dsc:.1f}. "
+                f"{dsc_sub.get('reasoning', '')}"
+            )
+            if "essay_single_paragraph_cap" not in scoring_warnings:
+                scoring_warnings.append("essay_single_paragraph_cap")
 
     # ── Hybrid spelling override on WE's dedicated spelling sub-score. ──
     spell_count = len(spell_result.get("mistakes") or [])
