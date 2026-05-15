@@ -12,6 +12,9 @@ from services.session_service import start_session, get_session, mark_submitted,
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url
 from schemas.submit_requests import HIWSubmitRequest
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/listening/hiw", tags=["Listening - Highlight Incorrect Words"])
 
@@ -146,14 +149,27 @@ def submit(
     ]
 
     scorer = get_scorer("listening_hiw")
-    result = scorer.score(
-        question_id=question_id,
-        session_id=session_id,
-        answer={
-            "highlighted_words": highlighted_words,
-            "evaluation_json": {**eval_json, "correctAnswers": {**correct_answers, "incorrectWords": incorrect_words}},
-        },
-    )
+    try:
+        result = scorer.score(
+            question_id=question_id,
+            session_id=session_id,
+            answer={
+                "highlighted_words": highlighted_words,
+                "evaluation_json": {**eval_json, "correctAnswers": {**correct_answers, "incorrectWords": incorrect_words}},
+            },
+        )
+    except Exception as e:
+        log.error(
+            "[Listening HIW] scoring failed q=%s sid=%s err=%s: %s",
+            question_id, session_id, type(e).__name__, e,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "scoring_failed",
+                "message": "We couldn't score your answer. Please try again.",
+            },
+        )
 
     breakdown = result.breakdown or {}
     correct_clicks = list(breakdown.get("correct_clicks", []) or [])
