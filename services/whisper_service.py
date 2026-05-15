@@ -30,15 +30,30 @@ _FILLER_PROMPT = "Umm, let me think. Uh, hmm, ah, er, erm. Aah."
 
 _client = None
 
+# Per-call timeout for the Whisper transcribe endpoint. Whisper-1 finishes
+# well under 10s for our longest audio (60s SGD) on a healthy day; 15s
+# covers p99 with margin and matches the existing parallel-Azure helper's
+# join timeout. Without an explicit timeout the SDK default is 600s — a
+# silent OpenAI stall blocks a worker for 10 minutes and exhausts the
+# pool under load.
+_WHISPER_TIMEOUT_S = 15.0
+
 
 def _get_client():
-    """Lazy-init the OpenAI client. Reads OPENAI_API_KEY from env."""
+    """Lazy-init the OpenAI client. Reads OPENAI_API_KEY from env.
+
+    `max_retries=0` disables the SDK's built-in retry loop for this client
+    so an explicit per-call timeout actually means what it says. Our manual
+    3-attempt retry loop (in callers like speaking_scorer) already covers
+    transient blips; doubling up with SDK retries on top of a 15s timeout
+    would push the worst case to ~45s of wait per outer attempt.
+    """
     global _client
     if _client is None:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY not set")
-        _client = OpenAI(api_key=api_key)
+        _client = OpenAI(api_key=api_key, max_retries=0)
     return _client
 
 
@@ -75,6 +90,7 @@ def transcribe_with_whisper(audio_bytes: bytes, language: str = "en") -> str:
             language=language,
             response_format="text",
             prompt=_FILLER_PROMPT,
+            timeout=_WHISPER_TIMEOUT_S,
         )
         text = str(result).strip()
         log.info("[WHISPER] ok len=%d preview=%r", len(text), text[:80])
@@ -121,6 +137,7 @@ def transcribe_with_whisper_words(audio_bytes: bytes, language: str = "en") -> d
             response_format="verbose_json",
             timestamp_granularities=["word"],
             prompt=_FILLER_PROMPT,
+            timeout=_WHISPER_TIMEOUT_S,
         )
         # `result` is a Pydantic-like object; .words may be missing if Whisper
         # didn't return any (extremely short / silent clip).
