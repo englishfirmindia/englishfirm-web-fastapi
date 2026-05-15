@@ -52,6 +52,12 @@ def setup_logging() -> None:
     root.setLevel(_LOG_LEVEL)
     handler = logging.StreamHandler(stream=sys.stdout)
     handler.setFormatter(JsonFormatter() if _JSON_LOGS else logging.Formatter(_TEXT_FORMAT))
+    # Attach the request-id filter so every emitted record carries the
+    # current request's id as the `req` field (when inside a request
+    # scope). Importing here keeps the module import-cycle clean —
+    # request_context imports starlette which doesn't import this module.
+    from core.request_context import RequestIdFilter
+    handler.addFilter(RequestIdFilter())
     root.handlers.clear()
     root.addHandler(handler)
     # Tame chatty third-party loggers.

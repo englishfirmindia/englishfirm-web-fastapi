@@ -22,6 +22,14 @@ from routers.student_share import router as student_share_router
 
 app = FastAPI(title="EnglishFirm Web API", version="1.0.0")
 
+# Request-id + latency middleware — every request gets a short id stamped
+# onto every log line it produces, plus a single [REQUEST] summary line
+# at completion with method/path/status/duration_ms. Lets CloudWatch
+# Logs Insights answer "what happened in request abc12345" and
+# "p95 latency for /api/v1/.../submit" with one query each.
+from core.request_context import RequestContextMiddleware
+app.add_middleware(RequestContextMiddleware)
+
 
 @app.get("/health")
 async def health():
@@ -69,7 +77,8 @@ app.add_middleware(
     allow_origins=_config.CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-Id"],
+    expose_headers=["X-Request-Id"],
 )
 
 # Speaking
