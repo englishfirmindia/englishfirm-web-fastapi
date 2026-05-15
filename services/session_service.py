@@ -465,53 +465,26 @@ def mark_submitted(
     score: int,
     question_type: Optional[str] = None,
 ) -> None:
+    """In-memory session bookkeeping only.
+
+    The DB-side writes that used to live here (user_question_attempts upsert,
+    practice_attempts aggregate update) are now folded into
+    `persist_answer_to_db`'s synchronous transaction — see Option A in the
+    audit. The daemon-thread pattern this used to use silently lost data
+    when the worker process was torn down (deploy, OOM, health-check
+    replacement) mid-commit; doing the writes inside the same RDS
+    transaction as the attempt_answers row makes HTTP 200 ⇔ DB committed.
+
+    Keeping this function as the call site for the in-memory updates so
+    every existing router stays a two-line pattern. Callers MUST still
+    invoke this before `persist_answer_to_db` so the session's submitted
+    set + running total are current when the aggregate UPDATE fires.
+    """
     session = get_session(session_id)
     session["submitted_questions"].add(question_id)
     session["score"] = session.get("score", 0) + score
     session.setdefault("question_scores", {})[question_id] = score
     ACTIVE_SESSIONS.save(session_id)
-
-    # Record attempt in user_question_attempts for deduplication
-    def _record():
-        last_exc: Exception = RuntimeError("_record: no attempts made")
-        for attempt in range(1, 4):
-            db = SessionLocal()
-            try:
-                user_id = session.get("user_id")
-                module = session.get("module", "")
-                q_type = question_type or session.get("question_type", "")
-                if user_id:
-                    exists = db.query(UserQuestionAttempt).filter_by(
-                        user_id=user_id, question_id=question_id
-                    ).first()
-                    if not exists:
-                        db.add(UserQuestionAttempt(
-                            user_id=user_id,
-                            question_id=question_id,
-                            question_type=q_type,
-                            module=module,
-                        ))
-                    # Update PracticeAttempt answered count + total_score
-                    # Skip for sectional — bg aggregation thread owns total_score
-                    attempt_id = session.get("attempt_id")
-                    if attempt_id:
-                        pa = db.query(PracticeAttempt).filter_by(id=attempt_id).first()
-                        if pa and pa.question_type != "sectional":
-                            pa.questions_answered = len(session["submitted_questions"])
-                            pa.total_score = session["score"]
-                    db.commit()
-                return
-            except Exception as e:
-                last_exc = e
-                log.error(f"[MARK_SUBMITTED] DB error attempt={attempt}/3: {e}")
-                db.rollback()
-                if attempt < 3:
-                    time.sleep(attempt)
-            finally:
-                db.close()
-        log.error(f"[MARK_SUBMITTED] failed after 3 attempts: {last_exc}")
-
-    threading.Thread(target=_record, daemon=True).start()
 
 
 def persist_answer_to_db(
@@ -640,6 +613,26 @@ def persist_answer_to_db(
                             question_type=question_type,
                             module=module or "",
                         ))
+                # Same-txn PracticeAttempt aggregate bump (questions_answered +
+                # running total_score). Was a fire-and-forget daemon thread in
+                # mark_submitted that silently lost the write when the worker
+                # was torn down mid-commit (deploy, OOM, health-check kill).
+                # Folding it here means HTTP 200 ⇔ aggregate committed.
+                #
+                # Skip for sectional — _speaking_aggregate_bg / equivalent owns
+                # total_score for those and writing here would race the bg
+                # thread.
+                if attempt_id:
+                    pa_for_agg = (
+                        db.query(PracticeAttempt)
+                        .filter_by(id=attempt_id)
+                        .first()
+                    )
+                    if pa_for_agg and pa_for_agg.question_type != "sectional":
+                        pa_for_agg.questions_answered = len(
+                            session.get("submitted_questions") or set()
+                        )
+                        pa_for_agg.total_score = session.get("score", 0)
                 db.commit()
                 return
             except Exception as e:
@@ -650,9 +643,17 @@ def persist_answer_to_db(
                     time.sleep(attempt)
             finally:
                 db.close()
-        log.error(f"[PERSIST_ANSWER] failed after 3 attempts q={question_id}: {last_exc}")
+        log.error(
+            "[SUBMIT_PERSIST] failed after 3 attempts q=%s sid=%s: %s",
+            question_id, session_id, last_exc,
+        )
 
-    threading.Thread(target=_write, daemon=True).start()
+    # Synchronous now (Option A) — the daemon-thread fire-and-forget pattern
+    # silently lost writes whenever the worker was torn down (deploy, OOM,
+    # health-check replacement) mid-commit. Running in-line means HTTP 200
+    # ⇔ all rows committed. Worst-case latency is bounded by the engine's
+    # 10s statement_timeout × 3 retries; happy path is ~30ms.
+    _write()
 
 
 def persist_speaking_answer_pending(
@@ -726,9 +727,13 @@ def persist_speaking_answer_pending(
                     time.sleep(attempt)
             finally:
                 db.close()
-        log.error(f"[PERSIST_SPEAKING] failed after 3 attempts q={question_id}: {last_exc}")
+        log.error(
+            "[SUBMIT_PERSIST_SPEAKING] failed after 3 attempts q=%s: %s",
+            question_id, last_exc,
+        )
 
-    threading.Thread(target=_write, daemon=True).start()
+    # Synchronous (Option A) — see persist_answer_to_db comment above.
+    _write()
 
 
 def update_speaking_score_in_db(
