@@ -12,6 +12,7 @@ from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url
 from schemas.submit_requests import MultiOptionSubmitRequest
 from core.logging_config import get_logger
+from services.question_search import apply_search_filter
 
 log = get_logger(__name__)
 
@@ -48,8 +49,7 @@ def list_questions(
             query = query.filter(QuestionFromApeuni.question_id.in_(practiced_subq))
         else:
             query = query.filter(~QuestionFromApeuni.question_id.in_(practiced_subq))
-    if search:
-        query = query.filter(QuestionFromApeuni.title.ilike(f'%{search}%'))
+    query = apply_search_filter(query, search)
 
     total = query.count()
     total_pages = math.ceil(total / limit) if total > 0 else 1

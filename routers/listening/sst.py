@@ -17,6 +17,7 @@ from services.session_service import (
 )
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url
+from services.question_search import apply_search_filter
 from schemas.submit_requests import TextSubmitRequest
 
 router = APIRouter(prefix="/listening/sst", tags=["Listening - Summarize Spoken Text"])
@@ -52,8 +53,7 @@ def list_questions(
             query = query.filter(QuestionFromApeuni.question_id.in_(practiced_subq))
         else:
             query = query.filter(~QuestionFromApeuni.question_id.in_(practiced_subq))
-    if search:
-        query = query.filter(QuestionFromApeuni.title.ilike(f'%{search}%'))
+    query = apply_search_filter(query, search)
 
     total = query.count()
     total_pages = math.ceil(total / limit) if total > 0 else 1
