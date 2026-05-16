@@ -288,12 +288,24 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
     if not form_ok:
         if not body:
             reason = "Empty response."
+            ui_reason = "Form 0 — you didn't write anything."
         elif len(sentences) != 1:
             reason = f"Form gate failed — response has {len(sentences)} sentences, requires exactly 1."
+            ui_reason = (
+                f"Form 0 — SWT must be exactly one sentence. You wrote "
+                f"{len(sentences)} sentences. Combine them or remove the extra full stops."
+            )
         else:
             reason = f"Form gate failed — {wc} words is outside the 5–75 range."
+            ui_reason = (
+                f"Form 0 — SWT must be 5–75 words. You wrote {wc} words. "
+                f"Trim it back into the 5–75 range."
+                if wc > 75
+                else f"Form 0 — SWT must be at least 5 words. You wrote {wc}."
+            )
         breakdown = {
             "form": 0,
+            "form_reasoning": ui_reason,
             "content":    {"score": 0.0, "reasoning": "Not scored — form gate failed."},
             "grammar":    {"score": 0.0, "reasoning": "Not scored — form gate failed."},
             "vocabulary": {"score": 0.0, "reasoning": "Not scored — form gate failed."},
@@ -589,12 +601,22 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
     if form_score == 0:
         if not body:
             reason = "Empty response."
+            ui_reason = "Form 0 — you didn't write anything."
         elif wc < 120:
             reason = f"Form-zero — {wc} words is below the 120-word minimum."
+            ui_reason = (
+                f"Form 0 — essay needs at least 120 words. You wrote {wc}. "
+                f"Aim for 200–300 for full marks."
+            )
         else:
             reason = f"Form-zero — {wc} words exceeds the 380-word maximum."
+            ui_reason = (
+                f"Form 0 — essay cap is 380 words. You wrote {wc}. "
+                f"Trim back below 380; the sweet spot is 200–300."
+            )
         breakdown = {
             "form": 0,
+            "form_reasoning": ui_reason,
             "content":    {"score": 0.0, "reasoning": "Not scored — form-zero."},
             "dsc":        {"score": 0.0, "reasoning": "Not scored — form-zero."},
             "grammar":    {"score": 0.0, "reasoning": "Not scored — form-zero."},
@@ -909,12 +931,22 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
     if form_score == 0:
         if not body:
             reason = "Empty response."
+            ui_reason = "Form 0 — you didn't write anything."
         elif wc < 40:
             reason = f"Form-zero — {wc} words is below the 40-word minimum."
+            ui_reason = (
+                f"Form 0 — SST must be at least 40 words. You wrote {wc}. "
+                f"Target 50–70 for full marks."
+            )
         else:
             reason = f"Form-zero — {wc} words exceeds the 100-word maximum."
+            ui_reason = (
+                f"Form 0 — SST cap is 100 words. You wrote {wc}. "
+                f"Trim back below 100; target 50–70."
+            )
         breakdown = {
             "form": 0,
+            "form_reasoning": ui_reason,
             "content":    {"score": 0.0, "reasoning": "Not scored — form-zero."},
             "grammar":    {"score": 0.0, "reasoning": "Not scored — form-zero."},
             "vocabulary": {"score": 0.0, "reasoning": "Not scored — form-zero."},
