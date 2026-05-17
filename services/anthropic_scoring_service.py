@@ -177,14 +177,32 @@ GRAMMAR + SPELLING (0–2) — combined score. Two-step process:
   Final grammar score = max(0, base − spelling_deduction).
   In the reasoning, name the specific violation type (or state "no violations") and the spelling-error count.
 
-ALSO populate `mistake_quotes`: a JSON array of the exact verbatim substrings from the student summary that you flagged as grammar errors. Each entry MUST appear verbatim in the student text (case-sensitive, exact characters) so the UI can underline it. Empty list if no errors.
+ALSO populate `mistakes`: a JSON array of objects, one per grammar error.
+Each object MUST have these keys:
+  quote      — the offending verbatim substring from the student summary
+               (case-sensitive, exact characters; the UI substring-matches
+               this back into the body to underline it).
+  correction — the corrected text the student should have written. Keep
+               the correction minimal — replace only the offending span,
+               do not rewrite the whole sentence.
+  reason     — a short label naming the error type (e.g. "Singular
+               required", "Subject-verb agreement", "Wrong tense").
+Empty list if no errors. Order should match the natural reading order.
+
+For backward compatibility ALSO emit `mistake_quotes` as a flat array of
+the same verbatim substrings (the same `quote` values, in the same order).
 
 Return JSON only, exactly this shape:
 {
   "grammar": {
     "score": <number 0-2 in 0.5 steps>,
     "reasoning": "<one sentence>",
-    "mistake_quotes": [<exact verbatim substrings>]
+    "mistake_quotes": [<exact verbatim substrings>],
+    "mistakes": [
+      {"quote": "<exact substring>",
+       "correction": "<corrected text>",
+       "reason": "<short label>"}
+    ]
   }
 }
 """

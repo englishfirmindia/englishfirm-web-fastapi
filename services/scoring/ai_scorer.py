@@ -75,6 +75,42 @@ def _apply_content_bump(content_sub: dict, content_max: int) -> dict:
 # is kept around in case we want to bring this back behind a soft warning.
 
 
+_CATEGORY_ORDER = ("spelling", "grammar", "punctuation", "capitalisation", "spacing")
+
+
+def _corrections_by_category(highlights: list) -> dict:
+    """Group highlight entries by category into a `quote → correction` pill
+    list suitable for the frontend's CorrectionsPanel.
+
+    Highlights without a `word` AND `correction` are skipped — they have
+    nothing to show in a pill (e.g. zero-width terminal-missing carets
+    are still highlighted, but there's no original substring to render).
+    Duplicates (same quote + correction within a category) are collapsed.
+    """
+    buckets: dict = {cat: [] for cat in _CATEGORY_ORDER}
+    seen: dict = {cat: set() for cat in _CATEGORY_ORDER}
+    for h in highlights or ():
+        cat = h.get("category")
+        if cat not in buckets:
+            continue
+        word = h.get("word")
+        correction = h.get("correction")
+        # Allow word==correction for cases like ALL-CAPS → Capitalised where
+        # the original spelling is right but case is wrong.
+        if not word or correction in (None, ""):
+            continue
+        key = (str(word), str(correction))
+        if key in seen[cat]:
+            continue
+        seen[cat].add(key)
+        buckets[cat].append({
+            "quote": str(word),
+            "correction": str(correction),
+            "reason": (h.get("reason") or "") and str(h["reason"]),
+        })
+    return buckets
+
+
 def _split_sentences(text: str) -> list:
     """Split into sentences while ignoring decimals (e.g. '$1.75') so a number
     like '1.75 billion' isn't counted as two sentences. Common bug surfaced
@@ -476,6 +512,12 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
     )
     heur_findings = grammar_sub.get("heuristic_findings") or {}
     highlights = build_highlights(body, heur_findings, spelling_mistakes, grammar_mistakes)
+
+    # Per-category correction pills for the frontend. Frontend renders one
+    # CorrectionsPanel per non-empty category in this fixed order:
+    # spelling → grammar → punctuation → capitalisation → spacing.
+    # Derived from `highlights` so the source of truth stays in one place.
+    grammar_sub["corrections_by_category"] = _corrections_by_category(highlights)
 
     breakdown = {
         "form": form_max,

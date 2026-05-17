@@ -93,6 +93,32 @@ def build_highlights(
                 "word": None, "correction": ".",
                 "reason": "missing terminal punctuation",
             })
+    # Rule 5 — space before punctuation. Underline the offending span +
+    # carry the suggested replacement so the corrections panel can show
+    # "ages , → ages,".
+    for start, end, original, suggested in (
+        heuristic_findings.get("space_before_comma") or ()
+    ):
+        highlights.append({
+            "start": start, "end": end,
+            "type": "grammar", "category": "punctuation",
+            "kind": "space_before_punct",
+            "hint": f"Punctuation: '{original}' → '{suggested}'",
+            "word": original, "correction": suggested,
+            "reason": "no space before punctuation",
+        })
+    # Rule 6 — missing space after punctuation. Same shape.
+    for start, end, original, suggested in (
+        heuristic_findings.get("missing_space_after_punct") or ()
+    ):
+        highlights.append({
+            "start": start, "end": end,
+            "type": "grammar", "category": "punctuation",
+            "kind": "missing_space_after_punct",
+            "hint": f"Punctuation: '{original}' → '{suggested}'",
+            "word": original, "correction": suggested,
+            "reason": "missing space after punctuation",
+        })
 
     # ── LLM-quoted spelling typos ────────────────────────────────────────
     used_ranges: set = set()

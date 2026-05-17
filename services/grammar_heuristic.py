@@ -14,6 +14,16 @@ Rules (each starts the heuristic at max=2 and deducts):
                           UNEP, etc. because those aren't ALL-CAPS or are
                           allowlisted.
   4. Missing terminal:    −1 if the response does not end with . ! or ?
+  5. Space-before-comma:  −1 per occurrence of `word + space(s) + ,`
+                          (e.g. "ages , peoples"). PTE rule: no space before
+                          a comma.
+  6. Missing-space-after-comma: −1 per occurrence of `,` followed by a
+                          non-space, non-terminal character (e.g.
+                          "emotion,support"). Same rule applies for other
+                          basic punctuation marks (. ; : ! ?) — but only
+                          flagged when the following character is a letter,
+                          not a digit / quote / closing-bracket, to avoid
+                          tripping on numerals like "1,000" or "1.5".
 
 Final heuristic score = max(0, 2 − total_deductions).
 Caller takes min(heuristic_score, llm_grammar_score) and reports both for
@@ -75,6 +85,12 @@ def grammar_heuristic(text: str) -> Tuple[int, dict]:
         "improper_caps_ranges": [],
         "missing_terminal": False,
         "terminal_position": None,
+        # Rule 5/6 — comma/punctuation spacing. Each list element is
+        # (start, end, original_substring, suggested_substring) so the
+        # corrections panel can render `original → suggested` pills and
+        # the highlight builder can underline the range.
+        "space_before_comma": [],
+        "missing_space_after_punct": [],
     }
     body = text or ""
     if not body.strip():
@@ -113,11 +129,37 @@ def grammar_heuristic(text: str) -> Tuple[int, dict]:
         findings["missing_terminal"] = True
         findings["terminal_position"] = len(rstripped)
 
+    # Rule 5 — space before comma / semicolon / colon / terminal punctuation.
+    # Catches "ages , peoples" (space before comma). The `\S` lookbehind
+    # avoids matching whitespace runs at the start of the body (handled by
+    # rule 2). Suggested fix: drop the extra space(s) before the punctuation.
+    for m in re.finditer(r"(\S)( +)([,;:.!?])", body):
+        # span covers the run of spaces + the punctuation char so the
+        # highlight underlines exactly what the student needs to delete.
+        s = m.start(2)
+        e = m.end(3)
+        original = body[s - 1:e]   # include the preceding word char for context
+        suggested = m.group(1) + m.group(3)
+        findings["space_before_comma"].append((s - 1, e, original, suggested))
+
+    # Rule 6 — missing space after comma / semicolon / colon. Catches
+    # "emotion,support". Avoid false positives on numerals ("1,000",
+    # "1.5"), closing quotes (",\""), and end-of-string punctuation.
+    # Only flag when followed by a letter (a-z / A-Z).
+    for m in re.finditer(r"([,;:])([A-Za-z])", body):
+        s = m.start(1)
+        e = m.end(2)
+        original = body[s:e]
+        suggested = m.group(1) + " " + m.group(2)
+        findings["missing_space_after_punct"].append((s, e, original, suggested))
+
     deduction = (
         findings["extra_spaces"]
         + (1 if findings["missing_initial_cap"] else 0)
         + len(findings["improper_caps"])
         + (1 if findings["missing_terminal"] else 0)
+        + len(findings["space_before_comma"])
+        + len(findings["missing_space_after_punct"])
     )
     return max(0, _MAX - deduction), findings
 
@@ -133,4 +175,10 @@ def format_findings(findings: dict) -> str:
         parts.append(f"improper_caps={','.join(findings['improper_caps'])}")
     if findings.get("missing_terminal"):
         parts.append("missing_terminal_punctuation")
+    if findings.get("space_before_comma"):
+        parts.append(f"space_before_comma={len(findings['space_before_comma'])}")
+    if findings.get("missing_space_after_punct"):
+        parts.append(
+            f"missing_space_after_punct={len(findings['missing_space_after_punct'])}"
+        )
     return "; ".join(parts) if parts else "no findings"
