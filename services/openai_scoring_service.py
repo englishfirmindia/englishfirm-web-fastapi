@@ -703,6 +703,76 @@ def score_we_subscores_with_gpt4o(prompt: str, user_text: str) -> dict:
     }
 
 
+# ── SST grammar-only validator fallback (GPT-4o) ─────────────────────────────
+# Fires when the Claude grammar+vocab judge returned grammar.score<2 with no
+# itemised mistakes. Reuses the same _GRAMMAR_VOCAB_SYSTEM_PROMPT so the rubric
+# is identical — different model is the only variable.
+
+def score_sst_grammar_only(reference: str, user_text: str) -> dict:
+    """Single GPT-4o call for SST grammar only. Returns
+        {"scored": bool, "score": float, "reasoning": str|None, "mistakes": [...]}
+    Never raises."""
+    if not user_text or not user_text.strip():
+        return {"scored": True, "score": 0.0, "reasoning": None, "mistakes": []}
+
+    from services.anthropic_scoring_service import (
+        _GRAMMAR_VOCAB_SYSTEM_PROMPT, _parse_mistakes,
+    )
+
+    last_exc: Exception = RuntimeError("sst grammar validator: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            resp = _client.chat.completions.create(
+                model=_GPT4O_MODEL,
+                temperature=0,
+                max_tokens=600,
+                messages=[
+                    {"role": "system", "content": _GRAMMAR_VOCAB_SYSTEM_PROMPT},
+                    {"role": "user", "content": (
+                        f"PASSAGE (context only, do NOT score):\n{reference or '(none)'}\n\n"
+                        f"STUDENT TEXT:\n{user_text}\n\n"
+                        "Reply with ONLY the JSON object."
+                    )},
+                ],
+                timeout=20.0,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if text.startswith("```"):
+                parts = text.split("```")
+                text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
+            parsed = json.loads(text)
+            gr = parsed.get("grammar") or {}
+            try:
+                score = max(0.0, min(2.0, float(gr.get("score") or 0)))
+            except (TypeError, ValueError):
+                score = 0.0
+            reasoning = gr.get("reasoning")
+            reasoning = str(reasoning).strip() if reasoning else None
+            log.info(
+                "[GPT4O-SST-GRAMMAR-VALIDATOR] score=%.1f mistakes=%d",
+                score, len(_parse_mistakes(gr)),
+            )
+            return {
+                "scored": True,
+                "score": score,
+                "reasoning": reasoning or None,
+                "mistakes": _parse_mistakes(gr),
+            }
+        except AuthenticationError as exc:
+            log.error("[GPT4O-SST-GRAMMAR-VALIDATOR] AuthenticationError: %s", exc)
+            return {"scored": False, "score": 0.0, "reasoning": None, "mistakes": []}
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "[GPT4O-SST-GRAMMAR-VALIDATOR] attempt=%d/3 failed — %s: %s",
+                attempt, type(exc).__name__, exc,
+            )
+            if attempt < 3:
+                time.sleep(2)
+    log.error("[GPT4O-SST-GRAMMAR-VALIDATOR] failed after 3 attempts: %s", last_exc)
+    return {"scored": False, "score": 0.0, "reasoning": None, "mistakes": []}
+
+
 def _we_split_failure_gpt4o(reason: str) -> dict:
     return {
         "content":    {"score": 0.0, "reasoning": None},

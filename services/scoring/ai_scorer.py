@@ -421,6 +421,37 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
         grammar_sub["grammar_scorer"] = scorer_tag
         vocabulary_sub["vocab_scorer"] = scorer_tag
 
+        # ── Validator: gpt-4o sometimes returns grammar<2 with mistakes=[]
+        # despite the prompt's mandatory-itemisation rule. Re-run grammar via
+        # Claude (same prompt, more reliable on itemisation) and use its
+        # result whole when it produces a non-empty mistakes list. Adds one
+        # Claude RTT (~500ms) only when triggered. ──────────────────────────
+        if scorer_label.startswith("gpt-4o"):
+            primary_score = float(grammar_sub.get("score") or 0)
+            primary_mistakes = grammar_sub.get("mistakes") or []
+            if primary_score < 2 and not primary_mistakes:
+                from services.anthropic_scoring_service import score_swt_grammar_only
+                v = score_swt_grammar_only(prompt or "", body)
+                if v.get("scored") and v.get("mistakes"):
+                    from core.logging_config import get_logger
+                    get_logger(__name__).info(
+                        "[SWT-GRAMMAR-VALIDATOR] gpt4o_score=%.1f mistakes_empty=True "
+                        "→ claude_score=%.1f mistakes=%d (using claude)",
+                        primary_score, v["score"], len(v["mistakes"]),
+                    )
+                    grammar_sub["score"] = v["score"]
+                    if v.get("reasoning"):
+                        grammar_sub["reasoning"] = v["reasoning"]
+                    grammar_sub["mistakes"] = v["mistakes"]
+                    grammar_sub["mistake_quotes"] = [m["quote"] for m in v["mistakes"]]
+                    grammar_sub["grammar_mistake_quotes"] = grammar_sub["mistake_quotes"]
+                    grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
+                    grammar_sub["validator_fired"] = True
+                    scoring_warnings.append("grammar_validator_fired")
+                else:
+                    grammar_sub["validator_fired"] = False
+                    scoring_warnings.append("grammar_mistakes_unavailable")
+
     # ── 3-way floor on Grammar & Spelling: min(heuristic, grammar_score,
     # spelling_remaining). The heuristic catches deterministic surface bugs
     # (extra spaces, missing initial cap, missing terminal, improper ALL-CAPS);
@@ -753,6 +784,35 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         vocabulary_sub = llm_result["vocabulary"]
         spelling_sub   = llm_result["spelling"]
 
+        # ── Validator: gpt-4o sometimes returns grammar<2 with mistakes=[]
+        # despite the prompt's mandatory-itemisation rule. Re-run grammar via
+        # Claude when triggered and use its result whole.
+        if scorer_label.startswith("gpt-4o"):
+            grammar_sub = dict(grammar_sub)
+            primary_score = float(grammar_sub.get("score") or 0)
+            primary_mistakes = grammar_sub.get("mistakes") or []
+            if primary_score < 2 and not primary_mistakes:
+                from services.anthropic_scoring_service import score_we_grammar_only
+                v = score_we_grammar_only(prompt or "", body)
+                if v.get("scored") and v.get("mistakes"):
+                    from core.logging_config import get_logger
+                    get_logger(__name__).info(
+                        "[WE-GRAMMAR-VALIDATOR] gpt4o_score=%.1f mistakes_empty=True "
+                        "→ claude_score=%.1f mistakes=%d (using claude)",
+                        primary_score, v["score"], len(v["mistakes"]),
+                    )
+                    grammar_sub["score"] = v["score"]
+                    if v.get("reasoning"):
+                        grammar_sub["reasoning"] = v["reasoning"]
+                    grammar_sub["mistakes"] = v["mistakes"]
+                    grammar_sub["mistake_quotes"] = [m["quote"] for m in v["mistakes"]]
+                    grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
+                    grammar_sub["validator_fired"] = True
+                    scoring_warnings.append("grammar_validator_fired")
+                else:
+                    grammar_sub["validator_fired"] = False
+                    scoring_warnings.append("grammar_mistakes_unavailable")
+
     # ── Essay keyword gate: if ANY prompt keyword is missing from the essay,
     # cap content at min(2.0, LLM_score). Deterministic — keywords extracted
     # from the prompt with a curated stopword filter + light stemming. ────
@@ -800,7 +860,9 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
     grammar_sub["heuristic_score"] = heur_score
     grammar_sub["llm_score"] = llm_grammar_score
     scorer_tag = "gpt-4o" if scorer_label.startswith("gpt-4o") else "claude-haiku-4-5"
-    grammar_sub["grammar_scorer"] = scorer_tag
+    # Don't overwrite if the cross-LLM validator above swapped in Claude's result.
+    if not grammar_sub.get("validator_fired"):
+        grammar_sub["grammar_scorer"] = scorer_tag
 
     final_grammar = min(float(heur_score), llm_grammar_score)
     grammar_sub["score"] = final_grammar
@@ -1177,8 +1239,12 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         cg = gv_result["grammar"]
         cv = gv_result["vocabulary"]
         claude_g_score = float(cg.get("score", 0) or 0)
-        cg_quotes = list(cg.get("mistake_quotes") or [])
+        cg_mistakes = list(cg.get("mistakes") or [])
+        cg_quotes = list(cg.get("mistake_quotes") or []) or [
+            m.get("quote") for m in cg_mistakes if m.get("quote")
+        ]
         grammar_sub["llm_score"] = claude_g_score
+        grammar_sub["mistakes"] = cg_mistakes
         grammar_sub["mistake_quotes"] = cg_quotes
         grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
         chosen_g_score = claude_g_score
@@ -1198,6 +1264,32 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         chosen_g_reasoning = grammar_sub.get("reasoning") or "no grammar reasoning"
         vocabulary_sub = dict(vocabulary_sub)
         vocabulary_sub["vocab_scorer"] = "nano-fallback"
+
+    # ── Validator: if the chosen grammar judge returned score<2 with no
+    # itemised mistakes, re-run grammar via GPT-4o (Claude primary here, so
+    # GPT-4o is the "other" model). Use its result whole when it produces a
+    # non-empty mistakes list. Adds one GPT-4o RTT only when triggered. ────
+    primary_mistakes = grammar_sub.get("mistakes") or []
+    if chosen_g_score < 2 and not primary_mistakes:
+        from services.openai_scoring_service import score_sst_grammar_only
+        v = score_sst_grammar_only(prompt or "", body)
+        if v.get("scored") and v.get("mistakes"):
+            from core.logging_config import get_logger
+            get_logger(__name__).info(
+                "[SST-GRAMMAR-VALIDATOR] primary_score=%.1f mistakes_empty=True "
+                "→ gpt4o_score=%.1f mistakes=%d (using gpt4o)",
+                chosen_g_score, v["score"], len(v["mistakes"]),
+            )
+            chosen_g_score = v["score"]
+            chosen_g_reasoning = v.get("reasoning") or chosen_g_reasoning
+            grammar_sub["mistakes"] = v["mistakes"]
+            grammar_sub["mistake_quotes"] = [m["quote"] for m in v["mistakes"]]
+            grammar_sub["grammar_scorer"] = "gpt-4o-validator"
+            grammar_sub["validator_fired"] = True
+            scoring_warnings.append("grammar_validator_fired")
+        else:
+            grammar_sub["validator_fired"] = False
+            scoring_warnings.append("grammar_mistakes_unavailable")
 
     final_grammar = min(float(heur_score), chosen_g_score)
     grammar_sub["score"] = final_grammar

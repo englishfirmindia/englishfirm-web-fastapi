@@ -479,6 +479,51 @@ def _parse_mistakes(sub: dict) -> list:
     return out
 
 
+# ── Grammar-only validators (cross-LLM fallback) ────────────────────────────
+# Fire when the primary GPT-4o split returned grammar.score<2 with no itemised
+# mistakes — a known compliance issue where the model agrees there are errors
+# but skips the enumeration. These functions re-run JUST the grammar sub-call
+# through Claude (which has been reliable at producing the mistakes array),
+# leaving the other sub-scores untouched.
+
+def score_swt_grammar_only(passage: str, user_text: str) -> dict:
+    """Single Claude call for SWT grammar only. Returns
+        {"scored": bool, "score": float, "reasoning": str|None, "mistakes": [...]}
+    Never raises. Used as validator fallback after GPT-4o primary."""
+    if not user_text or not user_text.strip():
+        return {"scored": True, "score": 0.0, "reasoning": None, "mistakes": []}
+    parsed = _swt_call_one(
+        _SWT_GRAMMAR_PROMPT, passage or "", user_text, 500, "GRAMMAR-VALIDATOR"
+    )
+    if parsed is None:
+        return {"scored": False, "score": 0.0, "reasoning": None, "mistakes": []}
+    gr = parsed.get("grammar") or {}
+    return {
+        "scored": True,
+        "score": _clamp(gr.get("score"), 0, 2),
+        "reasoning": _reasoning(gr.get("reasoning")),
+        "mistakes": _parse_mistakes(gr),
+    }
+
+
+def score_we_grammar_only(prompt: str, user_text: str) -> dict:
+    """Single Claude call for WE grammar only. Mirror of score_swt_grammar_only."""
+    if not user_text or not user_text.strip():
+        return {"scored": True, "score": 0.0, "reasoning": None, "mistakes": []}
+    parsed = _we_call_one(
+        _WE_GRAMMAR_PROMPT, prompt or "", user_text, 500, "GRAMMAR-VALIDATOR"
+    )
+    if parsed is None:
+        return {"scored": False, "score": 0.0, "reasoning": None, "mistakes": []}
+    gr = parsed.get("grammar") or {}
+    return {
+        "scored": True,
+        "score": _clamp(gr.get("score"), 0, 2),
+        "reasoning": _reasoning(gr.get("reasoning")),
+        "mistakes": _parse_mistakes(gr),
+    }
+
+
 def _parse_paraphrasing_block(parsed: dict) -> dict:
     """Pull the paraphrasing-audit block off the Claude response. Mirrors
     services.openai_scoring_service._parse_paraphrasing."""
