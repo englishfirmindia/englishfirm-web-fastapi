@@ -162,14 +162,6 @@ def submit(
             },
         )
     mark_submitted(session_id, question_id, result.pte_score)
-    persisted_result = dict(result.breakdown or {})
-    if req.time_on_question_seconds is not None:
-        persisted_result["time_on_question_seconds"] = req.time_on_question_seconds
-    persist_answer_to_db(
-        session=session, question_id=question_id, question_type="reading_drag_and_drop",
-        user_answer_json={"user_answers": user_answers},
-        correct_answer_json={}, result_json=persisted_result, score=result.pte_score,
-    )
 
     eval_json = question.evaluation.evaluation_json or {}
     correct_answers_raw = eval_json.get("correctAnswers", {}) or {}
@@ -187,6 +179,37 @@ def submit(
     is_correct = bool(blank_results) and all(blank_results.values())
     total_score = session.get("score", 0)
 
+    # ── AI explanations (Haiku primary, GPT-4o fallback) ──────────────────
+    explanations = []
+    try:
+        from services.fib_explainer import build_passage, generate_fib_explanations
+        passage_text = build_passage(question.content_json or {})
+        blanks_for_explainer = [
+            {
+                "blank_id": str(bid),
+                "correct": correct_answers.get(str(bid)),
+                "user_answer": user_answers.get(str(bid)) or user_answers.get(f"blank_{bid}"),
+                "is_correct": bool(blank_results.get(str(bid))),
+            }
+            for bid in correct_answers.keys()
+        ]
+        if passage_text and blanks_for_explainer:
+            explanations = generate_fib_explanations(passage_text, blanks_for_explainer)
+    except Exception as e:
+        log.warning("[Reading FIB] explanation generation failed: %s", e)
+
+    persisted_result = dict(result.breakdown or {})
+    persisted_result["correct_answers"] = correct_answers
+    persisted_result["is_correct"] = is_correct
+    persisted_result["explanations"] = explanations
+    if req.time_on_question_seconds is not None:
+        persisted_result["time_on_question_seconds"] = req.time_on_question_seconds
+    persist_answer_to_db(
+        session=session, question_id=question_id, question_type="reading_drag_and_drop",
+        user_answer_json={"user_answers": user_answers},
+        correct_answer_json={}, result_json=persisted_result, score=result.pte_score,
+    )
+
     return {
         "pte_score": result.pte_score,
         "is_async": result.is_async,
@@ -198,6 +221,7 @@ def submit(
         "blank_results": blank_results,
         "is_correct": is_correct,
         "score_for_question": result.pte_score,
+        "explanations": explanations,
         # camelCase aliases for mobile parity
         "correctAnswers": correct_answers,
         "blankResults": blank_results,

@@ -184,11 +184,31 @@ def submit(
     blank_results = breakdown.get("blank_results", {}) or {}
     is_correct = bool(blank_results) and all(blank_results.values())
 
+    # ── AI explanations (Haiku primary, GPT-4o fallback) ──────────────────
+    explanations = []
+    try:
+        from services.fib_explainer import build_passage, generate_fib_explanations
+        passage_text = build_passage(question.content_json or {})
+        blanks_for_explainer = [
+            {
+                "blank_id": str(bid),
+                "correct": correct_answers.get(str(bid)),
+                "user_answer": user_answers.get(str(bid)) or user_answers.get(f"blank_{bid}"),
+                "is_correct": bool(blank_results.get(str(bid))),
+            }
+            for bid in correct_answers.keys()
+        ]
+        if passage_text and blanks_for_explainer:
+            explanations = generate_fib_explanations(passage_text, blanks_for_explainer)
+    except Exception as e:
+        log.warning("[Reading FIB-DD] explanation generation failed: %s", e)
+
     persisted_result = {
         **breakdown,
         "correct_answers": correct_answers,
         "pte_score": result.pte_score,
         "is_correct": is_correct,
+        "explanations": explanations,
     }
     if req.time_on_question_seconds is not None:
         persisted_result["time_on_question_seconds"] = req.time_on_question_seconds
@@ -212,6 +232,7 @@ def submit(
         "blank_results": blank_results,
         "is_correct": is_correct,
         "score_for_question": result.pte_score,
+        "explanations": explanations,
         # camelCase aliases for mobile parity
         "correctAnswers": correct_answers,
         "blankResults": blank_results,
