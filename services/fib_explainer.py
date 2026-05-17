@@ -76,7 +76,9 @@ def build_passage(content_json: dict) -> str:
     if not content_json or not isinstance(content_json, dict):
         return ""
 
-    # New contentBlocks format
+    # New contentBlocks format. Real DB shape uses `blockType` and `text`;
+    # `type` and `content` are kept as fallbacks in case other surfaces emit
+    # the older naming.
     blocks = content_json.get("contentBlocks")
     if isinstance(blocks, list) and blocks:
         parts: list = []
@@ -84,9 +86,9 @@ def build_passage(content_json: dict) -> str:
         for b in blocks:
             if not isinstance(b, dict):
                 continue
-            btype = b.get("type")
+            btype = b.get("blockType") or b.get("type")
             if btype == "text":
-                parts.append(str(b.get("content") or b.get("text") or ""))
+                parts.append(str(b.get("text") or b.get("content") or ""))
             elif btype in ("blank", "dropdown", "dragdrop"):
                 blank_idx += 1
                 parts.append(f" ___{blank_idx}___ ")
