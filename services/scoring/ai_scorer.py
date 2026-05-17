@@ -823,41 +823,53 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
     dsc_sub = dict(dsc_sub)
     dsc_sub["paragraph_count"] = paragraph_count
     if paragraph_count not in (4, 5):
+        # Always-emit the user-facing structure suggestion when the count
+        # is wrong, regardless of whether the score cap kicks in. Previously
+        # this lived inside the `original_dsc > 3.0` branch, so essays that
+        # the LLM already scored low (≤3) silently lost the actionable
+        # hint. Suggestion text is stable across the score-cap branch
+        # below — built once, attached once.
+        if paragraph_count <= 1:
+            cap_reason = "single_paragraph"
+            cap_detail = "essay submitted as a single paragraph"
+            suggestion = (
+                "Your essay was written as a single continuous paragraph. "
+                "PTE expects 4–5 paragraphs (introduction, 2–3 body "
+                "paragraphs, and a conclusion). Break your essay into "
+                "distinct paragraphs separated by a blank line to score "
+                "above 3 on structure."
+            )
+        elif paragraph_count < 4:
+            cap_reason = f"too_few_paragraphs_{paragraph_count}"
+            cap_detail = f"only {paragraph_count} paragraphs"
+            suggestion = (
+                f"Your essay has {paragraph_count} paragraphs. PTE expects "
+                "4–5 paragraphs (introduction, 2–3 body paragraphs, and a "
+                "conclusion). Add more distinct paragraphs separated by a "
+                "blank line to score above 3 on structure."
+            )
+        else:
+            cap_reason = f"too_many_paragraphs_{paragraph_count}"
+            cap_detail = f"{paragraph_count} paragraphs (too many)"
+            suggestion = (
+                f"Your essay has {paragraph_count} paragraphs. PTE expects "
+                "4–5 paragraphs (introduction, 2–3 body paragraphs, and a "
+                "conclusion). Combine related paragraphs to score above 3 "
+                "on structure."
+            )
+        dsc_sub["structure_cap_reason"] = cap_reason
+        dsc_sub["suggestion"] = suggestion
+
+        # Score cap still fires only when the LLM was generous (>3.0). A
+        # structurally weak essay that the LLM already scored ≤3 keeps its
+        # LLM score and gains the suggestion; an essay the LLM scored >3
+        # gets capped at 3.0 and gains both the cap-reason reasoning and
+        # the suggestion.
         original_dsc = float(dsc_sub.get("score", 0) or 0)
         if original_dsc > 3.0:
             dsc_sub["llm_score"] = original_dsc
             dsc_sub["score"] = 3.0
             dsc_sub["structure_cap_applied"] = True
-            if paragraph_count <= 1:
-                cap_reason = "single_paragraph"
-                cap_detail = "essay submitted as a single paragraph"
-                suggestion = (
-                    "Your essay was written as a single continuous paragraph. "
-                    "PTE expects 4–5 paragraphs (introduction, 2–3 body "
-                    "paragraphs, and a conclusion). Break your essay into "
-                    "distinct paragraphs separated by a blank line to score "
-                    "above 3 on structure."
-                )
-            elif paragraph_count < 4:
-                cap_reason = f"too_few_paragraphs_{paragraph_count}"
-                cap_detail = f"only {paragraph_count} paragraphs"
-                suggestion = (
-                    f"Your essay has {paragraph_count} paragraphs. PTE expects "
-                    "4–5 paragraphs (introduction, 2–3 body paragraphs, and a "
-                    "conclusion). Add more distinct paragraphs separated by a "
-                    "blank line to score above 3 on structure."
-                )
-            else:
-                cap_reason = f"too_many_paragraphs_{paragraph_count}"
-                cap_detail = f"{paragraph_count} paragraphs (too many)"
-                suggestion = (
-                    f"Your essay has {paragraph_count} paragraphs. PTE expects "
-                    "4–5 paragraphs (introduction, 2–3 body paragraphs, and a "
-                    "conclusion). Combine related paragraphs to score above 3 "
-                    "on structure."
-                )
-            dsc_sub["structure_cap_reason"] = cap_reason
-            dsc_sub["suggestion"] = suggestion
             dsc_sub["reasoning"] = (
                 f"Capped at 3.0 — {cap_detail}. "
                 f"Original LLM verdict was {original_dsc:.1f}. "
