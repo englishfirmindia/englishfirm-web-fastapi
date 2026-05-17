@@ -257,14 +257,20 @@ class ReorderScorer(ScoringStrategy):
                 breakdown={'hits': 0, 'total_pairs': 0},
             )
 
+        # PTE rule: 1 mark per adjacent pair in the user's answer that is
+        # also a correct adjacency anywhere in the reference sequence — NOT
+        # a slot-by-slot positional match. Two paragraphs correctly placed
+        # next to each other should score, even if the rest of the sequence
+        # is shifted. Flagged in production by user attempts where (X, Y)
+        # was an adjacency in both sequences but landed at different
+        # positions (e.g. correct=[2,4,3,1,5], user=[4,2,5,3,1] shares the
+        # (3,1) adjacency — old positional algo scored 0/4 instead of 1/4).
+        correct_pairs = set(zip(correct_sequence, correct_sequence[1:]))
         hits = 0
         pair_results = []
-        min_length = min(len(correct_sequence), len(user_sequence))
-
-        for i in range(min_length - 1):
-            correct_pair = (correct_sequence[i], correct_sequence[i + 1])
+        for i in range(len(user_sequence) - 1):
             user_pair = (user_sequence[i], user_sequence[i + 1])
-            is_correct = correct_pair == user_pair
+            is_correct = user_pair in correct_pairs
             pair_results.append(is_correct)
             if is_correct:
                 hits += marks_per_pair
