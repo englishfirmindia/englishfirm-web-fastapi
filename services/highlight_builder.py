@@ -7,13 +7,19 @@ based on:
     we substring-match into the body to recover positions.
 
 Output shape (each element):
-    {"start": int, "end": int, "type": "spelling" | "grammar",
-     "kind": str, "hint": str, "word": str | None}
+    {"start": int, "end": int,
+     "type":     "spelling" | "grammar",
+     "category": "spelling" | "grammar" | "spacing" | "capitalisation" | "punctuation",
+     "kind": str, "hint": str, "word": str | None,
+     "correction": str | None, "reason": str | None}
 
-`type` is what the frontend uses to choose the colour (currently both render
-red). `kind` is the specific finding (`spelling_typo`, `extra_space`,
-`missing_initial_cap`, `improper_caps`, `missing_terminal`, `llm_grammar`).
-`hint` is a short human-readable string for the tooltip.
+`type` is the legacy 2-class field kept for backwards compatibility with old
+clients (both render red/orange). `category` is the 5-class field new clients
+use to colour each error class distinctly. `kind` is the specific finding
+(`spelling_typo`, `extra_space`, `missing_initial_cap`, `improper_caps`,
+`missing_terminal`, `llm_grammar`). `hint` is a short human-readable string
+for the tooltip; for heuristic findings it carries an explicit "X → Y"
+correction.
 
 Pure function. No external state, no I/O.
 """
@@ -43,34 +49,49 @@ def build_highlights(
     for start, end in (heuristic_findings.get("extra_space_ranges") or []):
         highlights.append({
             "start": start, "end": end,
-            "type": "grammar", "kind": "extra_space",
-            "hint": "Extra space", "word": None,
+            "type": "grammar", "category": "spacing", "kind": "extra_space",
+            "hint": "Spacing: extra space → single space",
+            "word": None, "correction": " ", "reason": "double space",
         })
     if heuristic_findings.get("missing_initial_cap"):
         pos = heuristic_findings.get("initial_cap_position")
         if isinstance(pos, int):
+            ch = body[pos:pos + 1] if pos < len(body) else ""
+            fix = ch.upper() if ch else ""
             highlights.append({
                 "start": pos, "end": pos + 1,
-                "type": "grammar", "kind": "missing_initial_cap",
-                "hint": "Sentence should start with a capital letter",
-                "word": body[pos:pos + 1] if pos < len(body) else None,
+                "type": "grammar", "category": "capitalisation",
+                "kind": "missing_initial_cap",
+                "hint": (
+                    f"Capitalisation: '{ch}' → '{fix}'"
+                    if ch else "Capitalisation: capitalise sentence start"
+                ),
+                "word": ch or None,
+                "correction": fix or None,
+                "reason": "sentence must start with a capital letter",
             })
     for start, end, word in (heuristic_findings.get("improper_caps_ranges") or []):
+        fix = word.capitalize() if word else None
         highlights.append({
             "start": start, "end": end,
-            "type": "grammar", "kind": "improper_caps",
-            "hint": f"Improper capitalisation: {word}", "word": word,
+            "type": "grammar", "category": "capitalisation",
+            "kind": "improper_caps",
+            "hint": f"Capitalisation: '{word}' → '{fix}'" if fix else "Improper capitalisation",
+            "word": word, "correction": fix,
+            "reason": "avoid ALL-CAPS in formal writing",
         })
     if heuristic_findings.get("missing_terminal"):
         pos = heuristic_findings.get("terminal_position")
         if isinstance(pos, int):
             # Zero-width caret at the missing-terminator location. Frontend
-            # can render this as a small red dot or insert-marker.
+            # renders this as an insert-marker.
             highlights.append({
                 "start": pos, "end": pos,
-                "type": "grammar", "kind": "missing_terminal",
-                "hint": "Missing terminal punctuation (. ! or ?)",
-                "word": None,
+                "type": "grammar", "category": "punctuation",
+                "kind": "missing_terminal",
+                "hint": "Punctuation: add '.', '!' or '?' at the end",
+                "word": None, "correction": ".",
+                "reason": "missing terminal punctuation",
             })
 
     # ── LLM-quoted spelling typos ────────────────────────────────────────
@@ -86,7 +107,7 @@ def build_highlights(
         start, end = rng
         highlights.append({
             "start": start, "end": end,
-            "type": "spelling", "kind": "spelling_typo",
+            "type": "spelling", "category": "spelling", "kind": "spelling_typo",
             "hint": _build_hint("Spelling", quote, correction, reason),
             "word": quote,
             "correction": correction,
@@ -105,7 +126,7 @@ def build_highlights(
         start, end = rng
         highlights.append({
             "start": start, "end": end,
-            "type": "grammar", "kind": "llm_grammar",
+            "type": "grammar", "category": "grammar", "kind": "llm_grammar",
             "hint": _build_hint("Grammar", quote, correction, reason),
             "word": quote,
             "correction": correction,
