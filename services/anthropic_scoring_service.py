@@ -367,9 +367,11 @@ def score_swt_subscores_with_claude(passage: str, user_text: str) -> dict:
         gr = grammar_parsed.get("grammar", {})
         grammar_score = _clamp(gr.get("score"), 0, 2)
         grammar_reasoning = _reasoning(gr.get("reasoning"))
-        grammar_quotes = [str(x) for x in (gr.get("mistake_quotes") or []) if x]
+        grammar_mistakes = _parse_mistakes(gr)
+        grammar_quotes = [m["quote"] for m in grammar_mistakes]
     else:
-        grammar_score, grammar_reasoning, grammar_quotes = 0.0, None, []
+        grammar_score, grammar_reasoning = 0.0, None
+        grammar_mistakes, grammar_quotes = [], []
 
     if vocab_parsed is not None:
         vocab_score = _clamp(vocab_parsed.get("vocabulary", {}).get("score"), 0, 2)
@@ -392,6 +394,7 @@ def score_swt_subscores_with_claude(passage: str, user_text: str) -> dict:
             "score": grammar_score,
             "reasoning": grammar_reasoning,
             "mistake_quotes": grammar_quotes,
+            "mistakes": grammar_mistakes,
         },
         "vocabulary": {"score": vocab_score, "reasoning": vocab_reasoning},
         "scored": True,
@@ -421,6 +424,41 @@ def _failure(warning_code: str, reason: str = "") -> dict:
         "scored": False,
         "warning_code": warning_code,
     }
+
+
+def _parse_mistakes(sub: dict) -> list:
+    """Extract a normalised list of mistakes from a grammar/spelling sub-block.
+
+    Accepts EITHER:
+      - new shape  → `mistakes: [{quote, correction, reason}, …]`
+      - legacy     → `mistake_quotes: ["word", "phrase", …]`
+
+    Returns a list of `{"quote": str, "correction": str|None, "reason": str|None}`.
+    Empty quotes filtered out.
+    """
+    out: list = []
+    raw = sub.get("mistakes")
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                quote = str(item.get("quote") or "").strip()
+                if not quote:
+                    continue
+                correction = item.get("correction")
+                correction = str(correction).strip() if correction else None
+                reason = item.get("reason")
+                reason = str(reason).strip() if reason else None
+                out.append({"quote": quote, "correction": correction or None, "reason": reason or None})
+            elif isinstance(item, str) and item.strip():
+                out.append({"quote": item.strip(), "correction": None, "reason": None})
+    if out:
+        return out
+    # Legacy fallback: flat list of strings.
+    for q in (sub.get("mistake_quotes") or []):
+        s = str(q or "").strip()
+        if s:
+            out.append({"quote": s, "correction": None, "reason": None})
+    return out
 
 
 def _parse_paraphrasing_block(parsed: dict) -> dict:
@@ -501,7 +539,9 @@ Return JSON ONLY in this exact shape:
   "grammar": {
     "score": <int 0-2>,
     "reasoning": "<one short sentence citing the specific error(s); say 'no errors' if none>",
-    "mistake_quotes": ["exact substring 1", "exact substring 2", ...]
+    "mistakes": [
+      {"quote": "<exact verbatim substring>", "correction": "<fixed wording>", "reason": "<short rule label, ≤6 words>"}
+    ]
   },
   "vocabulary": {
     "score": <int 0-2>,
@@ -509,7 +549,7 @@ Return JSON ONLY in this exact shape:
   }
 }
 
-Each grammar.mistake_quotes entry MUST appear verbatim in the student's text (case-sensitive). Empty list if no errors."""
+Each grammar.mistakes[].quote MUST appear verbatim in the student's text (case-sensitive). `correction` is the minimal fixed fragment (e.g. "Researchers believe" for the quote "Researchers believes"). `reason` is a short rule label like "subject-verb agreement" or "wrong tense". Empty list if no errors."""
 
 
 def score_grammar_and_vocab_with_claude(passage: str, user_text: str) -> dict:
@@ -585,7 +625,8 @@ def score_grammar_and_vocab_with_claude(passage: str, user_text: str) -> dict:
             v = parsed.get("vocabulary") or {}
             g_score = _clamp(g.get("score"), 0, 2)
             g_reasoning = _reasoning(g.get("reasoning"))
-            quotes = [str(q) for q in (g.get("mistake_quotes") or []) if q]
+            mistakes = _parse_mistakes(g)
+            quotes = [m["quote"] for m in mistakes]
             v_score = _clamp(v.get("score"), 0, 2)
             v_reasoning = _reasoning(v.get("reasoning"))
 
@@ -600,6 +641,7 @@ def score_grammar_and_vocab_with_claude(passage: str, user_text: str) -> dict:
                     "score": g_score,
                     "reasoning": g_reasoning,
                     "mistake_quotes": quotes,
+                    "mistakes": mistakes,
                 },
                 "vocabulary": {
                     "score": v_score,
@@ -728,7 +770,11 @@ GRAMMAR (0–2, half-points allowed):
 
 Long sentences with subordination and multiple coordinating conjunctions are NORMAL essay style and NOT a deduction trigger.
 
-ALSO populate `mistake_quotes`: a JSON array of the exact verbatim substrings from the essay that you flagged as grammar errors. Each entry MUST appear verbatim in the student text (case-sensitive). Empty list if no errors.
+ALSO populate `mistakes`: a JSON array of objects, one per flagged grammar error. Each object MUST have:
+  - "quote":      exact verbatim substring from the essay (case-sensitive).
+  - "correction": the minimal corrected wording (e.g. "institutions are" for "institution is").
+  - "reason":     a short rule label (≤6 words), e.g. "subject-verb agreement", "wrong tense".
+Empty list if no errors.
 
 In the reasoning, name the specific violation types (or state "no violations").
 
@@ -737,7 +783,9 @@ Return JSON only, exactly this shape:
   "grammar": {
     "score": <number 0-2 in 0.5 steps>,
     "reasoning": "<one sentence>",
-    "mistake_quotes": [<exact verbatim substrings>]
+    "mistakes": [
+      {"quote": "<verbatim substring>", "correction": "<fixed wording>", "reason": "<short rule label>"}
+    ]
   }
 }
 """
@@ -933,9 +981,11 @@ def score_we_subscores_with_claude_split(prompt: str, user_text: str) -> dict:
         gr = grammar_parsed.get("grammar", {})
         grammar_score = _clamp(gr.get("score"), 0, 2)
         grammar_reasoning = _r(gr.get("reasoning"))
-        grammar_quotes = [str(x) for x in (gr.get("mistake_quotes") or []) if x]
+        grammar_mistakes = _parse_mistakes(gr)
+        grammar_quotes = [m["quote"] for m in grammar_mistakes]
     else:
-        grammar_score, grammar_reasoning, grammar_quotes = 0.0, None, []
+        grammar_score, grammar_reasoning = 0.0, None
+        grammar_mistakes, grammar_quotes = [], []
 
     if glr_parsed is not None:
         glr_score = _clamp(glr_parsed.get("glr", {}).get("score"), 0, 6)
@@ -958,7 +1008,8 @@ def score_we_subscores_with_claude_split(prompt: str, user_text: str) -> dict:
         "content":    {"score": content_score,    "reasoning": content_reasoning},
         "dsc":        {"score": dsc_score,        "reasoning": dsc_reasoning},
         "grammar":    {"score": grammar_score,    "reasoning": grammar_reasoning,
-                        "mistake_quotes": grammar_quotes},
+                        "mistake_quotes": grammar_quotes,
+                        "mistakes": grammar_mistakes},
         "glr":        {"score": glr_score,        "reasoning": glr_reasoning},
         "vocabulary": {"score": vocab_score,      "reasoning": vocab_reasoning},
         "scored": True,

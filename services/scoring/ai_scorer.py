@@ -460,15 +460,22 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
     earned = max(0.0, min(float(max_pts), earned))
     pct = earned / max_pts if max_pts > 0 else 0.0
 
-    # ── Build highlights (hybrid spelling words + LLM grammar quotes +
-    # heuristic positions) ──────────────────────────────────────────────
+    # ── Build highlights (hybrid spelling words + LLM grammar mistakes +
+    # heuristic positions). Spelling-checker mistakes already carry
+    # `{word, correction}`; LLM grammar mistakes now carry
+    # `{quote, correction, reason}`. Both shapes flow through to the
+    # tooltip via highlight_builder._build_hint. Legacy `grammar_mistake_quotes`
+    # (flat strings) stays supported as a fallback. ────────────────────
     from services.highlight_builder import build_highlights
-    spelling_quotes = [
-        m["word"] for m in (grammar_sub.get("spelling_check", {}).get("mistakes") or [])
-    ]
-    grammar_quotes = grammar_sub.get("grammar_mistake_quotes") or []
+    spelling_mistakes = grammar_sub.get("spelling_check", {}).get("mistakes") or []
+    grammar_mistakes = (
+        grammar_sub.get("grammar_mistakes")
+        or grammar_sub.get("mistakes")
+        or grammar_sub.get("grammar_mistake_quotes")
+        or []
+    )
     heur_findings = grammar_sub.get("heuristic_findings") or {}
-    highlights = build_highlights(body, heur_findings, spelling_quotes, grammar_quotes)
+    highlights = build_highlights(body, heur_findings, spelling_mistakes, grammar_mistakes)
 
     breakdown = {
         "form": form_max,
@@ -849,12 +856,17 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
     pct = earned / max_pts if max_pts > 0 else 0.0
 
     # ── Build highlights ────────────────────────────────────────────────
+    # Spelling checker mistakes already carry {word, correction}; LLM grammar
+    # mistakes now carry {quote, correction, reason}. highlight_builder
+    # accepts both shapes and folds the correction into the tooltip.
     from services.highlight_builder import build_highlights
-    spelling_quotes = [
-        m["word"] for m in (spelling_sub.get("spelling_check", {}).get("mistakes") or [])
-    ]
-    grammar_quotes = grammar_sub.get("mistake_quotes") or []
-    highlights = build_highlights(body, heur_findings, spelling_quotes, grammar_quotes)
+    spelling_mistakes = spelling_sub.get("spelling_check", {}).get("mistakes") or []
+    grammar_mistakes = (
+        grammar_sub.get("mistakes")
+        or grammar_sub.get("mistake_quotes")
+        or []
+    )
+    highlights = build_highlights(body, heur_findings, spelling_mistakes, grammar_mistakes)
 
     breakdown = {
         "form": form_score,
@@ -1162,13 +1174,17 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
     earned = max(0.0, min(float(max_pts), earned))
     pct = earned / max_pts if max_pts > 0 else 0.0
 
-    # Build highlights
+    # Build highlights. Spelling-checker mistakes already carry
+    # {word, correction}; LLM grammar mistakes now carry
+    # {quote, correction, reason}. highlight_builder accepts both shapes.
     from services.highlight_builder import build_highlights
-    spelling_quotes = [
-        m["word"] for m in (spelling_sub.get("spelling_check", {}).get("mistakes") or [])
-    ]
-    grammar_quotes = grammar_sub.get("mistake_quotes") or []
-    highlights = build_highlights(body, heur_findings, spelling_quotes, grammar_quotes)
+    spelling_mistakes = spelling_sub.get("spelling_check", {}).get("mistakes") or []
+    grammar_mistakes = (
+        grammar_sub.get("mistakes")
+        or grammar_sub.get("mistake_quotes")
+        or []
+    )
+    highlights = build_highlights(body, heur_findings, spelling_mistakes, grammar_mistakes)
 
     breakdown = {
         "form": form_score,

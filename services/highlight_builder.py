@@ -23,11 +23,17 @@ from typing import Iterable, Optional, Tuple
 def build_highlights(
     body: str,
     heuristic_findings: dict,
-    spelling_quotes: Iterable[str] = (),
-    grammar_quotes: Iterable[str] = (),
+    spelling_quotes: Iterable = (),
+    grammar_quotes: Iterable = (),
 ) -> list:
     """Returns a list of highlights sorted by start offset, with overlapping
-    ranges deduplicated (later, less-specific highlights are dropped)."""
+    ranges deduplicated (later, less-specific highlights are dropped).
+
+    `spelling_quotes` and `grammar_quotes` accept EITHER:
+      - plain strings (legacy)               → no correction shown in hint
+      - dicts {quote, correction, reason}    → hint becomes "Grammar: 'X' → 'Y' (reason)"
+    Each list may mix both shapes.
+    """
     if not body:
         return []
 
@@ -69,8 +75,11 @@ def build_highlights(
 
     # ── LLM-quoted spelling typos ────────────────────────────────────────
     used_ranges: set = set()
-    for q in (spelling_quotes or ()):
-        rng = _first_match(body, q, used_ranges)
+    for item in (spelling_quotes or ()):
+        quote, correction, reason = _normalize_mistake(item)
+        if not quote:
+            continue
+        rng = _first_match(body, quote, used_ranges)
         if rng is None:
             continue
         used_ranges.add(rng)
@@ -78,12 +87,18 @@ def build_highlights(
         highlights.append({
             "start": start, "end": end,
             "type": "spelling", "kind": "spelling_typo",
-            "hint": f"Spelling: '{q}'", "word": q,
+            "hint": _build_hint("Spelling", quote, correction, reason),
+            "word": quote,
+            "correction": correction,
+            "reason": reason,
         })
 
     # ── LLM-quoted grammar mistakes ──────────────────────────────────────
-    for q in (grammar_quotes or ()):
-        rng = _first_match(body, q, used_ranges)
+    for item in (grammar_quotes or ()):
+        quote, correction, reason = _normalize_mistake(item)
+        if not quote:
+            continue
+        rng = _first_match(body, quote, used_ranges)
         if rng is None:
             continue
         used_ranges.add(rng)
@@ -91,11 +106,43 @@ def build_highlights(
         highlights.append({
             "start": start, "end": end,
             "type": "grammar", "kind": "llm_grammar",
-            "hint": f"Grammar: '{q}'", "word": q,
+            "hint": _build_hint("Grammar", quote, correction, reason),
+            "word": quote,
+            "correction": correction,
+            "reason": reason,
         })
 
     highlights.sort(key=lambda h: (h["start"], h["end"]))
     return _dedupe_overlaps(highlights)
+
+
+def _normalize_mistake(item):
+    """Accept either a plain string or a {quote, correction, reason} dict
+    (and a {word, correction, offsets} dict for the hybrid spelling
+    checker). Returns (quote, correction, reason)."""
+    if isinstance(item, str):
+        return item, None, None
+    if isinstance(item, dict):
+        quote = item.get("quote") or item.get("word")
+        correction = item.get("correction")
+        reason = item.get("reason")
+        return (
+            str(quote).strip() if quote else None,
+            str(correction).strip() if correction else None,
+            str(reason).strip() if reason else None,
+        )
+    return None, None, None
+
+
+def _build_hint(prefix: str, quote: str, correction: Optional[str], reason: Optional[str]) -> str:
+    """Build the tooltip text shown on hover. Includes the correction when
+    the LLM (or spelling checker) provided one."""
+    base = f"{prefix}: '{quote}'"
+    if correction:
+        base += f" → '{correction}'"
+    if reason:
+        base += f" ({reason})"
+    return base
 
 
 def _first_match(body: str, needle: str, used: set) -> Optional[Tuple[int, int]]:

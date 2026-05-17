@@ -517,13 +517,18 @@ def score_swt_subscores_with_gpt4o(passage: str, user_text: str) -> dict:
     content_reasoning = _reasoning(content_parsed.get("content", {}).get("reasoning"))
     paraphrasing = _parse_paraphrasing(content_parsed)
 
+    # Reuse the shared mistake-parser so both legacy `mistake_quotes` and the
+    # new `mistakes: [{quote, correction, reason}]` shape work.
+    from services.anthropic_scoring_service import _parse_mistakes
     if grammar_parsed is not None:
         gr = grammar_parsed.get("grammar", {})
         grammar_score = _clamp(gr.get("score"), 0, 2)
         grammar_reasoning = _reasoning(gr.get("reasoning"))
-        grammar_quotes = [str(x) for x in (gr.get("mistake_quotes") or []) if x]
+        grammar_mistakes = _parse_mistakes(gr)
+        grammar_quotes = [m["quote"] for m in grammar_mistakes]
     else:
-        grammar_score, grammar_reasoning, grammar_quotes = 0.0, None, []
+        grammar_score, grammar_reasoning = 0.0, None
+        grammar_mistakes, grammar_quotes = [], []
 
     if vocab_parsed is not None:
         vocab_score = _clamp(vocab_parsed.get("vocabulary", {}).get("score"), 0, 2)
@@ -545,6 +550,7 @@ def score_swt_subscores_with_gpt4o(passage: str, user_text: str) -> dict:
             "score": grammar_score,
             "reasoning": grammar_reasoning,
             "mistake_quotes": grammar_quotes,
+            "mistakes": grammar_mistakes,
         },
         "vocabulary": {"score": vocab_score, "reasoning": vocab_reasoning},
         "scored": True,
@@ -656,13 +662,16 @@ def score_we_subscores_with_gpt4o(prompt: str, user_text: str) -> dict:
     else:
         dsc_score, dsc_reasoning = 0.0, None
 
+    from services.anthropic_scoring_service import _parse_mistakes
     if grammar_parsed is not None:
         gr = grammar_parsed.get("grammar", {})
         grammar_score = _clamp(gr.get("score"), 0, 2)
         grammar_reasoning = _r(gr.get("reasoning"))
-        grammar_quotes = [str(x) for x in (gr.get("mistake_quotes") or []) if x]
+        grammar_mistakes = _parse_mistakes(gr)
+        grammar_quotes = [m["quote"] for m in grammar_mistakes]
     else:
-        grammar_score, grammar_reasoning, grammar_quotes = 0.0, None, []
+        grammar_score, grammar_reasoning = 0.0, None
+        grammar_mistakes, grammar_quotes = [], []
 
     if glr_parsed is not None:
         glr_score = _clamp(glr_parsed.get("glr", {}).get("score"), 0, 6)
@@ -685,7 +694,8 @@ def score_we_subscores_with_gpt4o(prompt: str, user_text: str) -> dict:
         "content":    {"score": content_score,    "reasoning": content_reasoning},
         "dsc":        {"score": dsc_score,        "reasoning": dsc_reasoning},
         "grammar":    {"score": grammar_score,    "reasoning": grammar_reasoning,
-                        "mistake_quotes": grammar_quotes},
+                        "mistake_quotes": grammar_quotes,
+                        "mistakes": grammar_mistakes},
         "glr":        {"score": glr_score,        "reasoning": glr_reasoning},
         "vocabulary": {"score": vocab_score,      "reasoning": vocab_reasoning},
         "scored": True,
