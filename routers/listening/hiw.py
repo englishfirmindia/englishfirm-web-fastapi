@@ -142,11 +142,17 @@ def submit(
     eval_json = question.evaluation.evaluation_json or {}
     correct_answers = eval_json.get("correctAnswers", {}) or {}
     incorrect_words_raw = correct_answers.get("incorrectWords", []) or []
-    # Support both plain string list and dict list {wrong, correct, index}
+    # Support both plain string list and dict list {wrong, correct, index}.
+    # When the dict shape is present we also capture wrong → correct mappings
+    # so the UI can render APEUni-style inline corrections.
     incorrect_words = [
         (w["wrong"] if isinstance(w, dict) else w)
         for w in incorrect_words_raw
     ]
+    wrong_to_correct: dict = {}
+    for w in incorrect_words_raw:
+        if isinstance(w, dict) and w.get("wrong") and w.get("correct"):
+            wrong_to_correct[str(w["wrong"]).strip().lower()] = str(w["correct"]).strip()
 
     scorer = get_scorer("listening_hiw")
     try:
@@ -184,6 +190,15 @@ def submit(
     incorrect_words_set = {_norm(w) for w in incorrect_words}
     incorrect_word_indices = [i for i, w in enumerate(words) if _norm(w) in incorrect_words_set]
 
+    # Build index → correct-word map for inline corrections, when available.
+    # Keyed by string index for JSON safety (Flutter parses as Map<String,String>).
+    corrections: dict = {}
+    if wrong_to_correct:
+        for i, w in enumerate(words):
+            cw = wrong_to_correct.get(_norm(w))
+            if cw:
+                corrections[str(i)] = cw
+
     mark_submitted(session_id, question_id, result.pte_score)
     persist_answer_to_db(
         session=session, question_id=question_id, question_type="listening_hiw",
@@ -193,6 +208,7 @@ def submit(
             **breakdown,
             "incorrect_words": incorrect_words,
             "incorrect_word_indices": incorrect_word_indices,
+            "corrections": corrections,
             "is_correct": is_correct,
         },
         score=result.pte_score,
@@ -208,6 +224,7 @@ def submit(
         # snake_case
         "incorrect_words": incorrect_words,
         "incorrect_word_indices": incorrect_word_indices,
+        "corrections": corrections,
         "highlighted_words": highlighted_words,
         "correct_clicks": correct_clicks,
         "incorrect_clicks": incorrect_clicks,
