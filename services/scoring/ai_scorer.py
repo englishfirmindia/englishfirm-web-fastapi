@@ -1372,6 +1372,12 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
     )
     highlights = build_highlights(body, heur_findings, spelling_mistakes, grammar_mistakes)
 
+    # Per-category correction pills — parity with SWT (0a70afa) and
+    # WE (049fadb). Frontend renders one CorrectionsPanel per non-empty
+    # category in fixed order: spelling → grammar → punctuation →
+    # capitalisation → spacing.
+    grammar_sub["corrections_by_category"] = _corrections_by_category(highlights)
+
     breakdown = {
         "form": form_score,
         "content":    content_sub,
