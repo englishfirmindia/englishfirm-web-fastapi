@@ -711,6 +711,41 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
         vocabulary_sub = llm_result["vocabulary"]
         spelling_sub   = llm_result["spelling"]
 
+    # ── Essay keyword gate: if ANY prompt keyword is missing from the essay,
+    # cap content at min(2.0, LLM_score). Deterministic — keywords extracted
+    # from the prompt with a curated stopword filter + light stemming. ────
+    from services.essay_keyword_extractor import (
+        extract_keywords, check_keyword_presence,
+    )
+    _kw_list = extract_keywords(prompt or "")
+    _kw_present, _kw_total, _kw_missing = check_keyword_presence(_kw_list, body)
+    content_sub = dict(content_sub)
+    content_sub["keywords_total"] = _kw_total
+    content_sub["keywords_present"] = _kw_present
+    if _kw_total > 0 and _kw_missing:
+        _original_content = float(content_sub.get("score", 0) or 0)
+        if _original_content > 2.0:
+            content_sub["llm_score"] = _original_content
+            content_sub["score"] = 2.0
+            content_sub["keyword_gate_applied"] = True
+            content_sub["missing_keywords"] = _kw_missing
+            _preview = ", ".join(_kw_missing[:5])
+            if len(_kw_missing) > 5:
+                _preview += "…"
+            content_sub["suggestion"] = (
+                f"Your essay is missing key terms from the prompt: {_preview}. "
+                f"PTE expects essays to engage directly with the specific "
+                f"vocabulary of the question. Content capped at 2/6 because "
+                f"{len(_kw_missing)} of {_kw_total} key terms are absent."
+            )
+            content_sub["reasoning"] = (
+                f"Content capped at 2.0 — {_kw_present}/{_kw_total} prompt "
+                f"keywords present (missing: {_preview}). Original LLM verdict "
+                f"was {_original_content:.1f}. {content_sub.get('reasoning', '')}"
+            )
+            if "essay_missing_keywords" not in scoring_warnings:
+                scoring_warnings.append("essay_missing_keywords")
+
     # ── Heuristic floor on grammar (deterministic spacing/caps/terminal
     # checks) — only ever LOWERS the LLM score, never raises.
     from services.grammar_heuristic import grammar_heuristic, format_findings
