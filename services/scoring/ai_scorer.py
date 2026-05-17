@@ -729,31 +729,58 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
     vocabulary_sub = dict(vocabulary_sub)
     vocabulary_sub["vocab_scorer"] = scorer_tag
 
-    # ── Single-paragraph cap on DSC: if essay is one continuous block,
-    # cap DSC at 3.0 and surface a student-facing suggestion. ───────────
+    # ── Paragraph-count cap on DSC: PTE essays should be 4–5 paragraphs
+    # (intro + 2–3 body + conclusion). If the count is anything else, cap
+    # DSC at 3.0 — the LLM tends to overrate structurally weak essays
+    # that are otherwise well-worded.
     import re as _re_pg
     body_paragraphs = [p.strip() for p in _re_pg.split(r'\n\s*\n', body or '') if p.strip()]
-    if len(body_paragraphs) <= 1:
-        dsc_sub = dict(dsc_sub)
+    paragraph_count = len(body_paragraphs)
+    dsc_sub = dict(dsc_sub)
+    dsc_sub["paragraph_count"] = paragraph_count
+    if paragraph_count not in (4, 5):
         original_dsc = float(dsc_sub.get("score", 0) or 0)
         if original_dsc > 3.0:
             dsc_sub["llm_score"] = original_dsc
             dsc_sub["score"] = 3.0
             dsc_sub["structure_cap_applied"] = True
-            dsc_sub["structure_cap_reason"] = "single_paragraph"
-            dsc_sub["suggestion"] = (
-                "Your essay was written as a single continuous paragraph. "
-                "PTE expects a clear introduction, body paragraphs, and a "
-                "conclusion. Break your essay into 3–4 distinct paragraphs "
-                "(separated by a blank line) to score above 3 on structure."
-            )
+            if paragraph_count <= 1:
+                cap_reason = "single_paragraph"
+                cap_detail = "essay submitted as a single paragraph"
+                suggestion = (
+                    "Your essay was written as a single continuous paragraph. "
+                    "PTE expects 4–5 paragraphs (introduction, 2–3 body "
+                    "paragraphs, and a conclusion). Break your essay into "
+                    "distinct paragraphs separated by a blank line to score "
+                    "above 3 on structure."
+                )
+            elif paragraph_count < 4:
+                cap_reason = f"too_few_paragraphs_{paragraph_count}"
+                cap_detail = f"only {paragraph_count} paragraphs"
+                suggestion = (
+                    f"Your essay has {paragraph_count} paragraphs. PTE expects "
+                    "4–5 paragraphs (introduction, 2–3 body paragraphs, and a "
+                    "conclusion). Add more distinct paragraphs separated by a "
+                    "blank line to score above 3 on structure."
+                )
+            else:
+                cap_reason = f"too_many_paragraphs_{paragraph_count}"
+                cap_detail = f"{paragraph_count} paragraphs (too many)"
+                suggestion = (
+                    f"Your essay has {paragraph_count} paragraphs. PTE expects "
+                    "4–5 paragraphs (introduction, 2–3 body paragraphs, and a "
+                    "conclusion). Combine related paragraphs to score above 3 "
+                    "on structure."
+                )
+            dsc_sub["structure_cap_reason"] = cap_reason
+            dsc_sub["suggestion"] = suggestion
             dsc_sub["reasoning"] = (
-                f"Capped at 3.0 — essay submitted as a single paragraph. "
+                f"Capped at 3.0 — {cap_detail}. "
                 f"Original LLM verdict was {original_dsc:.1f}. "
                 f"{dsc_sub.get('reasoning', '')}"
             )
-            if "essay_single_paragraph_cap" not in scoring_warnings:
-                scoring_warnings.append("essay_single_paragraph_cap")
+            if "essay_paragraph_count_cap" not in scoring_warnings:
+                scoring_warnings.append("essay_paragraph_count_cap")
 
     # ── Hybrid spelling override on WE's dedicated spelling sub-score. ──
     spell_count = len(spell_result.get("mistakes") or [])
