@@ -792,9 +792,16 @@ ALSO populate `mistakes`: a JSON array of objects, one per flagged grammar error
   - "quote":      exact verbatim substring from the essay (case-sensitive).
   - "correction": the minimal corrected wording (e.g. "institutions are" for "institution is").
   - "reason":     a short rule label (≤6 words), e.g. "subject-verb agreement", "wrong tense".
-Empty list if no errors.
 
-In the reasoning, name the specific violation types (or state "no violations").
+MANDATORY ITEMISATION RULE:
+  • If `score == 2`  → `mistakes` MUST be `[]` (no errors).
+  • If `score < 2`   → `mistakes` MUST contain at least one entry naming a
+    concrete error in the essay. You may NOT score below 2 without listing
+    the specific quotes that drove the deduction. A holistic "feels off"
+    verdict is NOT acceptable — point to the words.
+  • Aim for 1–6 entries; cap at 10. Cover the most damaging errors first.
+
+In the reasoning, name the specific violation types (or state "no violations") in one sentence.
 
 Return JSON only, exactly this shape:
 {

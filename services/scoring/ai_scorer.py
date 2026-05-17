@@ -945,6 +945,11 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
     )
     highlights = build_highlights(body, heur_findings, spelling_mistakes, grammar_mistakes)
 
+    # Per-category correction pills — same shape as SWT. Frontend renders
+    # one CorrectionsPanel per non-empty category in fixed order:
+    # spelling → grammar → punctuation → capitalisation → spacing.
+    grammar_sub["corrections_by_category"] = _corrections_by_category(highlights)
+
     breakdown = {
         "form": form_score,
         "content":    content_sub,
