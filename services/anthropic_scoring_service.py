@@ -1332,7 +1332,284 @@ def _we_failure(warning_code: str, reason: str = "") -> dict:
     }
 
 
-# ── Summarize Spoken Text (SST) ──────────────────────────────────────────────
+# ── Summarize Spoken Text (SST) — 3-prompt split ─────────────────────────────
+# Mirrors the SWT / WE split architecture. Each sub-score has its own focused
+# prompt so the rubric can be iterated without regression risk on the others.
+# Spelling stays deterministic (no LLM prompt). Form is the word-count gate.
+
+_SST_CONTENT_PROMPT = """You are scoring CONTENT only for a PTE Academic Summarize Spoken Text response.
+
+The student listens to a 60–90 second academic lecture and must summarise it in 50–70 words. Grammar, Vocabulary, and Spelling are scored separately — ignore them. Content is scored on coverage of key points from the lecture transcript.
+
+CONTENT (0–4, half-point granularity allowed):
+
+  SCORE 4 — Accurately captures the main idea AND key supporting details from the lecture. Concrete points named, not generic placeholders.
+
+  SCORE 3.5 — Full coverage of main idea + most key details, but a minor detail is missing or slightly inaccurate.
+
+  SCORE 3 — Captures the main idea and most details, with minor gaps.
+
+  SCORE 2.5 — Most main aspects covered but one supporting detail missing or inaccurate.
+
+  SCORE 2 — Captures some main ideas but misses important points, or includes some inaccuracies.
+
+  SCORE 1.5 — Mentions some lecture content but coverage is shallow or peripheral.
+
+  SCORE 1 — Mentions only a tangential or secondary aspect of the lecture.
+
+  SCORE 0 — Completely off-topic, irrelevant, or fails to address the lecture content (e.g. summary discusses a different subject entirely).
+
+CRITICAL-MOVE RULES:
+  • Factual misrepresentation of the lecture's central claim → cap at 1.0.
+  • Off-topic: if the summary discusses a different subject than the lecture → cap at 0.5.
+  • Generic placeholders ("the lecturer explains some things") without specifics → cap at 1.5.
+
+In the reasoning, name which key points were covered vs missed, and whether the summary is on-topic.
+
+Return JSON only, exactly this shape:
+{
+  "content": {"score": <number 0-4 in 0.5 steps>, "reasoning": "<one sentence>"}
+}
+"""
+
+_SST_GRAMMAR_PROMPT = """You are scoring GRAMMAR only for a PTE Academic Summarize Spoken Text response.
+
+You return a single 0–2 score reflecting grammatical structure. Spelling is scored separately and is NOT your concern here.
+
+GRAMMAR (0–2, half-points allowed):
+
+  WORKED EXAMPLES — calibrate against these:
+
+  Score 2/2 (valid grammar throughout):
+  "The lecturer explains that climate change affects polar regions through melting ice, rising sea levels, and disrupted ecosystems, and notes that adaptation strategies must address both mitigation and resilience."
+  → Compound, coordinated clauses, correct subject-verb agreement, no structural errors. Score: 2.
+
+  Score 1/2 (real grammatical errors, meaning clear):
+  "The lecturer explain that climate change affect polar region and adaptation strategies must addresses mitigation."
+  → Subject-verb disagreement (lecturer explain, change affect, strategies addresses), missing articles. Score: 1.
+
+  Score 0/2 (multiple errors blocking comprehension):
+  "Lecturer explaining climate affect polar, adaptation strategies addressing mitigation resilience."
+  → Missing verbs/articles, broken clauses, reader cannot parse. Score: 0.
+
+The "long sentence with many 'and's" pattern is NORMAL for SST and is NOT a deduction trigger.
+
+ALSO populate `mistake_quotes`: a JSON array of the exact verbatim substrings from the summary that you flagged as grammar errors. Each entry MUST appear verbatim in the student text (case-sensitive). Empty list if no errors.
+
+In the reasoning, name the specific violation types (or state "no violations").
+
+Return JSON only, exactly this shape:
+{
+  "grammar": {
+    "score": <number 0-2 in 0.5 steps>,
+    "reasoning": "<one sentence>",
+    "mistake_quotes": [<exact verbatim substrings>]
+  }
+}
+"""
+
+_SST_VOCAB_PROMPT = """You are scoring VOCABULARY only for a PTE Academic Summarize Spoken Text response.
+
+Vocabulary measures APPROPRIATENESS and PRECISION of word choice. Paraphrasing the lecture is NOT required — verbatim reuse of transcript vocabulary is NOT penalised here.
+
+VOCABULARY (0–2, half-points allowed: 0, 0.5, 1, 1.5, 2):
+
+  SCORE 2.0 — 0 vocabulary errors. Word choices are appropriate and precise.
+
+  SCORE 1.5 — Exactly 1 minor issue: a single non-word typo (e.g. "noctural" for "nocturnal") OR one mildly awkward collocation. Meaning fully clear.
+
+  SCORE 1.0 — Either 1 wrong-meaning content word (e.g. "developed the public's imagination" when "captivated" is required) OR 2–3 awkward word choices. Meaning still recoverable.
+
+  SCORE 0.5 — 3 wrong-meaning / awkward choices, at least one comprehension-blocking.
+
+  SCORE 0 — 4+ wrong-meaning / awkward choices, OR pervasive non-word typos producing unparseable text.
+
+REPETITION PENALTY:
+  If the summary is short (≤60 words) AND mostly verbatim AND repeats the SAME content word ≥2× (e.g. "scientists" used twice), subtract 1.0 from the base. This catches over-reliance on a single lexical anchor.
+
+TYPOS AS VOCAB ERRORS:
+  Typos that produce non-English non-words COUNT as vocabulary errors here. A typo that produces a different real word counts as grammar, not vocab.
+
+HARD EXCLUSIONS — do NOT deduct vocabulary for:
+  • Spelling that produces a real word — that's grammar.
+  • Verbatim reuse of transcript vocabulary — verbatim is not a vocab issue.
+  • Stylistic length / sentence structure — that's grammar.
+
+In the reasoning, count: "N vocab errors found: [list]; repetition: yes/no."
+
+Return JSON only, exactly this shape:
+{
+  "vocabulary": {"score": <number 0-2 in 0.5 steps>, "reasoning": "<one sentence>"}
+}
+"""
+
+
+def _sst_call_one(system_prompt: str, reference: str, user_text: str,
+                  max_tokens: int, log_tag: str) -> Optional[dict]:
+    """Single Claude call for one SST sub-score. Returns parsed dict or None.
+    Never raises."""
+    last_exc: Exception = RuntimeError(f"{log_tag}: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            response = _client.messages.create(
+                model=_MODEL,
+                temperature=0,
+                max_tokens=max_tokens,
+                system=[
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"REFERENCE (lecture transcript):\n{reference}",
+                                "cache_control": {"type": "ephemeral"},
+                            },
+                            {
+                                "type": "text",
+                                "text": f"STUDENT SUMMARY:\n{user_text}",
+                            },
+                        ],
+                    }
+                ],
+                timeout=60.0,
+            )
+            text = ""
+            for block in response.content:
+                if block.type == "text":
+                    text = block.text
+                    break
+            if not text:
+                last_exc = RuntimeError(f"{log_tag}: empty response")
+                if attempt < 3:
+                    time.sleep(2)
+                continue
+            text = text.strip()
+            if text.startswith("```"):
+                parts = text.split("```")
+                text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
+            return json.loads(text)
+        except anthropic.AuthenticationError as exc:
+            log.error("[CLAUDE-SST-%s] AuthenticationError — not retrying: %s", log_tag, exc)
+            return None
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "[CLAUDE-SST-%s] attempt=%d/3 failed — %s: %s",
+                log_tag, attempt, type(exc).__name__, exc,
+            )
+            if attempt < 3:
+                time.sleep(2)
+    log.error("[CLAUDE-SST-%s] failed after 3 attempts: %s", log_tag, last_exc)
+    return None
+
+
+def score_sst_subscores_with_claude_split(reference: str, user_text: str) -> dict:
+    """Score SST sub-scores via Claude Haiku 4.5, 3 parallel calls.
+
+    Returns content / grammar / vocabulary. Spelling is computed deterministically
+    upstream in ai_scorer.py and merged into the breakdown there.
+    """
+    if not reference or not reference.strip():
+        return _sst_split_failure("empty reference")
+    if not user_text or not user_text.strip():
+        return {
+            "content":    {"score": 0.0, "reasoning": None},
+            "grammar":    {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+            "vocabulary": {"score": 0.0, "reasoning": None},
+            "spelling":   {"score": 0.0, "reasoning": None},
+            "scored": True,
+            "warning_code": None,
+        }
+
+    t0 = time.monotonic()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_c = pool.submit(_sst_call_one, _SST_CONTENT_PROMPT, reference, user_text, 400, "CONTENT")
+        f_g = pool.submit(_sst_call_one, _SST_GRAMMAR_PROMPT, reference, user_text, 400, "GRAMMAR")
+        f_v = pool.submit(_sst_call_one, _SST_VOCAB_PROMPT,   reference, user_text, 400, "VOCAB")
+        content_parsed = f_c.result()
+        grammar_parsed = f_g.result()
+        vocab_parsed   = f_v.result()
+    dt_ms = int((time.monotonic() - t0) * 1000)
+
+    if content_parsed is None:
+        log.error("[CLAUDE-SST-SPLIT] content sub-call failed; returning fallback")
+        return _sst_split_failure("content sub-call failed")
+
+    def _r(v):
+        if v is None: return None
+        s = str(v).strip()
+        return s if s else None
+
+    content_score = _clamp(content_parsed.get("content", {}).get("score"), 0, 4)
+    content_reasoning = _r(content_parsed.get("content", {}).get("reasoning"))
+
+    if grammar_parsed is not None:
+        gr = grammar_parsed.get("grammar", {})
+        grammar_score = _clamp(gr.get("score"), 0, 2)
+        grammar_reasoning = _r(gr.get("reasoning"))
+        grammar_quotes = [str(x) for x in (gr.get("mistake_quotes") or []) if x]
+    else:
+        grammar_score, grammar_reasoning, grammar_quotes = 0.0, None, []
+
+    if vocab_parsed is not None:
+        vocab_score = _clamp(vocab_parsed.get("vocabulary", {}).get("score"), 0, 2)
+        vocab_reasoning = _r(vocab_parsed.get("vocabulary", {}).get("reasoning"))
+    else:
+        vocab_score, vocab_reasoning = 0.0, None
+
+    log.info(
+        "[CLAUDE-SST-SPLIT] content=%.1f grammar=%.1f vocab=%.1f total_ms=%d",
+        content_score, grammar_score, vocab_score, dt_ms,
+    )
+    return {
+        "content":    {"score": content_score,    "reasoning": content_reasoning},
+        "grammar":    {"score": grammar_score,    "reasoning": grammar_reasoning,
+                        "mistake_quotes": grammar_quotes},
+        "vocabulary": {"score": vocab_score,      "reasoning": vocab_reasoning},
+        "spelling":   {"score": 0.0, "reasoning": None},
+        "scored": True,
+        "warning_code": None,
+    }
+
+
+def verify_sst_grammar_with_claude(reference: str, user_text: str) -> Optional[dict]:
+    """Run JUST the SST grammar prompt through Claude — used as a verifier when
+    the primary scorer (gpt-4o) returns empty mistake_quotes. Returns parsed
+    grammar dict on success, None on failure.
+    """
+    if not user_text or not user_text.strip():
+        return None
+    parsed = _sst_call_one(_SST_GRAMMAR_PROMPT, reference or "", user_text,
+                            400, "GRAMMAR-VERIFY")
+    if not parsed:
+        return None
+    gr = parsed.get("grammar", {})
+    return {
+        "score": _clamp(gr.get("score"), 0, 2),
+        "reasoning": gr.get("reasoning"),
+        "mistake_quotes": [str(x) for x in (gr.get("mistake_quotes") or []) if x],
+    }
+
+
+def _sst_split_failure(reason: str) -> dict:
+    return {
+        "content":    {"score": 0.0, "reasoning": None},
+        "grammar":    {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+        "vocabulary": {"score": 0.0, "reasoning": None},
+        "spelling":   {"score": 0.0, "reasoning": None},
+        "scored": False,
+        "warning_code": "content_llm_unavailable",
+    }
+
+
+# ── Legacy combined SST prompt (kept for the existing fallback path) ─────────
 
 _SST_SYSTEM_PROMPT = """You are scoring a PTE Academic Summarize Spoken Text response.
 

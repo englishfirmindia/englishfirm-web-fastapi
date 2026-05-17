@@ -785,6 +785,136 @@ def _we_split_failure_gpt4o(reason: str) -> dict:
     }
 
 
+# ── GPT-4o SST split scorer (3 parallel calls, mirrors SWT split) ────────────
+
+def _gpt4o_sst_call_one(system_prompt: str, reference: str, user_text: str,
+                        max_tokens: int, log_tag: str) -> Optional[dict]:
+    """Single GPT-4o call for one SST sub-score. Returns parsed dict or None."""
+    last_exc: Exception = RuntimeError(f"gpt4o {log_tag}: no attempts made")
+    for attempt in range(1, 4):
+        try:
+            resp = _client.chat.completions.create(
+                model=_GPT4O_MODEL,
+                temperature=0,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"REFERENCE (lecture transcript):\n{reference}\n\nSTUDENT SUMMARY:\n{user_text}"},
+                ],
+                timeout=60.0,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if text.startswith("```"):
+                parts = text.split("```")
+                text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
+            parsed = json.loads(text)
+            log.info(
+                "[GPT4O-SST-%s] in=%d out=%d",
+                log_tag, resp.usage.prompt_tokens, resp.usage.completion_tokens,
+            )
+            return parsed
+        except AuthenticationError as exc:
+            log.error("[GPT4O-SST-%s] AuthenticationError — not retrying: %s", log_tag, exc)
+            return None
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "[GPT4O-SST-%s] attempt=%d/3 failed — %s: %s",
+                log_tag, attempt, type(exc).__name__, exc,
+            )
+            if attempt < 3:
+                time.sleep(2)
+    log.error("[GPT4O-SST-%s] failed after 3 attempts: %s", log_tag, last_exc)
+    return None
+
+
+def score_sst_subscores_with_gpt4o(reference: str, user_text: str) -> dict:
+    """Score SST sub-scores via gpt-4o, 3 parallel calls. Returns content,
+    grammar, vocabulary. Spelling is computed deterministically upstream.
+    """
+    if not reference or not reference.strip():
+        return _sst_split_failure_gpt4o("empty reference")
+    if not user_text or not user_text.strip():
+        return {
+            "content":    {"score": 0.0, "reasoning": None},
+            "grammar":    {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+            "vocabulary": {"score": 0.0, "reasoning": None},
+            "spelling":   {"score": 0.0, "reasoning": None},
+            "scored": True,
+            "warning_code": None,
+        }
+
+    # Import prompts from anthropic_scoring_service to keep them in ONE place.
+    from services.anthropic_scoring_service import (
+        _SST_CONTENT_PROMPT, _SST_GRAMMAR_PROMPT, _SST_VOCAB_PROMPT
+    )
+
+    t0 = time.monotonic()
+    with _ThreadPoolExecutor(max_workers=3) as pool:
+        f_c = pool.submit(_gpt4o_sst_call_one, _SST_CONTENT_PROMPT, reference, user_text, 400, "CONTENT")
+        f_g = pool.submit(_gpt4o_sst_call_one, _SST_GRAMMAR_PROMPT, reference, user_text, 400, "GRAMMAR")
+        f_v = pool.submit(_gpt4o_sst_call_one, _SST_VOCAB_PROMPT,   reference, user_text, 400, "VOCAB")
+        content_parsed = f_c.result()
+        grammar_parsed = f_g.result()
+        vocab_parsed   = f_v.result()
+    dt_ms = int((time.monotonic() - t0) * 1000)
+
+    if content_parsed is None:
+        log.error("[GPT4O-SST] content sub-call failed; returning fallback")
+        return _sst_split_failure_gpt4o("content sub-call failed")
+
+    def _clamp(v, lo, hi):
+        try: return max(float(lo), min(float(hi), float(v)))
+        except (TypeError, ValueError): return 0.0
+
+    def _r(v):
+        if v is None: return None
+        s = str(v).strip()
+        return s if s else None
+
+    content_score = _clamp(content_parsed.get("content", {}).get("score"), 0, 4)
+    content_reasoning = _r(content_parsed.get("content", {}).get("reasoning"))
+
+    if grammar_parsed is not None:
+        gr = grammar_parsed.get("grammar", {})
+        grammar_score = _clamp(gr.get("score"), 0, 2)
+        grammar_reasoning = _r(gr.get("reasoning"))
+        grammar_quotes = [str(x) for x in (gr.get("mistake_quotes") or []) if x]
+    else:
+        grammar_score, grammar_reasoning, grammar_quotes = 0.0, None, []
+
+    if vocab_parsed is not None:
+        vocab_score = _clamp(vocab_parsed.get("vocabulary", {}).get("score"), 0, 2)
+        vocab_reasoning = _r(vocab_parsed.get("vocabulary", {}).get("reasoning"))
+    else:
+        vocab_score, vocab_reasoning = 0.0, None
+
+    log.info(
+        "[GPT4O-SST] split-parallel content=%.1f grammar=%.1f vocab=%.1f total_ms=%d",
+        content_score, grammar_score, vocab_score, dt_ms,
+    )
+    return {
+        "content":    {"score": content_score,    "reasoning": content_reasoning},
+        "grammar":    {"score": grammar_score,    "reasoning": grammar_reasoning,
+                        "mistake_quotes": grammar_quotes},
+        "vocabulary": {"score": vocab_score,      "reasoning": vocab_reasoning},
+        "spelling":   {"score": 0.0, "reasoning": None},
+        "scored": True,
+        "warning_code": None,
+    }
+
+
+def _sst_split_failure_gpt4o(reason: str) -> dict:
+    return {
+        "content":    {"score": 0.0, "reasoning": None},
+        "grammar":    {"score": 0.0, "reasoning": None, "mistake_quotes": []},
+        "vocabulary": {"score": 0.0, "reasoning": None},
+        "spelling":   {"score": 0.0, "reasoning": None},
+        "scored": False,
+        "warning_code": "content_llm_unavailable",
+    }
+
+
 # ── Internals ────────────────────────────────────────────────────────────────
 
 def _call_openai(system_prompt: str, user_block: str, label: str) -> Optional[dict]:

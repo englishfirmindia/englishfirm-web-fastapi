@@ -1160,55 +1160,51 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
             breakdown=breakdown,
         )
 
-    # ── Parallel: nano (full SST — used for content/spelling), Claude
-    # grammar+vocab judge (overrides nano on both), hybrid spelling. ──────
+    # ── Parallel: GPT-4o 3-prompt split (content + grammar + vocabulary) +
+    # deterministic spelling check. Claude split is fallback 1; heuristic is
+    # fallback 2. Spelling is NOT in the LLM result — it's computed
+    # deterministically below. ──────────────────────────────────────────────
     from concurrent.futures import ThreadPoolExecutor
-    from services.openai_scoring_service import score_sst_subscores_with_openai
-    from services.anthropic_scoring_service import score_grammar_and_vocab_with_claude
+    from services.openai_scoring_service import score_sst_subscores_with_gpt4o
+    from services.anthropic_scoring_service import (
+        score_sst_subscores_with_claude_split,
+        verify_sst_grammar_with_claude,
+    )
     from services.spelling_checker import check_spelling, format_spelling_reasoning
 
     scoring_warnings: list = []
-    scorer_label = "nano(content+spell)+claude(grammar+vocab)+hybrid(spell)"
+    scorer_label = "gpt-4o-split(content+grammar+vocab)+hybrid(spell)"
 
-    def _run_nano_sst():
+    def _run_gpt4o_sst():
         try:
-            return score_sst_subscores_with_openai(prompt or '', body)
+            return score_sst_subscores_with_gpt4o(prompt or '', body)
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[SST] OpenAI raised: {e}")
+            get_logger(__name__).error(f"[SST] GPT-4o split raised: {e}")
             return {"scored": False, "warning_code": "content_llm_unavailable"}
-
-    def _run_claude_grammar_vocab_sst():
-        try:
-            return score_grammar_and_vocab_with_claude(prompt or '', body)
-        except Exception as e:
-            from core.logging_config import get_logger
-            get_logger(__name__).error(f"[SST] Claude grammar+vocab raised: {e}")
-            return {"scored": False, "warning_code": "grammar_vocab_claude_unavailable"}
 
     def _run_spell_sst():
         return check_spelling(body, prompt or "")
 
-    with ThreadPoolExecutor(max_workers=3) as _ex:
-        f_llm = _ex.submit(_run_nano_sst)
-        f_gv = _ex.submit(_run_claude_grammar_vocab_sst)
+    with ThreadPoolExecutor(max_workers=2) as _ex:
+        f_llm = _ex.submit(_run_gpt4o_sst)
         f_spell = _ex.submit(_run_spell_sst)
         llm_result = f_llm.result()
-        gv_result = f_gv.result()
         spell_result = f_spell.result()
 
+    # Fallback 1: Claude split (same 3 prompts, different model)
     if not llm_result.get("scored"):
         try:
-            from services.anthropic_scoring_service import score_sst_subscores_with_claude
-            llm_result = score_sst_subscores_with_claude(prompt or '', body)
+            llm_result = score_sst_subscores_with_claude_split(prompt or '', body)
             if llm_result.get("scored"):
-                scorer_label = "claude-full-fallback+hybrid"
-                scoring_warnings.append("openai_unavailable_used_claude")
+                scorer_label = "claude-split(content+grammar+vocab)+hybrid(spell)"
+                scoring_warnings.append("gpt4o_unavailable_used_claude")
         except Exception as e:
             from core.logging_config import get_logger
-            get_logger(__name__).error(f"[SST] Claude full fallback raised: {e}")
+            get_logger(__name__).error(f"[SST] Claude split fallback raised: {e}")
             llm_result = {"scored": False, "warning_code": "content_llm_unavailable"}
 
+    # Fallback 2: heuristic
     if not llm_result.get("scored"):
         fallback = _sst_heuristic_fallback(body)
         content_sub    = fallback["content"]
@@ -1221,80 +1217,55 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         scorer_label = "heuristic-fallback"
     else:
         content_sub    = llm_result["content"]
-        grammar_sub    = llm_result["grammar"]
-        vocabulary_sub = llm_result["vocabulary"]
-        spelling_sub   = llm_result["spelling"]
+        grammar_sub    = dict(llm_result["grammar"])
+        vocabulary_sub = dict(llm_result["vocabulary"])
+        spelling_sub   = dict(llm_result.get("spelling", {"score": 0.0, "reasoning": None}))
+        scorer_tag = "gpt-4o" if scorer_label.startswith("gpt-4o") else "claude-haiku-4-5"
+        grammar_sub["grammar_scorer"] = scorer_tag
+        vocabulary_sub["vocab_scorer"] = scorer_tag
 
-    # ── Grammar + vocab: override nano with Claude judge + heuristic floor.
+    # ── Heuristic floor on grammar (deterministic spacing/caps/terminal). ──
     from services.grammar_heuristic import grammar_heuristic, format_findings
     heur_score, heur_findings = grammar_heuristic(body)
-    nano_grammar_score = float(grammar_sub.get("score", 0) or 0)
-    nano_vocab_score = float(vocabulary_sub.get("score", 0) or 0)
-    grammar_sub = dict(grammar_sub)
+
+    llm_grammar_score = float(grammar_sub.get("score", 0) or 0)
+    chosen_g_reasoning = grammar_sub.get("reasoning") or "no grammar reasoning"
     grammar_sub["heuristic_findings"] = heur_findings
     grammar_sub["heuristic_score"] = heur_score
-    grammar_sub["nano_grammar_score"] = nano_grammar_score
+    grammar_sub["llm_score"] = llm_grammar_score
 
-    if gv_result.get("scored"):
-        cg = gv_result["grammar"]
-        cv = gv_result["vocabulary"]
-        claude_g_score = float(cg.get("score", 0) or 0)
-        cg_mistakes = list(cg.get("mistakes") or [])
-        cg_quotes = list(cg.get("mistake_quotes") or []) or [
-            m.get("quote") for m in cg_mistakes if m.get("quote")
-        ]
-        grammar_sub["llm_score"] = claude_g_score
-        grammar_sub["mistakes"] = cg_mistakes
-        grammar_sub["mistake_quotes"] = cg_quotes
-        grammar_sub["grammar_scorer"] = "claude-haiku-4-5"
-        chosen_g_score = claude_g_score
-        chosen_g_reasoning = cg.get("reasoning") or grammar_sub.get("reasoning")
-
-        vocabulary_sub = dict(vocabulary_sub)
-        vocabulary_sub["nano_vocab_score"] = nano_vocab_score
-        vocabulary_sub["score"] = float(cv.get("score", 0) or 0)
-        vocabulary_sub["reasoning"] = cv.get("reasoning") or vocabulary_sub.get("reasoning")
-        vocabulary_sub["vocab_scorer"] = "claude-haiku-4-5"
-    else:
-        if gv_result.get("warning_code"):
-            scoring_warnings.append(gv_result["warning_code"])
-        grammar_sub["llm_score"] = nano_grammar_score
-        grammar_sub["grammar_scorer"] = "nano-fallback"
-        chosen_g_score = nano_grammar_score
-        chosen_g_reasoning = grammar_sub.get("reasoning") or "no grammar reasoning"
-        vocabulary_sub = dict(vocabulary_sub)
-        vocabulary_sub["vocab_scorer"] = "nano-fallback"
-
-    # ── Validator: if the chosen grammar judge returned score<2 with no
-    # itemised mistakes, re-run grammar via GPT-4o (Claude primary here, so
-    # GPT-4o is the "other" model). Use its result whole when it produces a
-    # non-empty mistakes list. Adds one GPT-4o RTT only when triggered. ────
-    primary_mistakes = grammar_sub.get("mistakes") or []
-    if chosen_g_score < 2 and not primary_mistakes:
-        from services.openai_scoring_service import score_sst_grammar_only
-        v = score_sst_grammar_only(prompt or "", body)
-        if v.get("scored") and v.get("mistakes"):
+    # ── Grammar verifier: if the primary returned empty mistake_quotes
+    # (claiming a perfect grammar score with no flagged errors), run Claude
+    # as an independent verifier. If Claude finds mistakes → override the
+    # primary entirely (caller asked for override, not just audit). Only
+    # fires when the primary was the gpt-4o path; skip if Claude is already
+    # the primary (would be calling itself) or heuristic fallback fired. ──
+    primary_quotes = grammar_sub.get("mistake_quotes") or []
+    if (scorer_label.startswith("gpt-4o-split")
+            and not primary_quotes
+            and llm_result.get("scored")):
+        v = verify_sst_grammar_with_claude(prompt or "", body)
+        if v is not None and v.get("mistake_quotes"):
             from core.logging_config import get_logger
             get_logger(__name__).info(
-                "[SST-GRAMMAR-VALIDATOR] primary_score=%.1f mistakes_empty=True "
-                "→ gpt4o_score=%.1f mistakes=%d (using gpt4o)",
-                chosen_g_score, v["score"], len(v["mistakes"]),
+                "[SST-GRAMMAR-VERIFIER] primary=gpt-4o quotes=[] → claude "
+                "found %d mistakes — overriding (was score=%.1f, now %.1f)",
+                len(v["mistake_quotes"]), llm_grammar_score, v["score"],
             )
-            chosen_g_score = v["score"]
+            llm_grammar_score = v["score"]
             chosen_g_reasoning = v.get("reasoning") or chosen_g_reasoning
-            grammar_sub["mistakes"] = v["mistakes"]
-            grammar_sub["mistake_quotes"] = [m["quote"] for m in v["mistakes"]]
-            grammar_sub["grammar_scorer"] = "gpt-4o-validator"
-            grammar_sub["validator_fired"] = True
-            scoring_warnings.append("grammar_validator_fired")
-        else:
-            grammar_sub["validator_fired"] = False
-            scoring_warnings.append("grammar_mistakes_unavailable")
+            grammar_sub["llm_score_primary"] = grammar_sub["llm_score"]
+            grammar_sub["llm_score"] = v["score"]
+            grammar_sub["mistake_quotes"] = v["mistake_quotes"]
+            grammar_sub["grammar_scorer"] = "gpt-4o→claude-verify"
+            grammar_sub["verifier_overrode_primary"] = True
+            scoring_warnings.append("grammar_verifier_overrode_primary")
+            scorer_label = "gpt-4o-split(content+grammar+vocab)+claude-verify(grammar)+hybrid(spell)"
 
-    final_grammar = min(float(heur_score), chosen_g_score)
+    final_grammar = min(float(heur_score), llm_grammar_score)
     grammar_sub["score"] = final_grammar
     grammar_sub["reasoning"] = (
-        f"Grammar: {int(final_grammar)}/2. "
+        f"Grammar: {final_grammar:.1f}/2. "
         f"Heuristic: {format_findings(heur_findings)}. "
         f"Judge: {chosen_g_reasoning}"
     )
