@@ -49,8 +49,31 @@ def _filename_from_url(url: str) -> str:
 
 
 def _download_audio(url: str) -> Optional[bytes]:
+    """Download the SST audio file via a presigned URL.
+
+    The `apeuni-questions-audio` bucket recently moved to private access —
+    raw anonymous HTTPS GETs now return 403, which was silently flipping
+    every SST scoring run into the word-count heuristic fallback. Mint a
+    short-lived presigned URL with IAM auth and use that for the actual
+    GET. If presigning fails (config error, bad URL), fall back to the
+    raw URL so behaviour matches the legacy path for any bucket that's
+    still public.
+    """
+    fetch_url = url
     try:
-        with urllib.request.urlopen(url, timeout=_AUDIO_DOWNLOAD_TIMEOUT_S) as resp:
+        from services.s3_service import generate_presigned_url
+        fetch_url = generate_presigned_url(url, expires_in=300)
+    except Exception as exc:
+        # Bad URL format / S3 config — fall through to the raw URL. If the
+        # bucket is private the raw GET will 403, which the warning below
+        # already captures.
+        log.warning(
+            "[Whisper] presign failed url=%s: %s — falling back to raw URL",
+            url, exc,
+        )
+
+    try:
+        with urllib.request.urlopen(fetch_url, timeout=_AUDIO_DOWNLOAD_TIMEOUT_S) as resp:
             return resp.read()
     except Exception as exc:
         log.warning("[Whisper] audio download failed url=%s: %s", url, exc)
