@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import asc, desc
 
 from db.database import get_db
-from db.models import User, QuestionFromApeuni, UserQuestionAttempt
+from db.models import User, QuestionFromApeuni, UserQuestionAttempt, QuestionExplanation
 from core.dependencies import get_current_user
 from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
 from services.scoring import get_scorer
@@ -24,6 +24,64 @@ from core.logging_config import get_logger
 from services.question_search import apply_search_filter
 
 log = get_logger(__name__)
+
+
+def _get_or_generate_explanations(
+    db: Session,
+    question,
+    question_type: str,
+    correct_answers: dict,
+    user_answers: dict,
+    blank_results: dict,
+) -> list:
+    """Cache-aside lookup for FIB explanations. Mirror of the helper in
+    fib_drag_drop.py — same RDS table, same fallback policy."""
+    qid = int(question.question_id)
+    try:
+        row = db.query(QuestionExplanation).filter_by(question_id=qid).one_or_none()
+        if row is not None and row.explanations:
+            return row.explanations
+    except Exception as e:
+        log.warning("[FIB explanations] cache lookup failed q=%s: %s", qid, e)
+
+    try:
+        from services.fib_explainer import build_passage, generate_fib_explanations
+        passage_text = build_passage(question.content_json or {})
+        blanks = [
+            {
+                "blank_id": str(bid),
+                "correct": correct_answers.get(str(bid)),
+                "user_answer": user_answers.get(str(bid)) or user_answers.get(f"blank_{bid}"),
+                "is_correct": bool(blank_results.get(str(bid))),
+            }
+            for bid in correct_answers.keys()
+        ]
+        if not passage_text or not blanks:
+            return []
+        result = generate_fib_explanations(passage_text, blanks)
+    except Exception as e:
+        log.warning("[FIB explanations] generation failed q=%s: %s", qid, e)
+        return []
+
+    has_content = any(
+        isinstance(r, dict) and str(r.get("explanation") or "").strip()
+        for r in result
+    )
+    if has_content:
+        try:
+            scorer = next((r.get("scorer") for r in result if isinstance(r, dict) and r.get("scorer")), None)
+            db.add(QuestionExplanation(
+                question_id=qid,
+                question_type=question_type,
+                explanations=result,
+                scorer=scorer,
+            ))
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            log.warning("[FIB explanations] cache insert failed q=%s: %s", qid, e)
+    return result
+
 
 router = APIRouter(prefix="/reading/fill-in-blanks", tags=["Reading - Fill in the Blanks"])
 
@@ -179,24 +237,15 @@ def submit(
     is_correct = bool(blank_results) and all(blank_results.values())
     total_score = session.get("score", 0)
 
-    # ── AI explanations (Haiku primary, GPT-4o fallback) ──────────────────
-    explanations = []
-    try:
-        from services.fib_explainer import build_passage, generate_fib_explanations
-        passage_text = build_passage(question.content_json or {})
-        blanks_for_explainer = [
-            {
-                "blank_id": str(bid),
-                "correct": correct_answers.get(str(bid)),
-                "user_answer": user_answers.get(str(bid)) or user_answers.get(f"blank_{bid}"),
-                "is_correct": bool(blank_results.get(str(bid))),
-            }
-            for bid in correct_answers.keys()
-        ]
-        if passage_text and blanks_for_explainer:
-            explanations = generate_fib_explanations(passage_text, blanks_for_explainer)
-    except Exception as e:
-        log.warning("[Reading FIB] explanation generation failed: %s", e)
+    # ── AI explanations (lazy cache: RDS → LLM on miss → write-through) ──
+    explanations = _get_or_generate_explanations(
+        db=db,
+        question=question,
+        question_type="reading_drag_and_drop",
+        correct_answers=correct_answers,
+        user_answers=user_answers,
+        blank_results=blank_results,
+    )
 
     persisted_result = dict(result.breakdown or {})
     persisted_result["correct_answers"] = correct_answers

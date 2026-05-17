@@ -523,3 +523,17 @@ class AuthRefreshToken(Base):
     ip_address    = Column(INET, nullable=True)
     last_used_at  = Column(DateTime(timezone=True), nullable=True)
 
+
+
+class QuestionExplanation(Base):
+    """LLM-generated per-blank explanations for reading FIB questions,
+       cached so we don't call Claude/GPT on every submit. Populated lazily:
+       first submit on a question generates and inserts; later submits
+       SELECT directly. Wipe a row to force regeneration."""
+    __tablename__ = "question_explanations"
+
+    question_id   = Column(Integer, primary_key=True)
+    question_type = Column(String(50), nullable=False)
+    explanations  = Column(JSONB, nullable=False)
+    scorer        = Column(String(20), nullable=True)
+    generated_at  = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
