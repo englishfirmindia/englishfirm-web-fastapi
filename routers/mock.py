@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import PracticeAttempt, User
 from core.dependencies import get_current_user
+from services.billing.enforce_limit import EnforceLimit
 from services.mock_service import (
 
     get_mock_info,
@@ -53,6 +54,10 @@ def mock_start(
     payload: dict = Body(default={}),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    # Gate: increments user's monthly mock counter atomically before any work.
+    # Raises 402 PLAN_LIMIT_REACHED when the cap is hit; caller (Flutter)
+    # renders the structured error as an upgrade modal.
+    _gate=Depends(EnforceLimit("mocks")),
 ):
     """Picks 65 questions and creates a PracticeAttempt(module='mock').
 
