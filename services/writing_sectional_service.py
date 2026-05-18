@@ -311,6 +311,17 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
     q_scores      = session_data.get("question_scores", {})
     q_score_maxes = session_data.get("question_score_maxes", {})
 
+    # Detect our-fault scoring failures from persisted AttemptAnswer rows.
+    # Writing scoring is synchronous, so any failures are scorer-degraded
+    # (`scoring_warnings` non-empty) rather than reaper-flipped.
+    from db.models import AttemptAnswer as _AttemptAnswer
+    from services.scoring_health import is_row_failed, build_scoring_health
+    failed_qid_set = set()
+    if existing:
+        for r in db.query(_AttemptAnswer).filter_by(attempt_id=existing.id).all():
+            if is_row_failed(r):
+                failed_qid_set.add(int(r.question_id))
+
     # Build per-task buckets — mirrors the listening/reading/speaking pattern:
     # task_pct is the average of per-Q raw fractions, so each question carries
     # equal weight regardless of its rubric max. earned_raw/max_raw are kept
@@ -325,11 +336,14 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
                 "max_raw":        0.0,
                 "total":          0,
                 "answered":       0,
+                "failed":         0,
             }
 
         q_max = q_score_maxes.get(qid) or _question_max(q)
         task_buckets[t]["max_raw"] += q_max
         task_buckets[t]["total"]   += 1
+        if int(qid) in failed_qid_set:
+            task_buckets[t]["failed"] += 1
 
         if qid in submitted:
             earned   = q_scores.get(qid, 0)
@@ -338,24 +352,33 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
             task_buckets[t]["earned_raw"]     += earned
             task_buckets[t]["answered"]       += 1
 
-    # Weighted aggregation
-    weighted_sum   = 0.0
+    # Weighted aggregation — compute both with-failures and excluding-failures.
+    weighted_sum      = 0.0
+    weighted_sum_excl = 0.0
     present_weight = sum(_WRITING_WEIGHTS.values())
     task_breakdown: dict = {}
 
     for task_type, bucket in task_buckets.items():
         weight = _WRITING_WEIGHTS.get(task_type, 0)
         total  = bucket["total"]
+        failed = bucket["failed"]
 
-        task_pct     = (bucket["earned_pct_sum"] / total) if total > 0 else 0.0
-        contribution = task_pct * weight
+        task_pct = (bucket["earned_pct_sum"] / total) if total > 0 else 0.0
+        non_failed_total = total - failed
+        task_pct_excl = (
+            bucket["earned_pct_sum"] / non_failed_total if non_failed_total > 0 else task_pct
+        )
+        contribution      = task_pct * weight
+        contribution_excl = task_pct_excl * weight
 
-        weighted_sum += contribution
+        weighted_sum      += contribution
+        weighted_sum_excl += contribution_excl
 
         task_breakdown[task_type] = {
             "display_name":       _display_name(task_type),
             "total_questions":    total,
             "questions_answered": bucket["answered"],
+            "failed_questions":   failed,
             "earned_raw":         round(bucket["earned_raw"], 2),
             "max_raw":            round(bucket["max_raw"], 2),
             "task_pct":           round(task_pct * 100, 1),
@@ -363,12 +386,25 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
             "contribution":       round(contribution, 2),
         }
 
-    normalised_pct = (weighted_sum / present_weight) if present_weight > 0 else 0.0
+    normalised_pct      = (weighted_sum / present_weight) if present_weight > 0 else 0.0
+    normalised_pct_excl = (weighted_sum_excl / present_weight) if present_weight > 0 else normalised_pct
     scaled = max(
         config.PTE_FLOOR,
         min(config.PTE_CEILING, round(config.PTE_BASE + normalised_pct * config.PTE_SCALE)),
     )
+    scaled_excl = max(
+        config.PTE_FLOOR,
+        min(config.PTE_CEILING, round(config.PTE_BASE + normalised_pct_excl * config.PTE_SCALE)),
+    )
+    scoring_health = build_scoring_health(
+        total_questions=len(questions),
+        failed_question_ids=sorted(failed_qid_set),
+        score_with_failures=scaled,
+        score_excluding_failures=scaled_excl,
+        per_section_failed={"writing": len(failed_qid_set)},
+    )
 
+    task_breakdown["scoring_health"] = scoring_health
     if existing:
         prior_tb = existing.task_breakdown or {}
         if "test_number" in prior_tb:
@@ -408,6 +444,7 @@ def finish_writing_sectional(session_id: str, user_id: int, db: Session) -> dict
         "writing_score":  scaled,
         "weighted_pct":   round(normalised_pct * 100, 1),
         "task_breakdown": task_breakdown,
+        "scoring_health": scoring_health,
     }
 
 
@@ -443,6 +480,7 @@ def get_writing_sectional_results(session_id: str, user_id: int, db: Session) ->
         "scoring_status":     attempt.scoring_status or "complete",
         "writing_score":      attempt.total_score,
         "task_breakdown":     attempt.task_breakdown or {},
+        "scoring_health":     (attempt.task_breakdown or {}).get("scoring_health"),
         "total_questions":    attempt.total_questions,
         "questions_answered": attempt.questions_answered,
         "completed_at":       attempt.completed_at.isoformat() if attempt.completed_at else None,

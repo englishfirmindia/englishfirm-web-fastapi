@@ -392,13 +392,19 @@ def _speaking_aggregate_bg(
 
         # 4. Build per-task buckets
         # denominator = total questions asked (unanswered / error = 0, penalised fairly)
+        # Parallel buckets — `failed` here means our-fault failed (reaper-
+        # flipped or scorer-degraded), used to compute a counterfactual
+        # "would have scored" number that excludes those questions from the
+        # task's denominator. See services/scoring_health.py.
+        from services.scoring_health import is_row_failed, collect_failed_question_ids, build_scoring_health
         task_buckets: dict = {}
+        failed_qids: list = []
         for qid in all_question_ids:
             t = type_by_qid.get(qid)
             if not t:
                 continue
             if t not in task_buckets:
-                task_buckets[t] = {"earned_pct_sum": 0.0, "total": 0, "answered": 0}
+                task_buckets[t] = {"earned_pct_sum": 0.0, "total": 0, "answered": 0, "failed": 0}
             task_buckets[t]["total"] += 1
 
             row = answered_by_qid.get(qid)
@@ -406,32 +412,58 @@ def _speaking_aggregate_bg(
                 continue
             task_buckets[t]["answered"] += 1
             task_buckets[t]["earned_pct_sum"] += _earned_pct_from_answer(row.score or 0)
+            if is_row_failed(row):
+                task_buckets[t]["failed"] += 1
+                failed_qids.append(int(qid))
 
-        # 5. Weighted PTE score
-        weighted_sum   = 0.0
-        present_weight = sum(_SPEAKING_WEIGHTS.values())
+        # 5. Weighted PTE score — compute two variants in one pass:
+        #    `task_pct`           : counts failures in the denominator (current/strict)
+        #    `task_pct_excl`      : excludes failures from the denominator (counterfactual)
+        weighted_sum      = 0.0
+        weighted_sum_excl = 0.0
+        present_weight    = sum(_SPEAKING_WEIGHTS.values())
         task_breakdown: dict = {}
 
         for task_type, bucket in task_buckets.items():
             weight       = _SPEAKING_WEIGHTS.get(task_type, 0)
             total        = bucket["total"]
             answered     = bucket["answered"]
+            failed       = bucket["failed"]
             task_pct     = bucket["earned_pct_sum"] / total if total > 0 else 0.0
-            contribution = task_pct * weight
-            weighted_sum += contribution
+            non_failed   = total - failed
+            task_pct_excl = (
+                bucket["earned_pct_sum"] / non_failed if non_failed > 0 else task_pct
+            )
+            contribution      = task_pct * weight
+            contribution_excl = task_pct_excl * weight
+            weighted_sum      += contribution
+            weighted_sum_excl += contribution_excl
             task_breakdown[task_type] = {
                 "display_name":       _display_name(task_type),
                 "total_questions":    total,
                 "questions_answered": answered,
+                "failed_questions":   failed,
                 "task_pct":           round(task_pct * 100, 1),
                 "speaking_weight":    weight,
                 "contribution":       round(contribution, 2),
             }
 
-        normalised_pct = (weighted_sum / present_weight) if present_weight > 0 else 0.0
+        normalised_pct      = (weighted_sum / present_weight) if present_weight > 0 else 0.0
+        normalised_pct_excl = (weighted_sum_excl / present_weight) if present_weight > 0 else normalised_pct
         scaled = max(
             config.PTE_FLOOR,
             min(config.PTE_CEILING, round(config.PTE_BASE + normalised_pct * config.PTE_SCALE)),
+        )
+        scaled_excl = max(
+            config.PTE_FLOOR,
+            min(config.PTE_CEILING, round(config.PTE_BASE + normalised_pct_excl * config.PTE_SCALE)),
+        )
+        scoring_health = build_scoring_health(
+            total_questions=len(all_question_ids),
+            failed_question_ids=failed_qids,
+            score_with_failures=scaled,
+            score_excluding_failures=scaled_excl,
+            per_section_failed={"speaking": len(failed_qids)},
         )
 
         # 6. Write back to DB
@@ -440,6 +472,7 @@ def _speaking_aggregate_bg(
             prior_tb = attempt.task_breakdown or {}
             if "test_number" in prior_tb:
                 task_breakdown["test_number"] = prior_tb["test_number"]
+            task_breakdown["scoring_health"] = scoring_health
             attempt.total_score        = scaled
             attempt.questions_answered = len(answered_by_qid)
             attempt.status             = "complete"
@@ -681,6 +714,7 @@ def get_speaking_sectional_results(session_id: str, user_id: int, db: Session) -
         "scoring_status":     attempt.scoring_status or "pending",
         "speaking_score":     attempt.total_score,
         "task_breakdown":     attempt.task_breakdown or {},
+        "scoring_health":     (attempt.task_breakdown or {}).get("scoring_health"),
         "total_questions":    attempt.total_questions,
         "questions_answered": attempt.questions_answered,
         "completed_at":       attempt.completed_at.isoformat() if attempt.completed_at else None,

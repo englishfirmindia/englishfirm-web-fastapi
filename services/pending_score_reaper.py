@@ -48,12 +48,22 @@ def _reap_once() -> int:
     total = 0
     db = SessionLocal()
     try:
-        # attempt_answers: per-question scoring rows.
+        # attempt_answers: per-question scoring rows. Also stamps a warning
+        # code into result_json so the existing per-answer ScoringWarningsCard
+        # lights up in the trainer review, and so the scoring_health banner
+        # on the student feedback screen can count this row as a failure.
         res = db.execute(
             text(
                 """
                 UPDATE attempt_answers
-                SET scoring_status = 'failed'
+                SET scoring_status = 'failed',
+                    result_json = COALESCE(result_json, '{}'::jsonb) || jsonb_build_object(
+                      'scoring_warnings',
+                      COALESCE(result_json->'scoring_warnings', '[]'::jsonb)
+                        || '["scoring_infrastructure_timeout"]'::jsonb,
+                      'scoring_failed_at',
+                      to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                    )
                 WHERE scoring_status = 'pending'
                   AND submitted_at < :cutoff
                 """

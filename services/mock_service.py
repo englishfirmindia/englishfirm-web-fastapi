@@ -623,12 +623,47 @@ def finish_mock_test(db: Session, session_id: str, user_id: int) -> dict:
     listening = _compute_section_score("listening", answers, weights, _MAX_FALLBACK)
     overall   = _compute_overall_score(answers, weights, _MAX_FALLBACK)
 
+    # ── Scoring-health: counterfactual score excluding our-fault failures ──
+    # Recompute overall pretending the failed questions weren't asked. Surface
+    # both numbers so the student feedback screen can render the banner
+    # "Your score is X. Without the N unscored question(s) you would have
+    # scored ~Y."
+    from services.scoring_health import is_row_failed, build_scoring_health
+    failed_qids: list = []
+    failed_per_section: dict = {"speaking": 0, "writing": 0, "reading": 0, "listening": 0}
+    for a in answers:
+        if is_row_failed(a):
+            failed_qids.append(int(a.question_id))
+            qt = a.question_type
+            rds = _rds_key(qt)
+            # Which section does this question belong to? The pte_question_weightage
+            # table maps rds → section weight; non-zero weight = belongs to section.
+            for sec in ("speaking", "writing", "reading", "listening"):
+                if (weights.get(rds, {}).get(sec, 0) or 0) > 0:
+                    failed_per_section[sec] = failed_per_section.get(sec, 0) + 1
+                    break
+
+    if failed_qids:
+        non_failed_answers = [a for a in answers if not is_row_failed(a)]
+        overall_excl = _compute_overall_score(non_failed_answers, weights, _MAX_FALLBACK)
+    else:
+        overall_excl = overall
+
+    scoring_health = build_scoring_health(
+        total_questions=len(answers),
+        failed_question_ids=failed_qids,
+        score_with_failures=overall,
+        score_excluding_failures=overall_excl,
+        per_section_failed={k: v for k, v in failed_per_section.items() if v > 0},
+    )
+
     task_breakdown = {
         "overall_score":      overall,
         "speaking":           speaking,
         "writing":            writing,
         "reading":            reading,
         "listening":          listening,
+        "scoring_health":     scoring_health,
         "current_part":       3,
         "part_timer_remaining": {},
     }
@@ -670,6 +705,7 @@ def _format_results(attempt: PracticeAttempt) -> dict:
             "reading":   tb.get("reading"),
             "listening": tb.get("listening"),
         },
+        "scoring_health":     tb.get("scoring_health"),
         "total_questions":    attempt.total_questions,
         "questions_answered": attempt.questions_answered,
         "completed_at":       attempt.completed_at.isoformat() if attempt.completed_at else None,
