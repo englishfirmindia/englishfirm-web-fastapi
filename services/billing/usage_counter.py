@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from db.database import SessionLocal
 from db.models import UsageCounter
 
 log = logging.getLogger(__name__)
@@ -54,14 +55,14 @@ class IncrementResult:
 
 
 def try_increment(
-    db: Session,
+    db: Session,  # accepted for API compat; an independent session is used internally
     *,
     user_id: int,
     feature_key: str,
     period_type: PeriodType,
     limit: Optional[int],
 ) -> IncrementResult:
-    """Atomic check-and-increment.
+    """Atomic check-and-increment, fully self-contained.
 
     Behaviour:
       - limit is None (unlimited) → ALWAYS increment, return allowed=True
@@ -73,22 +74,54 @@ def try_increment(
     deterministically; the second caller sees count_after=limit and
     allowed=False.
 
-    Does NOT commit — caller's transaction owns the lifecycle. EnforceLimit
-    commits the increment in the same transaction as its own work, so a
-    downstream failure rolls the counter back too (the user isn't charged
-    a mock if the mock creation itself fails).
+    Transaction lifecycle: opens its OWN `SessionLocal()` and commits the
+    UPSERT inline. The original design left commit to the caller's request
+    session, but in practice every gated route handler delegated work to
+    helpers that opened their own sessions and never committed the request
+    session — every counter write was rolled back at request close, leaving
+    all per-day/per-month limits unenforced. Mirrors the same independent-
+    session pattern used by `_create_practice_attempt_with_retry` in
+    session_service. The `db` parameter is accepted but unused.
     """
     ps = period_start_for(period_type)
 
     if limit == 0:
         # Read-only "what's the current count" path so the response can
-        # still surface a meaningful number.
-        current = _read_count(db, user_id=user_id, feature_key=feature_key, period_start=ps)
+        # still surface a meaningful number. Uses its own session.
+        s = SessionLocal()
+        try:
+            current = _read_count(s, user_id=user_id, feature_key=feature_key, period_start=ps)
+        finally:
+            s.close()
         return IncrementResult(allowed=False, count_after=current, limit=0, period_start=ps)
 
-    if limit is None:
-        # Unlimited — still bump the counter for usage analytics, but never
-        # block. Done via the same UPSERT as the limited path.
+    s = SessionLocal()
+    try:
+        if limit is None:
+            # Unlimited — still bump the counter for usage analytics, but never
+            # block. Same UPSERT as the limited path.
+            stmt = pg_insert(UsageCounter).values(
+                user_id=user_id,
+                feature_key=feature_key,
+                period_start=ps,
+                period_type=period_type,
+                count=1,
+            ).on_conflict_do_update(
+                index_elements=[
+                    UsageCounter.user_id,
+                    UsageCounter.feature_key,
+                    UsageCounter.period_start,
+                ],
+                set_={"count": UsageCounter.__table__.c.count + 1},
+            ).returning(UsageCounter.count)
+
+            count_after = s.execute(stmt).scalar_one()
+            s.commit()
+            return IncrementResult(allowed=True, count_after=count_after, limit=None, period_start=ps)
+
+        # Capped path: UPSERT with a `WHERE count < :limit` predicate on the
+        # UPDATE branch. Returning the count lets us tell allowed vs blocked
+        # in a single round trip.
         stmt = pg_insert(UsageCounter).values(
             user_id=user_id,
             feature_key=feature_key,
@@ -102,44 +135,30 @@ def try_increment(
                 UsageCounter.period_start,
             ],
             set_={"count": UsageCounter.__table__.c.count + 1},
+            where=UsageCounter.__table__.c.count < limit,
         ).returning(UsageCounter.count)
 
-        result = db.execute(stmt).scalar_one()
-        return IncrementResult(allowed=True, count_after=result, limit=None, period_start=ps)
+        row = s.execute(stmt).first()
+        if row is not None:
+            s.commit()
+            return IncrementResult(
+                allowed=True,
+                count_after=row[0],
+                limit=limit,
+                period_start=ps,
+            )
 
-    # Capped path: UPSERT with a `WHERE count < :limit` predicate on the
-    # UPDATE branch. Returning the count lets us tell allowed vs blocked
-    # in a single round trip.
-    stmt = pg_insert(UsageCounter).values(
-        user_id=user_id,
-        feature_key=feature_key,
-        period_start=ps,
-        period_type=period_type,
-        count=1,
-    ).on_conflict_do_update(
-        index_elements=[
-            UsageCounter.user_id,
-            UsageCounter.feature_key,
-            UsageCounter.period_start,
-        ],
-        set_={"count": UsageCounter.__table__.c.count + 1},
-        where=UsageCounter.__table__.c.count < limit,
-    ).returning(UsageCounter.count)
-
-    row = db.execute(stmt).first()
-    if row is not None:
-        # Either inserted (count=1) or incremented within the cap. Allowed.
-        return IncrementResult(
-            allowed=True,
-            count_after=row[0],
-            limit=limit,
-            period_start=ps,
-        )
-
-    # UPSERT predicate failed: the row exists at the cap. Read the current
-    # count so the 402 response can surface it.
-    current = _read_count(db, user_id=user_id, feature_key=feature_key, period_start=ps)
-    return IncrementResult(allowed=False, count_after=current, limit=limit, period_start=ps)
+        # UPSERT predicate failed: the row exists at the cap. Read the
+        # current count so the 402 response can surface it. No write, but
+        # commit to release any locks the failed UPSERT may hold.
+        current = _read_count(s, user_id=user_id, feature_key=feature_key, period_start=ps)
+        s.commit()
+        return IncrementResult(allowed=False, count_after=current, limit=limit, period_start=ps)
+    except Exception:
+        s.rollback()
+        raise
+    finally:
+        s.close()
 
 
 def read_current_count(
