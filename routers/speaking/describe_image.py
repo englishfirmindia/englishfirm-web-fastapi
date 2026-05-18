@@ -110,7 +110,6 @@ def start(
     payload: dict = Body(default={}),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _gate=Depends(EnforceLimit("practice")),
 ):
     raw_qid = payload.get("question_id")
     return start_session(
@@ -139,6 +138,7 @@ def submit(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _gate=Depends(EnforceLimit("practice")),
 ):
     session_id = payload["session_id"]
     question_id = safe_question_id(payload, db)

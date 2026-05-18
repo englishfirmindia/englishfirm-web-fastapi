@@ -112,7 +112,6 @@ def start_exam(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _gate=Depends(EnforceLimit("sectionals")),
 ):
     test_number = int(payload.get("test_number", 1))
     # Redos of completed tests are allowed — each is a new versioned row.
@@ -154,6 +153,7 @@ def submit_answer(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _gate=Depends(EnforceLimit("sectionals")),
 ):
     """
     Score one listening answer and store result in session for weighted finish scoring.
