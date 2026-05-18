@@ -51,12 +51,15 @@ _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # (email, password, username, plan_id)
+# Usernames intentionally do NOT include the tier — they get stale the
+# moment the user upgrades / downgrades via Stripe, and the UI surfaces
+# the live plan via the SubscriptionBloc snapshot, not the username.
 TEST_USERS = [
-    ("a@gmail.com", "pass1", "Test A (Free)",   "free"),
-    ("b@gmail.com", "pass2", "Test B (Bronze)", "bronze"),
-    ("c@gmail.com", "pass3", "Test C (Silver)", "silver"),
-    ("d@gmail.com", "pass4", "Test D (Gold)",   "gold"),
-    ("e@gmail.com", "pass4", "Test E (VIP)",    "vip"),
+    ("a@gmail.com", "pass1", "Test A", "free"),
+    ("b@gmail.com", "pass2", "Test B", "bronze"),
+    ("c@gmail.com", "pass3", "Test C", "silver"),
+    ("d@gmail.com", "pass4", "Test D", "gold"),
+    ("e@gmail.com", "pass4", "Test E", "vip"),
 ]
 
 
