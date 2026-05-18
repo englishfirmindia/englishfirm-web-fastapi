@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import User, AttemptAnswer, PracticeAttempt
 from core.dependencies import get_current_user
-from services.billing.enforce_limit import EnforceLimit
+from services.billing.enforce_limit import EnforceLimit, check_and_increment_or_raise
 from services.session_service import ACTIVE_SESSIONS
 from services.scoring import get_scorer
 from services.reading_sectional_service import (
@@ -110,6 +110,9 @@ def start_exam(
                     "message": f"Test {test_number} is still in progress — resume it before starting a new attempt.",
                 },
             )
+    # Counter ticks once per sectional started, AFTER the in-progress 409 check
+    # so resuming an existing attempt doesn't burn quota a second time.
+    check_and_increment_or_raise(db, user_id=current_user.id, feature_key="sectionals")
     return start_reading_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
 
 
@@ -127,7 +130,6 @@ def submit_answer(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _gate=Depends(EnforceLimit("sectionals")),
 ):
     """
     Score one reading answer and store result in session for weighted finish scoring.

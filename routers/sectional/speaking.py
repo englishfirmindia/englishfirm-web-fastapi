@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import User, PracticeAttempt
 from core.dependencies import get_current_user
-from services.billing.enforce_limit import EnforceLimit
+from services.billing.enforce_limit import EnforceLimit, check_and_increment_or_raise
 from services.session_service import ACTIVE_SESSIONS, persist_speaking_answer_pending
 from services.speaking_scorer import kick_off_scoring
 from core.security_helpers import safe_question_id, assert_audio_url_owned, resolve_question_with_retry
@@ -73,6 +73,7 @@ def start_exam(
                     "message": f"Test {test_number} is still in progress — resume it before starting a new attempt.",
                 },
             )
+    check_and_increment_or_raise(db, user_id=current_user.id, feature_key="sectionals")
     return start_speaking_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
 
 
@@ -90,7 +91,6 @@ def submit_audio(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _gate=Depends(EnforceLimit("sectionals")),
 ):
     """
     Records that a question's audio has been uploaded to S3.

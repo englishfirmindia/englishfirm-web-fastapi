@@ -54,6 +54,7 @@ def mock_start(
     payload: dict = Body(default={}),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _gate=Depends(EnforceLimit("mocks")),
 ):
     """Picks 65 questions and creates a PracticeAttempt(module='mock').
 
@@ -167,7 +168,6 @@ def mock_submit(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _gate=Depends(EnforceLimit("mocks")),
 ):
     """Unified submit for all non-speaking mock question types."""
     session_id = payload.get("session_id", "")
