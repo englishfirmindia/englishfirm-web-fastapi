@@ -537,3 +537,206 @@ class QuestionExplanation(Base):
     explanations  = Column(JSONB, nullable=False)
     scorer        = Column(String(20), nullable=True)
     generated_at  = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subscriptions  (Stripe-only for web phase; IAP fields reserved for later)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SubscriptionPlan(Base):
+    """Tier catalogue. ~5 rows: free, bronze, silver, gold, vip. Limits live
+       in JSON so pricing experiments don't need migrations."""
+    __tablename__ = "subscription_plans"
+
+    plan_id      = Column(String(20), primary_key=True)   # free | bronze | silver | gold | vip
+    display_name = Column(String(50), nullable=False)
+    tier_rank    = Column(Integer, nullable=False)         # 0=free … 4=vip (for upgrade/downgrade math)
+
+    monthly_price_aud_cents   = Column(Integer, nullable=True)
+    quarterly_price_aud_cents = Column(Integer, nullable=True)
+    annual_price_aud_cents    = Column(Integer, nullable=True)
+
+    # Stripe Price IDs per billing period (populated after creating Prices in Stripe Dashboard)
+    stripe_price_id_monthly   = Column(String(120), nullable=True)
+    stripe_price_id_quarterly = Column(String(120), nullable=True)
+    stripe_price_id_annual    = Column(String(120), nullable=True)
+
+    # Per-feature numeric caps + boolean feature flags. NULL key inside JSON = unlimited.
+    # Example:
+    #   {"practice_per_day": 20, "mocks_per_month": 5, "ef_coach_per_day": 5,
+    #    "trainer_feedback_per_month": 0, "features": ["weekly_predictions"]}
+    limits_json = Column(JSONB, nullable=False, default=dict)
+
+    is_active  = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class UserSubscription(Base):
+    """One row = one billing engagement. A user can have many historical
+       rows but at most ONE with status='active' at any time (enforced by
+       partial unique index below)."""
+    __tablename__ = "user_subscriptions"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True)
+    user_id         = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    plan_id         = Column(String(20), ForeignKey("subscription_plans.plan_id"), nullable=False)
+
+    billing_period  = Column(String(10), nullable=False)   # monthly | quarterly | annual | trial
+    status          = Column(String(20), nullable=False)   # active | past_due | cancelled | expired | refunded | disputed
+
+    started_at           = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    current_period_start = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    current_period_end   = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    cancel_at_period_end = Column(Boolean, nullable=False, default=False)
+    auto_renew           = Column(Boolean, nullable=False, default=True)
+
+    # source: stripe (today) | manual_admin (comp / VIP / refund grant) | apple_iap | google_play (reserved)
+    source              = Column(String(20), nullable=False, default="stripe")
+    external_id         = Column(String(200), nullable=True, index=True)   # Stripe subscription ID or equivalent
+    stripe_customer_id  = Column(String(120), nullable=True, index=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active','past_due','cancelled','expired','refunded','disputed')",
+            name="ck_user_sub_status",
+        ),
+        CheckConstraint(
+            "billing_period IN ('monthly','quarterly','annual','trial')",
+            name="ck_user_sub_billing_period",
+        ),
+        CheckConstraint(
+            "source IN ('stripe','manual_admin','apple_iap','google_play')",
+            name="ck_user_sub_source",
+        ),
+        # At most one active subscription per user. past_due is also "live" — counts
+        # toward the singleton so a failed-payment row doesn't get duplicated.
+        __import__('sqlalchemy').Index(
+            "ix_user_subscriptions_one_live",
+            "user_id",
+            unique=True,
+            postgresql_where=__import__('sqlalchemy').text(
+                "status IN ('active','past_due')"
+            ),
+        ),
+    )
+
+
+class UsageCounter(Base):
+    """Per-user × per-feature × per-period counters. EnforceLimit increments
+       atomically via INSERT … ON CONFLICT DO UPDATE. Rows age out after ~90d."""
+    __tablename__ = "usage_counters"
+
+    user_id      = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    feature_key  = Column(String(50), primary_key=True)   # practice_attempts | mocks | sectionals | ef_coach_chat | trainer_feedback | study_plan
+    period_start = Column(Date, primary_key=True)         # day (for daily) or first of month (for monthly)
+    period_type  = Column(String(10), nullable=False)     # daily | monthly
+
+    count      = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint("period_type IN ('daily','monthly')", name="ck_usage_period_type"),
+        CheckConstraint("count >= 0", name="ck_usage_count_nonneg"),
+    )
+
+
+class PaymentTransaction(Base):
+    """Every payment attempt — succeeded, failed, refunded. Immutable except
+       for status transitions. provider_transaction_id is the idempotency key
+       for webhooks."""
+    __tablename__ = "payment_transactions"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True)
+    user_id         = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    subscription_id = Column(UUID(as_uuid=True), ForeignKey("user_subscriptions.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    provider                = Column(String(20), nullable=False)   # stripe | apple_iap | google_play
+    provider_transaction_id = Column(String(200), nullable=False)  # Stripe charge/payment_intent ID, etc.
+    provider_event_id       = Column(String(200), nullable=True)   # Webhook event ID, for replay dedupe
+
+    amount_cents = Column(Integer, nullable=False)
+    currency     = Column(String(3),  nullable=False, default="AUD")
+    status       = Column(String(20), nullable=False)   # pending | succeeded | failed | refunded | disputed
+
+    raw_payload_jsonb = Column(JSONB, nullable=True)    # Full webhook body for audit
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','succeeded','failed','refunded','disputed')",
+            name="ck_payment_status",
+        ),
+        CheckConstraint(
+            "provider IN ('stripe','apple_iap','google_play')",
+            name="ck_payment_provider",
+        ),
+        # Provider + their txn ID must be globally unique. Guarantees idempotency:
+        # replaying a webhook hits this constraint and the handler bails.
+        __import__('sqlalchemy').UniqueConstraint(
+            "provider", "provider_transaction_id",
+            name="uq_payment_provider_txn",
+        ),
+    )
+
+
+class SubscriptionEvent(Base):
+    """Append-only audit log. Every state change writes one row. Used for
+       analytics, debugging, ACL compliance, refund evidence."""
+    __tablename__ = "subscription_events"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True)
+    user_id         = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    subscription_id = Column(UUID(as_uuid=True), ForeignKey("user_subscriptions.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    event_type = Column(String(30), nullable=False, index=True)
+    # created | activated | renewed | upgraded | downgraded | cancelled
+    # | expired | refunded | payment_failed | payment_recovered | disputed | grant_admin
+
+    from_plan_id = Column(String(20), nullable=True)
+    to_plan_id   = Column(String(20), nullable=True)
+
+    actor      = Column(String(50), nullable=True)   # webhook | system | admin:<email> | user
+    metadata_  = Column("metadata", JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RefundRequest(Base):
+    """User-initiated money-back applications. Auto-approved when eligible
+       (≤7 days, <20% usage, Gold+). Else queued for manual review."""
+    __tablename__ = "refund_requests"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True)
+    user_id         = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    subscription_id = Column(UUID(as_uuid=True), ForeignKey("user_subscriptions.id", ondelete="CASCADE"), nullable=False, index=True)
+    transaction_id  = Column(UUID(as_uuid=True), ForeignKey("payment_transactions.id", ondelete="SET NULL"), nullable=True)
+
+    reason_text = Column(Text, nullable=True)
+
+    # Snapshot of usage_counters at the moment of request — used to defend
+    # the auto-approve decision later (e.g. dispute response).
+    usage_at_request_jsonb = Column(JSONB, nullable=False, default=dict)
+    usage_pct_at_request   = Column(Float, nullable=True)
+
+    status            = Column(String(20), nullable=False, default="pending")
+    # pending | auto_approved | manually_approved | denied | processed
+    decision_reason   = Column(Text, nullable=True)
+    decided_by        = Column(String(120), nullable=True)   # 'system' | admin email
+    stripe_refund_id  = Column(String(120), nullable=True)
+
+    requested_at = Column(DateTime(timezone=True), server_default=func.now())
+    decided_at   = Column(DateTime(timezone=True), nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','auto_approved','manually_approved','denied','processed')",
+            name="ck_refund_status",
+        ),
+    )
