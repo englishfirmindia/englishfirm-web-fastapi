@@ -703,7 +703,8 @@ def _apply_subscription_state(
     if not items:
         log.error("[stripe] subscription with no items: %s", stripe_subscription.get("id"))
         return
-    price_id = items[0]["price"]["id"]
+    item = items[0]
+    price_id = item["price"]["id"]
     plan_id = _plan_id_from_price(db, price_id)
     billing_period = _billing_period_from_price(db, price_id)
     if plan_id is None or billing_period is None:
@@ -713,10 +714,20 @@ def _apply_subscription_state(
         )
         return
 
-    period_start = _epoch_to_utc(stripe_subscription.get("current_period_start"))
-    period_end   = _epoch_to_utc(stripe_subscription.get("current_period_end"))
+    # Stripe API v2024-09-30 moved current_period_start / current_period_end
+    # from the top-level subscription object onto each subscription item,
+    # since a subscription can now have multiple items billing on different
+    # cycles. Prefer the item-level fields; fall back to top-level for
+    # backwards compatibility with older API versions.
+    period_start_ts = item.get("current_period_start") or stripe_subscription.get("current_period_start")
+    period_end_ts   = item.get("current_period_end")   or stripe_subscription.get("current_period_end")
+    period_start = _epoch_to_utc(period_start_ts)
+    period_end   = _epoch_to_utc(period_end_ts)
     if period_start is None or period_end is None:
-        log.error("[stripe] subscription missing period bounds: %s", stripe_subscription.get("id"))
+        log.error(
+            "[stripe] subscription missing period bounds: %s item=%s",
+            stripe_subscription.get("id"), item.get("id"),
+        )
         return
 
     sub_row = _find_or_create_active_subscription_row(
