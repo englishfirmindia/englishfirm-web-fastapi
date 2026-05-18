@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import User, PracticeAttempt
 from core.dependencies import get_current_user
+from services.billing.enforce_limit import EnforceLimit
 from services.session_service import ACTIVE_SESSIONS, persist_speaking_answer_pending
 from services.speaking_scorer import kick_off_scoring
 from core.security_helpers import safe_question_id, assert_audio_url_owned, resolve_question_with_retry
@@ -46,6 +47,7 @@ def start_exam(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _gate=Depends(EnforceLimit("sectionals")),
 ):
     test_number = int(payload.get("test_number", 1))
     # Redos of completed tests are allowed — each is a new versioned row.

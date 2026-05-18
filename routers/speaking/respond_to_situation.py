@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 from db.database import get_db
 from db.models import User, QuestionFromApeuni, UserQuestionAttempt
 from core.dependencies import get_current_user
+from services.billing.enforce_limit import EnforceLimit
 from services.session_service import start_session, get_session, mark_submitted, get_score_from_store, persist_speaking_answer_pending, store_score
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url, generate_presigned_upload_url
@@ -110,6 +111,7 @@ def start(
     payload: dict = Body(default={}),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _gate=Depends(EnforceLimit("practice")),
 ):
     raw_qid = payload.get("question_id")
     return start_session(

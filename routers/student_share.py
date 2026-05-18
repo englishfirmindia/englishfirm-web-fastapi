@@ -27,6 +27,7 @@ from db.models import (
     User,
 )
 from core.dependencies import get_current_user
+from services.billing.enforce_limit import EnforceLimit
 from services.email import send_trainer_share_received, send_trainer_share_revoked
 
 
@@ -130,6 +131,7 @@ def share_attempt(
     body: ShareCreateBody = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _gate=Depends(EnforceLimit("trainer_feedback")),
 ):
     """Create (or surface existing) active share between this attempt and one trainer."""
     attempt = _require_attempt_owner(db, current_user, attempt_id)

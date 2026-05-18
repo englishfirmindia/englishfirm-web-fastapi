@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from db.database import get_db
 from db.models import User, Conversation, Message
 from core.dependencies import get_current_user
+from services.billing.enforce_limit import EnforceLimit
 
 from mcp_server.tools import get_trainer_profile, get_new_practice_since
 from services.coach_session_service import (
@@ -112,6 +113,7 @@ async def chat(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    _gate=Depends(EnforceLimit("ef_coach_chat")),
 ):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
@@ -231,6 +233,7 @@ async def chat_stream(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    _gate=Depends(EnforceLimit("ef_coach_chat")),
 ):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")

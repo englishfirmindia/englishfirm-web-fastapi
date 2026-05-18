@@ -7,6 +7,7 @@ from sqlalchemy import asc, desc
 from db.database import get_db
 from db.models import User, QuestionFromApeuni, UserQuestionAttempt
 from core.dependencies import get_current_user
+from services.billing.enforce_limit import EnforceLimit
 from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
 from services.scoring import get_scorer
 from schemas.submit_requests import MultiOptionSubmitRequest
@@ -98,6 +99,7 @@ def start(
     payload: dict = Body(default={}),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _gate=Depends(EnforceLimit("practice")),
 ):
     raw_qid = payload.get("question_id")
     return start_session(
