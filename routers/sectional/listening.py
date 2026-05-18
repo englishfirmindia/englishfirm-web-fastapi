@@ -248,6 +248,7 @@ def finish_exam(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _score_gate=Depends(EnforceLimit("sectional_score")),
 ):
     session_id = payload["session_id"]
 

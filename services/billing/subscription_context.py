@@ -44,6 +44,8 @@ _LIMIT_KEYS = (
     "ef_coach_per_day",
     "trainer_feedback_per_month",
     "study_plan_per_day",
+    "sectional_score_per_month",
+    "mock_score_per_month",
 )
 
 
