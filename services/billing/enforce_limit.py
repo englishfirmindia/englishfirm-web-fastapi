@@ -43,7 +43,10 @@ from sqlalchemy.orm import Session
 
 from core.dependencies import get_subscription_context
 from db.database import get_db
-from services.billing.subscription_context import SubscriptionContext
+from services.billing.subscription_context import (
+    SubscriptionContext,
+    resolve_subscription_context,
+)
 from services.billing.usage_counter import IncrementResult, try_increment
 
 log = logging.getLogger(__name__)
@@ -58,6 +61,68 @@ _FEATURE_MAP = {
     "trainer_feedback": ("monthly", "trainer_feedback_per_month"),
     "study_plan":       ("daily",   "study_plan_per_day"),
 }
+
+
+def check_and_increment_or_raise(
+    db,
+    *,
+    user_id: int,
+    feature_key: str,
+) -> Tuple[SubscriptionContext, IncrementResult]:
+    """Inline-callable equivalent of EnforceLimit's body.
+
+    Use this inside a route handler when the gate decision depends on
+    request-time inputs (message content, payload type, …) that aren't
+    available to a Depends. The EF Coach /chat path is the canonical
+    example — it skips the gate for trivial greetings so a Free user's
+    daily allowance isn't burned on a one-word "hi".
+
+    Same behaviour as EnforceLimit: resolves the caller's tier, atomically
+    increments the matching usage counter, raises 402 PLAN_LIMIT_REACHED
+    when the cap is hit. Counter only ticks when the cap isn't reached.
+    """
+    if feature_key not in _FEATURE_MAP:
+        raise ValueError(
+            f"check_and_increment_or_raise: unknown feature_key={feature_key!r}"
+        )
+    period_type, plan_field = _FEATURE_MAP[feature_key]
+
+    ctx = resolve_subscription_context(db, user_id)
+    limit = ctx.limits.get(plan_field, 0)
+
+    result = try_increment(
+        db,
+        user_id=ctx.user_id,
+        feature_key=feature_key,
+        period_type=period_type,
+        limit=limit,
+    )
+    if not result.allowed:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code":         "PLAN_LIMIT_REACHED",
+                "feature_key":  feature_key,
+                "plan_id":      ctx.plan_id,
+                "limit":        result.limit,
+                "current":      result.count_after,
+                "period_type":  period_type,
+                "period_start": result.period_start.isoformat(),
+                "message": (
+                    f"You've used your {feature_key.replace('_', ' ')} "
+                    f"allowance ({result.limit} per {period_type[:-2]}). "
+                    f"Upgrade to continue."
+                ),
+            },
+        )
+
+    log.info(
+        "[enforce] inline allowed user_id=%d feature=%s plan=%s count=%d/%s",
+        ctx.user_id, feature_key, ctx.plan_id,
+        result.count_after,
+        "∞" if result.limit is None else result.limit,
+    )
+    return ctx, result
 
 
 def EnforceLimit(feature_key: str) -> Callable:

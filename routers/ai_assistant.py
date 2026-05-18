@@ -16,6 +16,8 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional, List
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -25,7 +27,10 @@ from pydantic import BaseModel
 from db.database import get_db
 from db.models import User, Conversation, Message
 from core.dependencies import get_current_user
-from services.billing.enforce_limit import EnforceLimit
+from services.billing.enforce_limit import (
+    EnforceLimit,
+    check_and_increment_or_raise,
+)
 
 from mcp_server.tools import get_trainer_profile, get_new_practice_since
 from services.coach_session_service import (
@@ -42,6 +47,39 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["AI Chat"])
 
 SUMMARY_TRIGGER_COUNT = 6
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plan-limit gate exemption for trivial greetings
+# ─────────────────────────────────────────────────────────────────────────────
+# Short greetings ("hi", "hello", "good morning") get an LLM reply but DON'T
+# tick the daily ef_coach_chat counter — burning a Free user's single daily
+# allowance on a one-word "hi" wrecks the first impression. Anything beyond
+# a greeting (questions, real coaching turns) goes through the gate.
+#
+# Whitelist is short on purpose: the looser we make the exemption the easier
+# it is to abuse with empty filler messages. If we see abuse, tighten this
+# OR add a separate small daily cap for exempted messages.
+_GREETING_RE = re.compile(
+    r"^\s*(?:hi+|hello+|hey+|yo|sup|howdy|"
+    r"good\s+(?:morning|afternoon|evening|day|night)|"
+    r"hiya|namaste|ola)"
+    r"[!?.\s]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_trivial_greeting(message: str) -> bool:
+    """True iff the message is a short, content-free greeting that
+    shouldn't burn the user's daily ef_coach_chat allowance.
+
+    Strict by design — only matches messages that are *entirely* a
+    greeting, not greetings prefixing a real question
+    (e.g. "hi, what's PTE?" still counts)."""
+    if not message:
+        return False
+    if len(message.strip()) > 20:
+        return False
+    return _GREETING_RE.match(message) is not None
 
 
 class ChatRequest(BaseModel):
@@ -113,10 +151,18 @@ async def chat(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    _gate=Depends(EnforceLimit("ef_coach_chat")),
 ):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    # Gate (inline, not Depends, so we can skip on trivial greetings).
+    # Free users get their 1 daily chat burned by a real coaching turn —
+    # never by "hi"/"hello". Anything beyond a pure greeting ticks the
+    # counter and raises 402 PLAN_LIMIT_REACHED when capped.
+    if not _is_trivial_greeting(request.message):
+        check_and_increment_or_raise(
+            db, user_id=current_user.id, feature_key="ef_coach_chat",
+        )
 
     conversation = _get_or_create_active_conversation(current_user.id, db)
 
@@ -233,10 +279,18 @@ async def chat_stream(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    _gate=Depends(EnforceLimit("ef_coach_chat")),
 ):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    # Inline gate (see chat() above for why this isn't a Depends). Trivial
+    # greetings bypass the counter so Free users don't burn their daily
+    # allowance on "hi". 402 fires for anything beyond a greeting once
+    # the cap is hit.
+    if not _is_trivial_greeting(request.message):
+        check_and_increment_or_raise(
+            db, user_id=current_user.id, feature_key="ef_coach_chat",
+        )
 
     t0 = time.perf_counter()
     def ms(label: str, since: float) -> float:
