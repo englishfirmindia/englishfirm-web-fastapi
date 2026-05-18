@@ -53,6 +53,11 @@ async def _startup_migrations():
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS title TEXT"))
         conn.commit()
+    # Start the pending-score reaper. Marks orphan scoring_status='pending'
+    # rows as 'failed' after 5 min so the frontend can leave the "scoring
+    # in progress" spinner instead of polling forever.
+    from services.pending_score_reaper import start as _start_reaper
+    _start_reaper()
 
 
 @app.exception_handler(Exception)

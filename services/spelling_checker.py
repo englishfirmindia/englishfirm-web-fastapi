@@ -71,11 +71,16 @@ def _call_claude_judge(passage: str, body: str, candidates: List[str]) -> List[d
         f"CANDIDATES:\n" + "\n".join(candidates) +
         "\n\nReply with ONLY the JSON object."
     )
+    # 20s timeout — without it, a stalled Anthropic connection holds the
+    # spelling thread forever and drags every writing/listening submit past
+    # the frontend's 90s timeout. On timeout the caller's except branch
+    # falls back to raw pyspell (recall preserved, precision drops).
     resp = _anth_client.messages.create(
         model="claude-haiku-4-5",
         max_tokens=2000,
         system=_JUDGE_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
+        timeout=20.0,
     )
     raw = (resp.content[0].text if resp.content else "{}").strip()
     if raw.startswith("```"):
