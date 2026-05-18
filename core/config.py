@@ -132,3 +132,29 @@ APPLE_ALLOWED_AUDIENCES = [
     ).split(",")
     if a.strip()
 ]
+
+# ── Stripe ─────────────────────────────────────────────────────────────────────
+# Secret API key for server-side Stripe SDK calls (creating Checkout
+# Sessions, Customer Portal sessions, refunds). Use sk_test_... in dev,
+# sk_live_... in prod. Stripe Dashboard → Developers → API keys.
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+# HMAC secret used to verify the signature on incoming webhook events.
+# One per webhook endpoint — copy from the endpoint detail page after
+# creating the webhook in Stripe Dashboard → Developers → Webhooks.
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+# After a successful Stripe Checkout the user is redirected here. The
+# {CHECKOUT_SESSION_ID} placeholder is interpolated by Stripe so the
+# client can poll /subscription/me until the webhook activates the plan.
+STRIPE_CHECKOUT_SUCCESS_URL = (
+    f"{FRONTEND_URL}/billing/success?session_id={{CHECKOUT_SESSION_ID}}"
+)
+STRIPE_CHECKOUT_CANCEL_URL = f"{FRONTEND_URL}/billing/cancel"
+# Customer Portal lets users self-serve cancellations and payment-method
+# updates. Returns the user to this URL when they're done.
+STRIPE_PORTAL_RETURN_URL = f"{FRONTEND_URL}/plans"
+
+
+def stripe_configured() -> bool:
+    """True iff both Stripe secrets are present so routes can short-circuit
+    with a clean 503 instead of leaking SDK 'No API key' errors."""
+    return bool(STRIPE_SECRET_KEY) and bool(STRIPE_WEBHOOK_SECRET)
