@@ -111,8 +111,7 @@ def check_and_increment_or_raise(
                 "period_type":  period_type,
                 "period_start": result.period_start.isoformat(),
                 "message": (
-                    f"You've used your {feature_key.replace('_', ' ')} "
-                    f"allowance ({result.limit} per {period_type[:-2]}). "
+                    f"You've reached your {period_type} question limit. "
                     f"Upgrade to continue."
                 ),
             },
