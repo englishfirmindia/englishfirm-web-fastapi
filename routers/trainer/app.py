@@ -8,7 +8,8 @@ Trainer-facing data endpoints. Auth: trainer JWT (audience='trainer').
   DELETE /trainer/notes/{note_id}         soft-delete own note
 """
 
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Path, Query
@@ -19,10 +20,12 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from db.models import (
     PracticeAttempt,
+    SubscriptionEvent,
     Trainer,
     TrainerNote,
     TrainerShare,
     User,
+    UserSubscription,
 )
 from services.email import send_student_note_posted
 from services.trainer_auth import get_current_trainer
@@ -309,3 +312,195 @@ def delete_note(
     note.deleted_at = datetime.now(timezone.utc)
     db.commit()
     return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trainer-granted VIP
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Lets a trainer grant a class student a time-boxed VIP plan based on
+# what tier that student paid for (out-of-band — to the trainer directly,
+# not through our Stripe Checkout). Duration mirrors the billing period
+# the trainer's class fee implies:
+#
+#   bronze paid → 30 days of VIP
+#   silver paid → 90 days of VIP
+#   gold   paid → 365 days of VIP
+#
+# Inserts a manual_admin user_subscription with status='active' and a
+# computed period_end. Any prior live row (Stripe or otherwise) gets
+# cancelled first to satisfy the partial unique index. An audit row in
+# subscription_events records which trainer triggered the grant.
+#
+# Expiry is handled by the Week 5 daily cron — when period_end < now
+# the row flips to 'expired' and the user falls back to Free.
+
+_GRANT_DURATION_DAYS = {
+    "bronze": 30,
+    "silver": 90,
+    "gold":   365,
+}
+
+
+class GrantVipRequest(BaseModel):
+    student_email: str
+    tier: str   # bronze | silver | gold
+
+    @field_validator("student_email")
+    @classmethod
+    def _normalise_email(cls, v: str) -> str:
+        return (v or "").strip().lower()
+
+    @field_validator("tier")
+    @classmethod
+    def _validate_tier(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in _GRANT_DURATION_DAYS:
+            raise ValueError(
+                f"tier must be one of {sorted(_GRANT_DURATION_DAYS)}; got {v!r}"
+            )
+        return v
+
+
+@router.post("/grant-vip")
+def grant_vip(
+    body: GrantVipRequest = Body(...),
+    db: Session = Depends(get_db),
+    trainer: Trainer = Depends(get_current_trainer),
+):
+    """Grant a class student VIP for 30/90/365 days based on tier paid.
+
+    Idempotent-ish: replaying with the same args inserts another VIP
+    grant that supersedes the previous (period_end resets from now).
+    """
+    user = db.query(User).filter(User.email == body.student_email).first()
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "STUDENT_NOT_FOUND",
+                "message": (
+                    f"{body.student_email} isn't registered yet. "
+                    f"Ask them to sign up first."
+                ),
+            },
+        )
+
+    duration_days = _GRANT_DURATION_DAYS[body.tier]
+    now = datetime.utcnow()
+    period_end = now + timedelta(days=duration_days)
+
+    # Cancel any current live row. Same pattern the Stripe webhook uses
+    # (see routers/billing.py:_find_or_create_active_subscription_row).
+    prior_live = (
+        db.query(UserSubscription)
+        .filter(
+            UserSubscription.user_id == user.id,
+            UserSubscription.status.in_(("active", "past_due")),
+        )
+        .first()
+    )
+    prior_plan_id = prior_live.plan_id if prior_live else None
+    prior_source = prior_live.source if prior_live else None
+    if prior_live is not None:
+        prior_live.status = "cancelled"
+        prior_live.cancel_at_period_end = True
+        prior_live.updated_at = now
+        db.flush()
+
+    new_sub = UserSubscription(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        plan_id="vip",
+        billing_period="trial",
+        status="active",
+        started_at=now,
+        current_period_start=now,
+        current_period_end=period_end,
+        cancel_at_period_end=False,
+        auto_renew=False,
+        source="manual_admin",
+    )
+    db.add(new_sub)
+    db.flush()
+
+    # Mirror to the denormalised cache so dashboards / legacy reads see
+    # VIP immediately without a join.
+    user.current_plan = "vip"
+    user.plan_started_at = now.date()
+    user.plan_end_at = period_end.date()
+    user.updated_at = now
+
+    db.add(SubscriptionEvent(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        subscription_id=new_sub.id,
+        event_type="grant_admin",
+        from_plan_id=prior_plan_id,
+        to_plan_id="vip",
+        actor=f"trainer:{trainer.id}",
+        metadata_={
+            "trainer_email": trainer.email,
+            "paid_tier": body.tier,
+            "duration_days": duration_days,
+            "prior_source": prior_source,
+        },
+    ))
+    db.commit()
+
+    return {
+        "subscription_id": str(new_sub.id),
+        "student_email": user.email,
+        "student_username": user.username,
+        "paid_tier": body.tier,
+        "granted_plan": "vip",
+        "duration_days": duration_days,
+        "period_end": period_end.isoformat(),
+        "prior_plan_id": prior_plan_id,
+        "prior_source": prior_source,
+        "warning_stripe_active": prior_source == "stripe",
+    }
+
+
+@router.get("/granted-vips")
+def list_granted_vips(
+    db: Session = Depends(get_db),
+    trainer: Trainer = Depends(get_current_trainer),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Recent VIP grants by THIS trainer — used to render the audit
+    list under the grant form so the trainer doesn't double-grant."""
+    actor_tag = f"trainer:{trainer.id}"
+    events = (
+        db.query(SubscriptionEvent, User)
+        .join(User, User.id == SubscriptionEvent.user_id)
+        .filter(
+            SubscriptionEvent.actor == actor_tag,
+            SubscriptionEvent.event_type == "grant_admin",
+        )
+        .order_by(SubscriptionEvent.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    rows = []
+    for ev, user in events:
+        meta = ev.metadata_ or {}
+        # Look up the corresponding subscription row to surface the
+        # current period_end (the grant could have been superseded).
+        sub = (
+            db.query(UserSubscription)
+            .filter(UserSubscription.id == ev.subscription_id)
+            .first()
+            if ev.subscription_id else None
+        )
+        rows.append({
+            "granted_at": ev.created_at.isoformat() if ev.created_at else None,
+            "student_email": user.email,
+            "student_username": user.username,
+            "paid_tier": meta.get("paid_tier"),
+            "duration_days": meta.get("duration_days"),
+            "period_end": sub.current_period_end.isoformat() if sub else None,
+            "current_status": sub.status if sub else None,
+        })
+    return {"grants": rows}
