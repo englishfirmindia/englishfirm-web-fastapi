@@ -468,8 +468,20 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
         log.warning("[stripe] webhook signature verification failed: %s", exc)
         raise HTTPException(status_code=400, detail="bad signature")
 
-    event_type = event["type"]
-    event_id = event["id"]
+    # Convert the Stripe `Event` (and its nested `data.object`) into plain
+    # Python dicts. stripe-python ≥10 changed StripeObject so that .get()
+    # no longer behaves like dict.get — instead it tries to look up an
+    # attribute called "get" and raises AttributeError. Round-tripping
+    # through to_dict() restores the dict API our handlers
+    # were written against.
+    event_dict = (
+        event.to_dict()
+        if hasattr(event, "to_dict")
+        else dict(event)
+    )
+
+    event_type = event_dict["type"]
+    event_id = event_dict["id"]
     log.info("[stripe] webhook received type=%s id=%s", event_type, event_id)
 
     handler = _EVENT_HANDLERS.get(event_type)
@@ -478,7 +490,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
         return {"ok": True, "handled": False, "type": event_type}
 
     try:
-        handler(db, event)
+        handler(db, event_dict)
         db.commit()
     except HTTPException:
         db.rollback()
@@ -682,6 +694,11 @@ def _apply_subscription_state(
     """Common path for activated / renewed / updated: derive plan_id +
     billing_period + period bounds from a Stripe subscription object
     and upsert our row + log the event + mirror to users."""
+    # Defensive: callers may pass a stripe StripeObject (returned from
+    # SDK retrieve() calls) instead of a plain dict. Normalise so the
+    # .get() calls below behave like dict.get().
+    if hasattr(stripe_subscription, "to_dict"):
+        stripe_subscription = stripe_subscription.to_dict()
     items = stripe_subscription.get("items", {}).get("data") or []
     if not items:
         log.error("[stripe] subscription with no items: %s", stripe_subscription.get("id"))
