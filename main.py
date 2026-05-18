@@ -19,6 +19,7 @@ from routers.reports import router as reports_router
 from routers.trainer.auth import router as trainer_auth_router
 from routers.trainer.app import router as trainer_app_router
 from routers.student_share import router as student_share_router
+from routers.subscription import router as subscription_router
 
 app = FastAPI(title="EnglishFirm Web API", version="1.0.0")
 
@@ -69,6 +70,7 @@ app.include_router(reports_router, prefix="/api/v1")
 app.include_router(trainer_auth_router, prefix="/api/v1")
 app.include_router(trainer_app_router, prefix="/api/v1")
 app.include_router(student_share_router, prefix="/api/v1")
+app.include_router(subscription_router, prefix="/api/v1")
 
 import core.config as _config
 

@@ -52,3 +52,17 @@ def get_current_user(
             detail="User not found",
         )
     return user
+
+
+def get_subscription_context(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """FastAPI dependency: resolve the active SubscriptionContext for the
+    authenticated user. Returned by GET /subscription/me and consumed by
+    every gated endpoint via EnforceLimit (Week 3).
+
+    No caching yet — single indexed query, sub-millisecond on RDS. Add a
+    TTL cache once Stripe webhooks (Week 4) need invalidation hooks."""
+    from services.billing.subscription_context import resolve_subscription_context
+    return resolve_subscription_context(db, user.id)
