@@ -154,6 +154,7 @@ def submit_answer(
 
     answer = _build_answer(question, payload)
 
+    result = None
     try:
         scorer_key = _SCORER_ALIAS.get(question.question_type, question.question_type)
         scorer = get_scorer(scorer_key)
@@ -191,7 +192,13 @@ def submit_answer(
             attempt_id=attempt_id, question_id=question_id
         ).first()
         if not existing:
-            result_json = {"pte_score": pte_score, "maxScore": q_max, "error": error}
+            breakdown = (result.breakdown if result is not None else {}) or {}
+            result_json = {
+                **breakdown,
+                "pte_score": pte_score,
+                "maxScore": q_max,
+                "error": error,
+            }
             db.add(AttemptAnswer(
                 attempt_id          = attempt_id,
                 question_id         = question_id,
