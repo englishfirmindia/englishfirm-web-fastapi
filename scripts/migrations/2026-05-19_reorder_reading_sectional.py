@@ -75,7 +75,7 @@ def main() -> None:
 
     cur.execute(
         """
-        SELECT s.id, s.test_number, s.question_ids
+        SELECT s.test_number, s.question_ids
         FROM sectional_test_questions s
         WHERE s.module = 'reading'
         ORDER BY s.test_number
@@ -90,7 +90,7 @@ def main() -> None:
 
     # Pre-fetch task types for every question_id that appears across all rows.
     all_ids: set[int] = set()
-    for _, _, ids in rows:
+    for _, ids in rows:
         all_ids.update(ids or [])
     cur.execute(
         "SELECT question_id, question_type FROM questions_from_apeuni WHERE question_id = ANY(%s)",
@@ -100,7 +100,7 @@ def main() -> None:
 
     updated = 0
     unchanged = 0
-    for row_id, test_number, old_ids in rows:
+    for test_number, old_ids in rows:
         old_ids = list(old_ids or [])
         if not old_ids:
             unchanged += 1
@@ -111,8 +111,9 @@ def main() -> None:
             unchanged += 1
             continue
         cur.execute(
-            "UPDATE sectional_test_questions SET question_ids = %s WHERE id = %s",
-            (new_ids, row_id),
+            "UPDATE sectional_test_questions SET question_ids = %s "
+            "WHERE module = 'reading' AND test_number = %s",
+            (new_ids, test_number),
         )
         updated += 1
         # Compact summary of the new order: task abbreviation list
