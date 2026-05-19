@@ -1,14 +1,14 @@
 """
 Reading Sectional Service
 =========================
-Selects questions for the reading sectional exam (8 task types, 17 questions),
+Selects questions for the reading sectional exam (8 task types, 23 questions),
 stores the session, and handles weighted scoring at finish.
 
-Task types in current production order (8 tasks, 21 questions):
-  summarize_written_text   — 1 question  (module: writing)
+Task types in current production order (8 tasks, 23 questions):
+  summarize_written_text   — 2 questions (module: writing)
   reading_fib_drop_down    — 6 questions (module: reading)
   mcq_multiple             — 3 questions (module: reading)
-  reorder_paragraphs       — 1 question  (module: reading)
+  reorder_paragraphs       — 2 questions (module: reading)
   reading_drag_and_drop    — 4 questions (module: reading)
   mcq_single               — 2 questions (module: reading)
   listening_hcs            — 2 questions (module: listening)
@@ -60,7 +60,7 @@ READING_STRUCTURE = [
     {"task": "summarize_written_text",    "count": 2, "module": "writing"},
     {"task": "reading_fib_drop_down",     "count": 6, "module": "reading"},
     {"task": "mcq_multiple",              "count": 3, "module": "reading"},
-    {"task": "reorder_paragraphs",        "count": 1, "module": "reading"},
+    {"task": "reorder_paragraphs",        "count": 2, "module": "reading"},
     {"task": "reading_drag_and_drop",     "count": 4, "module": "reading"},
     {"task": "mcq_single",                "count": 2, "module": "reading"},
     {"task": "listening_hcs",             "count": 2, "module": "listening"},
