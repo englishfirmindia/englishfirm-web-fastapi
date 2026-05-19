@@ -50,7 +50,7 @@ _AUDIO_TASKS = {"listening_hcs", "highlight_incorrect_words"}
 
 # ─── Sectional structure ──────────────────────────────────────────────────────
 READING_STRUCTURE = [
-    {"task": "summarize_written_text",    "count": 1, "module": "writing"},
+    {"task": "summarize_written_text",    "count": 2, "module": "writing"},
     {"task": "reading_fib_drop_down",     "count": 6, "module": "reading"},
     {"task": "reading_drag_and_drop",     "count": 4, "module": "reading"},
     {"task": "mcq_multiple",              "count": 3, "module": "reading"},
