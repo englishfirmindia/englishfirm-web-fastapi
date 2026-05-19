@@ -962,14 +962,20 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
             if "essay_paragraph_count_cap" not in scoring_warnings:
                 scoring_warnings.append("essay_paragraph_count_cap")
 
-    # ── Hybrid spelling override on WE's dedicated spelling sub-score. ──
+    # ── Spelling sub-score: deterministic only. ─────────────────────────
+    # WE's split scorer (gpt-4o or Claude) has no spelling sub-call, so
+    # `spelling_sub["score"]` is a placeholder 0 synthesised upstream
+    # (see "Synthesize an empty spelling sub-score" branch). The old
+    # min(llm, deterministic) hybrid always evaluated to 0 because the
+    # placeholder is 0 — every clean essay silently lost 2 raw points
+    # (~6 PTE) on Spelling. Trust the deterministic spell-checker
+    # (pyspell + passage filter + Claude judge) which is already the
+    # authoritative source for spelling on this path.
     spell_count = len(spell_result.get("mistakes") or [])
-    spell_max_pts = 2  # WE spelling sub-score max
+    spell_max_pts = 2
     spell_remaining = float(max(0, spell_max_pts - spell_count))
-    llm_spell_score = float(spelling_sub.get("score", 0) or 0)
-    final_spelling = min(llm_spell_score, spell_remaining)
+    final_spelling = spell_remaining
     spelling_sub = dict(spelling_sub)
-    spelling_sub["llm_score"] = llm_spell_score
     spelling_sub["hybrid_remaining"] = spell_remaining
     spelling_sub["spelling_check"] = spell_result
     if spell_result.get("warning_code"):
