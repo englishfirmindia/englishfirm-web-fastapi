@@ -484,6 +484,8 @@ def finish_reading_sectional(session_id: str, user_id: int, db: Session) -> dict
 
 def get_reading_sectional_results(session_id: str, user_id: int, db: Session) -> dict:
     from db.models import AttemptAnswer
+    from services.review_enrichment import enrich_answer_for_review
+
     attempt = db.query(PracticeAttempt).filter_by(
         session_id=session_id, user_id=user_id
     ).first()
@@ -496,17 +498,19 @@ def get_reading_sectional_results(session_id: str, user_id: int, db: Session) ->
         .order_by(AttemptAnswer.submitted_at)
         .all()
     )
-    questions = [
-        {
-            "question_id":      a.question_id,
-            "question_type":    a.question_type,
-            "score":            a.score,
-            "result_json":      a.result_json or {},
-            "user_answer_json": a.user_answer_json or {},
-            "scoring_status":   a.scoring_status,
-        }
-        for a in answers
-    ]
+    # Bulk-fetch question rows for rich review (passage / options / correct
+    # answers / source audio for listening-side questions like HCS/HIW).
+    qids = [a.question_id for a in answers]
+    qmap = {}
+    if qids:
+        q_rows = (
+            db.query(QuestionFromApeuni)
+            .options(joinedload(QuestionFromApeuni.evaluation))
+            .filter(QuestionFromApeuni.question_id.in_(qids))
+            .all()
+        )
+        qmap = {q.question_id: q for q in q_rows}
+    questions = [enrich_answer_for_review(qmap.get(a.question_id), a) for a in answers]
 
     return {
         "attempt_id":         attempt.id,
