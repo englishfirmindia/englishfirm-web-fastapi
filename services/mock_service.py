@@ -30,7 +30,7 @@ from typing import Optional
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy.orm.attributes import set_committed_value
+from sqlalchemy.orm.attributes import set_committed_value, flag_modified
 
 from db.models import QuestionFromApeuni, UserQuestionAttempt, PracticeAttempt, AttemptAnswer
 from services.session_service import ACTIVE_SESSIONS, mark_submitted, persist_answer_to_db, enrich_content_json
@@ -339,6 +339,31 @@ def get_mock_part(db: Session, session_id: str, part: int) -> dict:
     if part not in (1, 2, 3):
         raise HTTPException(status_code=400, detail="Invalid part")
 
+    # Server-anchored countdown: stamp `part_started_at_unix` the first time
+    # a part is requested and persist it on the attempt row so reload / tab
+    # refresh / ECS restart all see the same anchor and derive the same
+    # remaining time. The client never trusts its own clock for the source
+    # of truth — only for `Date.now() - part_started_at_unix` arithmetic.
+    starts = session.setdefault("part_started_at", {})
+    if part in (2, 3) and not starts.get(part):
+        starts[part] = int(time.time())
+        # Persist to attempt so it survives ECS restart (ACTIVE_SESSIONS is
+        # in-memory; task_breakdown is in RDS).
+        try:
+            attempt_id = session.get("attempt_id")
+            if attempt_id:
+                a = db.query(PracticeAttempt).filter_by(id=attempt_id).first()
+                if a:
+                    tb = dict(a.task_breakdown or {})
+                    psa = dict(tb.get("part_started_at") or {})
+                    psa[str(part)] = starts[part]
+                    tb["part_started_at"] = psa
+                    a.task_breakdown = tb
+                    flag_modified(a, "task_breakdown")
+                    db.commit()
+        except Exception as e:
+            log.warning("[Mock] failed to persist part_started_at: %s", e)
+
     structure = _apply_mock_counts(db)
     # Belt-and-braces: build task_meta keyed by both canonical + legacy names
     # so that if a q.question_type is still legacy (e.g. ptea_respond_situation
@@ -404,6 +429,12 @@ def get_mock_part(db: Session, session_id: str, part: int) -> dict:
         "part":                  part,
         "block_timer_seconds":   PART_BLOCK_TIMERS.get(part),
         "timer_remaining":       session["part_timer_remaining"].get(part),
+        # Server-anchored countdown: client computes `remaining = block_timer_seconds
+        # - (server_now_unix - part_started_at_unix)`. Survives tab refresh, sleep,
+        # ECS restart. `server_now_unix` is also returned so the client can correct
+        # for clock skew if its local clock is off.
+        "part_started_at_unix":  session.get("part_started_at", {}).get(part),
+        "server_now_unix":       int(time.time()),
         "questions":             questions_payload,
     }
 
@@ -896,6 +927,11 @@ def resume_mock_test(session_id: str, user_id: int, db: Session) -> dict:
         ptr.setdefault(1, None)
         ptr.setdefault(2, PART_BLOCK_TIMERS[2])
         ptr.setdefault(3, PART_BLOCK_TIMERS[3])
+        # Restore server-anchored countdown so a resumed mock continues from
+        # the same timestamp it was anchored at originally — refresh / sleep
+        # / ECS restart between original part-load and resume all converge
+        # to the same `remaining = block - (now - anchor)` derivation.
+        psa = {int(k): v for k, v in (tb.get("part_started_at") or {}).items()}
 
         ACTIVE_SESSIONS[session_id] = {
             "user_id":              user_id,
@@ -910,6 +946,7 @@ def resume_mock_test(session_id: str, user_id: int, db: Session) -> dict:
             "attempt_id":           attempt.id,
             "current_part":         tb.get("current_part", 1),
             "part_timer_remaining": ptr,
+            "part_started_at":      psa,
         }
 
     session = ACTIVE_SESSIONS[session_id]
