@@ -56,8 +56,12 @@ _SCORER_ALIAS = {
 }
 
 
-def _build_answer(question_type: str, payload: dict) -> dict:
-    """Build the answer dict expected by each scorer, given the raw request payload."""
+def _build_answer(question, payload: dict) -> dict:
+    """Build the answer dict expected by each scorer, given the raw request
+    payload and the question row (needed for SWT to attach the source
+    passage as `prompt` — the SWT scorer compares student summary against
+    passage for content scoring)."""
+    question_type = question.question_type
     if question_type in ("reading_fib", "reading_fib_drop_down", "reading_drag_and_drop"):
         return {"user_answers": payload.get("user_answers", {})}
     if question_type in ("mcq_single", "listening_hcs"):
@@ -67,7 +71,14 @@ def _build_answer(question_type: str, payload: dict) -> dict:
     if question_type == "reorder_paragraphs":
         return {"user_sequence": payload.get("user_sequence", [])}
     if question_type == "summarize_written_text":
-        return {"user_answer": payload.get("user_answer", "")}
+        # SWT scorer (AIScorer.score) reads answer.get('text') and
+        # answer.get('prompt'). Previously this branch used key
+        # `user_answer` and omitted prompt entirely, so every sectional-
+        # reading SWT submission scored as "Empty response." / PTE 10.
+        # Mirrors the shape produced by routers/sectional/writing.py for SWT.
+        content_json = question.content_json or {}
+        prompt = content_json.get("passage", content_json.get("text", ""))
+        return {"text": payload.get("user_answer", ""), "prompt": prompt}
     if question_type == "highlight_incorrect_words":
         words = payload.get("highlighted_words")
         if words is None:
@@ -157,7 +168,7 @@ def submit_answer(
     if not question.evaluation and question.question_type not in {"summarize_written_text"}:
         raise HTTPException(status_code=422, detail="Question has no evaluation data")
 
-    answer = _build_answer(question.question_type, payload)
+    answer = _build_answer(question, payload)
     if question.evaluation:
         answer["evaluation_json"] = question.evaluation.evaluation_json
 
