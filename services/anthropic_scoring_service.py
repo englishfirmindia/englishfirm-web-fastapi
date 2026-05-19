@@ -1394,15 +1394,32 @@ GRAMMAR (0–2, half-points allowed):
 
 The "long sentence with many 'and's" pattern is NORMAL for SST and is NOT a deduction trigger.
 
-ALSO populate `mistake_quotes`: a JSON array of the exact verbatim substrings from the summary that you flagged as grammar errors. Each entry MUST appear verbatim in the student text (case-sensitive). Empty list if no errors.
+ALSO populate `mistakes`: a JSON array of objects, one per flagged grammar error. Each object MUST have:
+  - "quote":      exact verbatim substring from the summary (case-sensitive).
+  - "correction": the minimal corrected wording (e.g. "lecturer explains" for "lecturer explain").
+  - "reason":     a short rule label (≤6 words), e.g. "subject-verb agreement", "wrong tense", "missing article".
 
-In the reasoning, name the specific violation types (or state "no violations").
+MANDATORY ITEMISATION RULE:
+  • If `score == 2`  → `mistakes` MUST be `[]` (no errors).
+  • If `score < 2`   → `mistakes` MUST contain at least one entry naming a
+    concrete error in the summary. You may NOT score below 2 without listing
+    the specific quotes that drove the deduction. A holistic "feels off"
+    verdict is NOT acceptable — point to the words.
+  • Aim for 1–4 entries; cap at 8. Cover the most damaging errors first.
+
+In the reasoning, name the specific violation types (or state "no violations") in one sentence.
+
+For backward compatibility ALSO emit `mistake_quotes` as a flat array of
+just the quote strings (same length as `mistakes`).
 
 Return JSON only, exactly this shape:
 {
   "grammar": {
     "score": <number 0-2 in 0.5 steps>,
     "reasoning": "<one sentence>",
+    "mistakes": [
+      {"quote": "<verbatim substring>", "correction": "<fixed wording>", "reason": "<short rule label>"}
+    ],
     "mistake_quotes": [<exact verbatim substrings>]
   }
 }
@@ -1554,9 +1571,17 @@ def score_sst_subscores_with_claude_split(reference: str, user_text: str) -> dic
         gr = grammar_parsed.get("grammar", {})
         grammar_score = _clamp(gr.get("score"), 0, 2)
         grammar_reasoning = _r(gr.get("reasoning"))
-        grammar_quotes = [str(x) for x in (gr.get("mistake_quotes") or []) if x]
+        # Rich mistakes (with correction + reason) — _parse_mistakes accepts
+        # either the new `mistakes` array or legacy `mistake_quotes` strings
+        # and normalises to {quote, correction, reason} objects.
+        grammar_mistakes = _parse_mistakes(gr)
+        # Keep emitting `mistake_quotes` for any downstream code still on
+        # the legacy field name. Derived from `mistakes` so the two stay
+        # consistent.
+        grammar_quotes = [m["quote"] for m in grammar_mistakes]
     else:
-        grammar_score, grammar_reasoning, grammar_quotes = 0.0, None, []
+        grammar_score, grammar_reasoning = 0.0, None
+        grammar_mistakes, grammar_quotes = [], []
 
     if vocab_parsed is not None:
         vocab_score = _clamp(vocab_parsed.get("vocabulary", {}).get("score"), 0, 2)
@@ -1571,6 +1596,7 @@ def score_sst_subscores_with_claude_split(reference: str, user_text: str) -> dic
     return {
         "content":    {"score": content_score,    "reasoning": content_reasoning},
         "grammar":    {"score": grammar_score,    "reasoning": grammar_reasoning,
+                        "mistakes": grammar_mistakes,
                         "mistake_quotes": grammar_quotes},
         "vocabulary": {"score": vocab_score,      "reasoning": vocab_reasoning},
         "spelling":   {"score": 0.0, "reasoning": None},
@@ -1591,10 +1617,15 @@ def verify_sst_grammar_with_claude(reference: str, user_text: str) -> Optional[d
     if not parsed:
         return None
     gr = parsed.get("grammar", {})
+    mistakes = _parse_mistakes(gr)
     return {
         "score": _clamp(gr.get("score"), 0, 2),
         "reasoning": gr.get("reasoning"),
-        "mistake_quotes": [str(x) for x in (gr.get("mistake_quotes") or []) if x],
+        # Rich mistakes (objects) for the new highlight path; quote-only
+        # list kept for backward compatibility with callers that haven't
+        # been upgraded yet.
+        "mistakes": mistakes,
+        "mistake_quotes": [m["quote"] for m in mistakes],
     }
 
 

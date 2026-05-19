@@ -1284,7 +1284,15 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
             chosen_g_reasoning = v.get("reasoning") or chosen_g_reasoning
             grammar_sub["llm_score_primary"] = grammar_sub["llm_score"]
             grammar_sub["llm_score"] = v["score"]
-            grammar_sub["mistake_quotes"] = v["mistake_quotes"]
+            # Prefer rich mistakes from the verifier (now with correction +
+            # reason); fall back to quote-only list if the verifier didn't
+            # populate the rich shape.
+            verifier_mistakes = v.get("mistakes")
+            if verifier_mistakes:
+                grammar_sub["mistakes"] = verifier_mistakes
+                grammar_sub["mistake_quotes"] = [m["quote"] for m in verifier_mistakes]
+            else:
+                grammar_sub["mistake_quotes"] = v["mistake_quotes"]
             grammar_sub["grammar_scorer"] = "gpt-4o→claude-verify"
             grammar_sub["verifier_overrode_primary"] = True
             scoring_warnings.append("grammar_verifier_overrode_primary")
@@ -1326,7 +1334,13 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
     if llm_result.get("scored") and content_sub["score"] == 0:
         from services.highlight_builder import build_highlights
         ot_spelling = [m["word"] for m in (spell_result.get("mistakes") or [])]
-        ot_grammar = (grammar_sub.get("mistake_quotes") or [])
+        # Prefer rich mistakes (with correction + reason); fall back to
+        # quote-only list. build_highlights accepts both shapes.
+        ot_grammar = (
+            grammar_sub.get("mistakes")
+            or grammar_sub.get("mistake_quotes")
+            or []
+        )
         ot_highlights = build_highlights(body, heur_findings, ot_spelling, ot_grammar)
         breakdown = {
             "form": form_score,

@@ -879,9 +879,15 @@ def score_sst_subscores_with_gpt4o(reference: str, user_text: str) -> dict:
         gr = grammar_parsed.get("grammar", {})
         grammar_score = _clamp(gr.get("score"), 0, 2)
         grammar_reasoning = _r(gr.get("reasoning"))
-        grammar_quotes = [str(x) for x in (gr.get("mistake_quotes") or []) if x]
+        # Rich mistakes (with correction + reason) — _parse_mistakes accepts
+        # either the new `mistakes` array or legacy `mistake_quotes` strings
+        # and normalises to {quote, correction, reason} objects.
+        from services.anthropic_scoring_service import _parse_mistakes
+        grammar_mistakes = _parse_mistakes(gr)
+        grammar_quotes = [m["quote"] for m in grammar_mistakes]
     else:
-        grammar_score, grammar_reasoning, grammar_quotes = 0.0, None, []
+        grammar_score, grammar_reasoning = 0.0, None
+        grammar_mistakes, grammar_quotes = [], []
 
     if vocab_parsed is not None:
         vocab_score = _clamp(vocab_parsed.get("vocabulary", {}).get("score"), 0, 2)
@@ -896,6 +902,7 @@ def score_sst_subscores_with_gpt4o(reference: str, user_text: str) -> dict:
     return {
         "content":    {"score": content_score,    "reasoning": content_reasoning},
         "grammar":    {"score": grammar_score,    "reasoning": grammar_reasoning,
+                        "mistakes": grammar_mistakes,
                         "mistake_quotes": grammar_quotes},
         "vocabulary": {"score": vocab_score,      "reasoning": vocab_reasoning},
         "spelling":   {"score": 0.0, "reasoning": None},
