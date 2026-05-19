@@ -119,7 +119,11 @@ def _split_sentences(text: str) -> list:
     handled here — flag separately if they show up in practice."""
     # Mask digit-dot-digit so the regex below doesn't fragment on decimals.
     safe = re.sub(r'(\d)\.(\d)', r'\1 \2', text or '')
-    return [s for s in re.split(r'[.!?]+', safe) if s.strip()]
+    # Line breaks (\r, \n) count as sentence separators too — SWT must
+    # be exactly one continuous sentence on one line. Any Enter inside
+    # the body pushes the count past 1 and the form gate fails. Stricter
+    # than real PTE but the operator-chosen UX trade-off.
+    return [s for s in re.split(r'[.!?\r\n]+', safe) if s.strip()]
 
 
 # ── SWT heuristic (max 10 pts) ────────────────────────────────────────────────
@@ -132,7 +136,9 @@ def _score_swt_heuristic(user_text: str) -> tuple:
     words = text.split()
     wc = len(words)
 
-    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+    # SWT must be one continuous sentence on a single line — line breaks
+    # are treated as sentence separators (same rule as _split_sentences()).
+    sentences = [s.strip() for s in re.split(r'[.!?\r\n]+', text) if s.strip()]
     sentences_score = 1 if len(sentences) == 1 else 0
     words_score     = 1 if 5 <= wc <= 75 else 0
 
@@ -326,11 +332,27 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
             reason = "Empty response."
             ui_reason = "Form 0 — you didn't write anything."
         elif len(sentences) != 1:
-            reason = f"Form gate failed — response has {len(sentences)} sentences, requires exactly 1."
-            ui_reason = (
-                f"Form 0 — SWT must be exactly one sentence. You wrote "
-                f"{len(sentences)} sentences. Combine them or remove the extra full stops."
+            # Detect whether the over-count was caused by line breaks vs
+            # actual punctuation so the UI message is specific to what
+            # the student did wrong.
+            has_line_break = '\n' in body or '\r' in body
+            reason = (
+                f"Form gate failed — response has {len(sentences)} sentence-units "
+                f"({'includes line breaks' if has_line_break else 'punctuation-split only'}), "
+                f"requires exactly 1."
             )
+            if has_line_break:
+                ui_reason = (
+                    f"Form 0 — SWT must be one continuous sentence on a single "
+                    f"line. Remove the line breaks (don't press Enter inside the "
+                    f"summary) and keep it to one sentence."
+                )
+            else:
+                ui_reason = (
+                    f"Form 0 — SWT must be exactly one sentence. You wrote "
+                    f"{len(sentences)} sentences. Combine them or remove the "
+                    f"extra full stops."
+                )
         else:
             reason = f"Form gate failed — {wc} words is outside the 5–75 range."
             ui_reason = (
