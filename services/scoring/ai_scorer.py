@@ -1299,10 +1299,15 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
     )
 
     # ── Hybrid spelling override on SST's dedicated spelling sub-score. ──
+    # The SST prompt has NO spelling sub-call — the LLM returns a stub 0.0
+    # placeholder by design. Earlier code did min(llm_score, hybrid_remaining)
+    # which always lost to the stub 0, capping every student's spelling at 0
+    # regardless of whether they actually had spelling mistakes. The
+    # deterministic hybrid spell check is the sole source of truth.
     spell_count = len(spell_result.get("mistakes") or [])
     spell_remaining = float(max(0, spell_max - spell_count))
     llm_spell_score = float(spelling_sub.get("score", 0) or 0)
-    final_spelling = min(llm_spell_score, spell_remaining)
+    final_spelling = spell_remaining
     spelling_sub = dict(spelling_sub)
     spelling_sub["llm_score"] = llm_spell_score
     spelling_sub["hybrid_remaining"] = spell_remaining
