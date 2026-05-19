@@ -73,9 +73,23 @@ def main() -> None:
 
     updated = 0
     unchanged = 0
+    skipped = 0
     for aa_id, qid, rj, old_score in rows:
         rj = dict(rj or {})
         bd = dict(rj.get("breakdown") or {})
+
+        # Skip form-zero attempts (PTE 10 floor — no sub-score can lift it).
+        if bd.get("form") == 0 or bd.get("scorer") == "form-gate-floor":
+            skipped += 1
+            continue
+
+        # Skip legacy attempts with sparse breakdown (no full sub-score
+        # structure). Treating missing fields as 0 produces spurious
+        # scores from spelling alone.
+        if bd.get("form") is None or not isinstance(bd.get("content"), dict):
+            skipped += 1
+            continue
+
         sp = dict(bd.get("spelling") or {})
         sp_check = sp.get("spelling_check") or {}
         mistakes = sp_check.get("mistakes") or []
@@ -125,7 +139,10 @@ def main() -> None:
         )
 
     conn.commit()
-    print(f"\ndone — updated {updated}, unchanged {unchanged}, total {len(rows)}")
+    print(
+        f"\ndone — updated {updated}, unchanged {unchanged}, "
+        f"skipped {skipped} (form-zero / incomplete), total {len(rows)}"
+    )
 
 
 if __name__ == "__main__":

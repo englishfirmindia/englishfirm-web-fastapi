@@ -229,14 +229,23 @@ def _contained(rng: Tuple[int, int], used: set) -> bool:
 
 
 def _dedupe_overlaps(highlights: list) -> list:
-    """Drop later highlights whose range is strictly inside an earlier one.
-    Keeps the first (lowest-start) annotation when ranges nest."""
+    """Drop later highlights whose range is strictly inside an earlier one
+    OF THE SAME CATEGORY. Cross-category nesting is preserved so an LLM
+    grammar phrase containing a misspelled word doesn't suppress the
+    spelling annotation on that word (Spelling and Grammar are rendered
+    with different colours and have separate correction pills — the user
+    needs both)."""
     out: list = []
     for h in highlights:
         contained = False
         for prev in out:
-            if h["start"] >= prev["start"] and h["end"] <= prev["end"] and h is not prev:
-                # Skip if identical to or fully inside an existing range
+            if h is prev:
+                continue
+            same_category = h.get("category") == prev.get("category")
+            if not same_category:
+                continue
+            if h["start"] >= prev["start"] and h["end"] <= prev["end"]:
+                # Identical or strictly nested within the same category.
                 if (h["start"], h["end"]) == (prev["start"], prev["end"]):
                     contained = True
                     break
