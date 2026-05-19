@@ -4,15 +4,22 @@ Reading Sectional Service
 Selects questions for the reading sectional exam (8 task types, 17 questions),
 stores the session, and handles weighted scoring at finish.
 
-Task types in APEuni Part II order:
+Task types in current production order (8 tasks, 21 questions):
   summarize_written_text   — 1 question  (module: writing)
-  reading_fib_drop_down    — 5 questions (module: reading)
-  mcq_multiple             — 2 questions (module: reading)
-  reorder_paragraphs       — 2 questions (module: reading)
-  reading_fib              — 4 questions (module: reading)
+  reading_fib_drop_down    — 6 questions (module: reading)
+  mcq_multiple             — 3 questions (module: reading)
+  reorder_paragraphs       — 1 question  (module: reading)
+  reading_drag_and_drop    — 4 questions (module: reading)
   mcq_single               — 2 questions (module: reading)
-  hcs                      — 2 questions (module: listening)
-  highlight_incorrect_words — 1 question (module: listening)
+  listening_hcs            — 2 questions (module: listening)
+  highlight_incorrect_words — 2 questions (module: listening)
+
+NOTE: the typed Reading FIB (`reading_fib`) was previously listed here
+with count=4 weight=13, but the question pool is empty in production
+(0 rows) so the seed silently skipped those slots in all 40 seeded
+tests. Keeping it in the weights map made `present_weight = 114` with
+max numerator 101, giving every user a silent PTE 81 ceiling on the
+Reading sectional. Removed on 2026-05-19.
 
 PTE formula (CLAUDE.md guardrail):
   pte_score = max(10, min(90, round(10 + weighted_pct * 80)))
@@ -52,10 +59,9 @@ _AUDIO_TASKS = {"listening_hcs", "highlight_incorrect_words"}
 READING_STRUCTURE = [
     {"task": "summarize_written_text",    "count": 2, "module": "writing"},
     {"task": "reading_fib_drop_down",     "count": 6, "module": "reading"},
-    {"task": "reading_drag_and_drop",     "count": 4, "module": "reading"},
     {"task": "mcq_multiple",              "count": 3, "module": "reading"},
     {"task": "reorder_paragraphs",        "count": 1, "module": "reading"},
-    {"task": "reading_fib",               "count": 4, "module": "reading"},
+    {"task": "reading_drag_and_drop",     "count": 4, "module": "reading"},
     {"task": "mcq_single",                "count": 2, "module": "reading"},
     {"task": "listening_hcs",             "count": 2, "module": "listening"},
     {"task": "highlight_incorrect_words", "count": 2, "module": "listening"},
@@ -67,7 +73,6 @@ _READING_WEIGHTS = {
     "reading_drag_and_drop":     20,
     "mcq_multiple":               5,
     "reorder_paragraphs":         9,
-    "reading_fib":               13,
     "mcq_single":                 3,
     "listening_hcs":              3,
     "highlight_incorrect_words": 13,
@@ -79,7 +84,6 @@ _DISPLAY_NAMES = {
     "reading_drag_and_drop":     "Fill in the Blanks (Drag & Drop)",
     "mcq_multiple":              "Multiple Choice (Multiple)",
     "reorder_paragraphs":        "Re-order Paragraphs",
-    "reading_fib":               "Fill in the Blanks",
     "mcq_single":                "Multiple Choice (Single)",
     "listening_hcs":             "Highlight Correct Summary",
     "highlight_incorrect_words": "Highlight Incorrect Words",
@@ -126,7 +130,6 @@ def _question_max(q) -> int:
         "summarize_written_text":    1,
         "reading_fib_drop_down":     4,
         "reading_drag_and_drop":     4,
-        "reading_fib":               4,
         "mcq_multiple":              2,
         "mcq_single":                1,
         "reorder_paragraphs":        3,
