@@ -146,6 +146,7 @@ def _build_system_prompt(
     completeness_flags: list,
     new_practice:       list,
     pre_retrieved:      Optional[str] = None,
+    pre_retrieved_student_data: Optional[str] = None,
 ) -> str:
     name    = context.get("username", "Student")
     target  = context.get("score_requirement", "unknown")
@@ -223,6 +224,25 @@ def _build_system_prompt(
             "---\n"
         )
 
+    # ── Pre-retrieved student data (forced get_recent_task_answers) ─────────
+    # When the user message contains both a task-name pattern (WFD, SWT, etc.)
+    # AND a student-data signal ("my", "I just submitted", "recent", "first/
+    # last"), the backend has already called get_recent_task_answers on the
+    # student's behalf and the result is below. Treat it as authoritative;
+    # DO NOT respond with "I don't have access to your data" — you do.
+    pre_retrieved_student_block = ""
+    if pre_retrieved_student_data:
+        pre_retrieved_student_block = (
+            "\nPRE-RETRIEVED STUDENT DATA — already fetched on behalf of this question:\n"
+            "Use this as the authoritative source for the student's recent attempts.\n"
+            "DO NOT respond with 'I don't have access to your data' — the data is here.\n"
+            "DO NOT call get_recent_task_answers or get_attempt_detail for the same task\n"
+            "unless this content is clearly insufficient.\n"
+            "---\n"
+            f"{pre_retrieved_student_data}\n"
+            "---\n"
+        )
+
     # ── Phase instruction ─────────────────────────────────────────────────────
     phase_block = _PHASE_INSTRUCTIONS.get(phase, _PHASE_INSTRUCTIONS["coaching"])
 
@@ -256,7 +276,7 @@ Exam history:
 
 Weak areas (from practice data, worst first):
 {weak_lines}
-{speaking_tasks_block}{contributions_block}{pre_retrieved_block}{summary_block}{proactive_block}
+{speaking_tasks_block}{contributions_block}{pre_retrieved_block}{pre_retrieved_student_block}{summary_block}{proactive_block}
 {phase_block}
 {gaps_block}
 KNOWLEDGE BASE RULES (mandatory — no exceptions):
@@ -270,13 +290,31 @@ TOOL GUARDRAILS (mandatory):
 - Call search_pte_knowledge at most 2× per turn.
 - Call get_last_attempt_breakdown at most 1× per turn.
 - Call get_milestones at most 1× per turn.
-- Call get_attempt_detail at most 1× per turn, only when the student asks about specific question performance.
-- Call get_recent_task_answers at most 1× per turn. Use this if get_attempt_detail returns "No completed attempts found" but the student insists they have practiced — this tool also surfaces in-progress practice sessions and individual practice answers.
+- Call get_attempt_detail at most 1× per turn. Call it whenever the student
+  references THEIR OWN attempt with phrases like "my last", "my first", "in
+  my X section", "the X I just submitted", "what was my [task]", "show me
+  my [task]". Default to calling the tool when intent is ambiguous —
+  refusing with "I don't have your data" is the wrong default when the
+  student is clearly asking about their data.
+- Call get_recent_task_answers at most 1× per turn. Use this as the primary
+  lookup when the student references a SPECIFIC TASK TYPE (WFD, SWT,
+  Repeat Sentence, etc.) alongside any "my/I/recent/last/first" wording.
+  Also use as a fallback if get_attempt_detail returns "No completed
+  attempts found" but the student insists they have practiced.
 - Call save_student_info at most 1× per turn, only when the student reveals new personal info.
 - Never call a tool to retrieve information already present in this system prompt.
 - Never guess or ask for the student's user_id — it is injected by the system.
 - Only discuss PTE Academic. For off-topic questions: "I'm here to help with PTE prep."
 - Never invent scores or attempt data not returned by a tool.
+- "Submitted" in the student's message means submitted on the PLATFORM (an
+  attempt they completed), NOT pasted into this chat. If they say "I just
+  submitted" or "the test I submitted", look up the recent attempt via
+  get_attempt_detail or get_recent_task_answers — do not ask them to paste.
+- Section-name vs task-name disambiguation: students sometimes say "writing
+  section" when they mean a task that lives in a different module (e.g.
+  Write from Dictation is in LISTENING, Summarize Spoken Text is in
+  LISTENING). Use the PTE SCORING CONTRIBUTIONS block above to map the
+  task to its real module before refusing.
 
 FORMATTING:
 - Minimal markdown only: **bold** labels and bullet points (-). No ## or ### headers.
@@ -365,6 +403,135 @@ def _pre_retrieve_knowledge(user_message: str, ctx: ToolContext) -> Optional[str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Forced student-data retrieval — keyword-triggered eager get_recent_task_answers
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Why: parallel of `_pre_retrieve_knowledge` but for the student's own attempt
+# data. Claude has been observed to refuse questions like "what was my first
+# write from dictation in the test I just submitted" by interpreting "submitted"
+# as "pasted in chat" — even though it has `get_recent_task_answers` available.
+# We pre-fetch on the server when phrasing suggests a student-data lookup and
+# inject the result so Claude has no choice but to use it.
+
+# Map natural-language task references to canonical task slugs. Each pattern
+# is a substring match (case-insensitive). The first match wins, so longer /
+# more-specific phrases come first.
+_TASK_SLUG_BY_PHRASE: tuple = (
+    ("write from dictation", "listening_wfd"),
+    ("wfd",                  "listening_wfd"),
+    ("repeat sentence",      "repeat_sentence"),
+    ("read aloud",           "read_aloud"),
+    ("describe image",       "describe_image"),
+    ("retell lecture",       "retell_lecture"),
+    ("re-tell lecture",      "retell_lecture"),
+    ("summarize group discussion", "summarize_group_discussion"),
+    ("summarise group discussion", "summarize_group_discussion"),
+    ("respond to situation", "ptea_respond_situation"),
+    ("respond to a situation","ptea_respond_situation"),
+    ("answer short question","answer_short_question"),
+    ("asq",                  "answer_short_question"),
+    ("summarize written text","summarize_written_text"),
+    ("summarise written text","summarize_written_text"),
+    ("swt",                  "summarize_written_text"),
+    ("write essay",          "write_essay"),
+    ("essay",                "write_essay"),
+    ("summarize spoken text","listening_sst"),
+    ("summarise spoken text","listening_sst"),
+    ("sst",                  "listening_sst"),
+    ("highlight incorrect words","highlight_incorrect_words"),
+    ("hiw",                  "highlight_incorrect_words"),
+    ("highlight correct summary","listening_hcs"),
+    ("hcs",                  "listening_hcs"),
+    ("select missing word",  "listening_smw"),
+    ("smw",                  "listening_smw"),
+    ("reorder paragraph",    "reorder_paragraphs"),
+    ("re-order paragraph",   "reorder_paragraphs"),
+    ("fill in the blanks drag","reading_drag_and_drop"),
+    ("drag and drop",        "reading_drag_and_drop"),
+    ("fill in the blanks drop down","reading_fib_drop_down"),
+    ("dropdown",             "reading_fib_drop_down"),
+    ("fib",                  "reading_fib_drop_down"),
+    ("fill in the blanks",   "reading_fib_drop_down"),
+)
+
+# Phrases that signal "the student is asking about their own data" — not a
+# generic PTE-knowledge question. Hitting any of these alongside a task name
+# (or section name) triggers eager retrieval.
+_STUDENT_DATA_SIGNALS = (
+    " my ", " i ", "i've", "i have", "i just", "just submitted", "just did",
+    "just took", "just completed", "i did", "i took", "i submitted",
+    "show me", "tell me about", "what was my", "what were my",
+    "in my", "from my", "of my", "on my",
+    "last attempt", "most recent", "recent attempt",
+    "first ", "second ", "third ", "fourth ", "fifth ",  # ordinal references to Qs
+    "my last", "my first", "my recent", "my latest",
+    "my score", "my scores", "my result", "my results",
+)
+
+
+def _detect_task_slug(message: str) -> Optional[str]:
+    m = (message or "").lower()
+    if not m:
+        return None
+    # Pad message with spaces so word-boundary substrings like " wfd " match
+    # at start/end too. Cheaper than regex and good enough.
+    padded = f" {m} "
+    for phrase, slug in _TASK_SLUG_BY_PHRASE:
+        # For 3-letter slugs (wfd, swt, sst, asq, hiw, hcs, smw, fib) require
+        # word boundary so we don't accidentally match "hi**hc**school" etc.
+        if len(phrase) <= 3:
+            if f" {phrase} " in padded or f" {phrase}?" in padded or padded.startswith(f"{phrase} "):
+                return slug
+        else:
+            if phrase in m:
+                return slug
+    return None
+
+
+def _should_force_student_data(message: str) -> bool:
+    """Trigger when phrasing signals 'about my own attempt' — either explicit
+    student-data signals OR an ordinal reference + task name."""
+    m = (message or "").lower().strip()
+    if len(m) < 4:
+        return False
+    padded = f" {m} "
+    if not _detect_task_slug(m):
+        return False
+    return any(sig in padded for sig in _STUDENT_DATA_SIGNALS)
+
+
+def _pre_retrieve_student_data(user_message: str, ctx: ToolContext) -> Optional[str]:
+    """Eagerly call get_recent_task_answers if the user message looks like a
+    student-data lookup ('what was my last WFD', 'I just submitted', etc.).
+    Returns the formatted tool output on success, None otherwise."""
+    if not _should_force_student_data(user_message):
+        return None
+    slug = _detect_task_slug(user_message)
+    if not slug:
+        return None
+    try:
+        result = execute_tool(
+            "get_recent_task_answers",
+            {"task_type": slug, "limit": 5},
+            ctx,
+        )
+    except Exception as e:
+        log.warning("[CLAUDE_ROUTER] student-data pre-retrieve failed: %s", e)
+        return None
+    if not result:
+        return None
+    # The tool returns plain text or a "No recent answers" string. Skip the
+    # empty case so Claude can ask a clarifying question instead of being
+    # forced to confabulate from nothing.
+    low = result.lower()
+    if low.startswith("no recent") or low.startswith("no completed") or low.startswith("no answers"):
+        log.info("[CLAUDE_ROUTER] student-data pre-retrieve empty for %s", slug)
+        return None
+    log.info("[CLAUDE_ROUTER] student-data pre-retrieve hit slug=%s (%d chars)", slug, len(result))
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Tool call extraction helper
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -407,10 +574,18 @@ async def get_reply(
 
     # ── Forced retrieval for factual questions (Lever 1) ──────────────────────
     pre_retrieved = await asyncio.to_thread(_pre_retrieve_knowledge, user_message, ctx)
+    # ── Forced retrieval for student-data questions (Lever 2) ────────────────
+    # Triggers when user message has task-name + "my/I/recent/first/last"
+    # phrasing — fetches the student's own recent answers so Claude can't
+    # refuse with "I don't have access to your data".
+    pre_retrieved_student_data = await asyncio.to_thread(
+        _pre_retrieve_student_data, user_message, ctx
+    )
 
     system_prompt = _build_system_prompt(
         context, trainer_profile, phase, completeness_flags, new_practice,
         pre_retrieved=pre_retrieved,
+        pre_retrieved_student_data=pre_retrieved_student_data,
     )
 
     # Build message history
@@ -513,10 +688,18 @@ async def stream_reply(
 
     # ── Forced retrieval for factual questions (Lever 1) ──────────────────────
     pre_retrieved = await asyncio.to_thread(_pre_retrieve_knowledge, user_message, ctx)
+    # ── Forced retrieval for student-data questions (Lever 2) ────────────────
+    # Triggers when user message has task-name + "my/I/recent/first/last"
+    # phrasing — fetches the student's own recent answers so Claude can't
+    # refuse with "I don't have access to your data".
+    pre_retrieved_student_data = await asyncio.to_thread(
+        _pre_retrieve_student_data, user_message, ctx
+    )
 
     system_prompt = _build_system_prompt(
         context, trainer_profile, phase, completeness_flags, new_practice,
         pre_retrieved=pre_retrieved,
+        pre_retrieved_student_data=pre_retrieved_student_data,
     )
 
     messages = []
