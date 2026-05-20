@@ -21,6 +21,7 @@ from routers.trainer.app import router as trainer_app_router
 from routers.student_share import router as student_share_router
 from routers.subscription import router as subscription_router
 from routers.billing import router as billing_router
+from routers.save_exit import router as save_exit_router
 
 app = FastAPI(title="EnglishFirm Web API", version="1.0.0")
 
@@ -78,6 +79,7 @@ app.include_router(trainer_app_router, prefix="/api/v1")
 app.include_router(student_share_router, prefix="/api/v1")
 app.include_router(subscription_router, prefix="/api/v1")
 app.include_router(billing_router, prefix="/api/v1")
+app.include_router(save_exit_router, prefix="/api/v1")
 
 import core.config as _config
 
