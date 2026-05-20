@@ -72,6 +72,31 @@ def _any_audio_to_wav_pcm(audio_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
+# Default Azure VAD windows are too tight for PTE-style submissions: the
+# recognizer gives up after ~5s of leading silence and trims trailing
+# audio after ~500ms. A candidate who thinks before speaking (SGD/RL/RTS
+# in particular) or pauses for breath at the end loses the whole take —
+# Azure returns NoMatch and our pipeline silently zeroes pronunciation.
+# Raising both timeouts is a server-side property and applies to every
+# SpeechConfig we construct.
+_INITIAL_SILENCE_TIMEOUT_MS = "20000"
+_END_SILENCE_TIMEOUT_MS     = "2000"
+
+
+def _apply_silence_timeouts(speech_config) -> None:
+    """Widen Azure's initial / end silence VAD windows on a SpeechConfig.
+    Call right after constructing the config; idempotent."""
+    import azure.cognitiveservices.speech as speechsdk
+    speech_config.set_property(
+        speechsdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
+        _INITIAL_SILENCE_TIMEOUT_MS,
+    )
+    speech_config.set_property(
+        speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
+        _END_SILENCE_TIMEOUT_MS,
+    )
+
+
 def assess_pronunciation(
     audio_bytes: bytes,
     reference_text: str,
@@ -99,6 +124,7 @@ def assess_pronunciation(
                 region=AZURE_SPEECH_REGION,
             )
             speech_config.speech_recognition_language = language
+            _apply_silence_timeouts(speech_config)
 
             pronunciation_config = speechsdk.PronunciationAssessmentConfig(
                 reference_text=reference_text,
@@ -211,14 +237,7 @@ def assess_pronunciation_with_timestamps(
                 subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION,
             )
             speech_config.speech_recognition_language = language
-            speech_config.set_property(
-                speechsdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
-                "8000",
-            )
-            speech_config.set_property(
-                speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
-                "3000",
-            )
+            _apply_silence_timeouts(speech_config)
             speech_config.request_word_level_timestamps()
             speech_config.output_format = speechsdk.OutputFormat.Detailed
 
@@ -406,6 +425,7 @@ def transcribe_audio_short(audio_bytes: bytes) -> str:
         try:
             wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
             speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+            _apply_silence_timeouts(speech_config)
             audio_stream  = speechsdk.audio.PushAudioInputStream()
             audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
             recognizer    = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
@@ -441,6 +461,7 @@ def transcribe_audio_full(audio_bytes: bytes) -> str:
         try:
             wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
             speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+            _apply_silence_timeouts(speech_config)
             audio_stream  = speechsdk.audio.PushAudioInputStream()
             audio_config  = speechsdk.audio.AudioConfig(stream=audio_stream)
             recognizer    = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
