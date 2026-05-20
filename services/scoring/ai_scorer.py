@@ -1150,11 +1150,34 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
     wc = len(body.split())
     form_score = get_sst_form_score(wc) if body else 0
 
+    # ── Paragraph penalty (real PTE: SST must be a single paragraph) ──────
+    # Count paragraphs the same way WE does (blank-line separator). A 2-
+    # paragraph SST caps form at 1; 3+ paragraphs forces form to 0 (kills
+    # the attempt). 1 paragraph leaves the word-count-band form untouched.
+    body_paragraphs = [p.strip() for p in re.split(r'\n\s*\n', body) if p.strip()] if body else []
+    paragraph_count = len(body_paragraphs)
+    paragraph_penalty: str | None = None
+    if paragraph_count >= 3:
+        paragraph_penalty = "paragraph_count_kill"
+        form_score = 0
+    elif paragraph_count == 2 and form_score > 1:
+        paragraph_penalty = "paragraph_count_cap"
+        form_score = 1
+
     # ── Form-zero floor ───────────────────────────────────────────────────
     if form_score == 0:
         if not body:
             reason = "Empty response."
             ui_reason = "Form 0 — you didn't write anything."
+        elif paragraph_penalty == "paragraph_count_kill":
+            reason = (
+                f"Form-zero — SST has {paragraph_count} paragraphs; "
+                f"PTE expects 1."
+            )
+            ui_reason = (
+                f"Form 0 — SST must be a single paragraph. You wrote "
+                f"{paragraph_count} paragraphs. Merge them and resubmit."
+            )
         elif wc < 40:
             reason = f"Form-zero — {wc} words is below the 40-word minimum."
             ui_reason = (
@@ -1180,6 +1203,7 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
             "scorer": "form-gate-floor",
             "scoring_warnings": [reason],
             "word_count": wc,
+            "paragraph_count": paragraph_count,
         }
         return ScoringResult(
             pte_score=to_pte_score(0.0),
@@ -1407,9 +1431,16 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
         "task_type": "sst",
         "scorer": scorer_label,
         "word_count": wc,
+        "paragraph_count": paragraph_count,
         "highlights": highlights,
         "highlight_text": body,
     }
+    if paragraph_penalty == "paragraph_count_cap":
+        breakdown["form_reasoning"] = (
+            f"Form capped at 1 — SST has {paragraph_count} paragraphs; "
+            f"PTE expects 1. Merge them next time to score the full 2."
+        )
+        scoring_warnings = scoring_warnings + ["sst_paragraph_count_cap"]
     if scoring_warnings:
         breakdown["scoring_warnings"] = scoring_warnings
 
