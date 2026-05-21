@@ -48,10 +48,13 @@ log = get_logger(__name__)
 # Speaking tasks come first (PTE exam ordering).
 LISTENING_STRUCTURE = [
     # ── Speaking tasks (contribute to listening score) ────────────────────────
-    {"task": "repeat_sentence",            "count": 3, "module": "speaking", "time_seconds":  21, "prep_seconds": 0,  "rec_seconds": 9},
-    {"task": "retell_lecture",             "count": 1, "module": "speaking", "time_seconds": 125, "prep_seconds": 10, "rec_seconds": 40},
-    {"task": "summarize_group_discussion", "count": 1, "module": "speaking", "time_seconds": 125, "prep_seconds": 3,  "rec_seconds": 120},
-    {"task": "answer_short_question",      "count": 2, "module": "speaking", "time_seconds":  19, "prep_seconds": 0,  "rec_seconds": 5},
+    # Counts aligned with pte_mock_question_count (RDS) on 2026-05-21 so the
+    # listening sectional matches the full PTE Listening section profile
+    # (was RS=3, RL=1, SGD=1, ASQ=2; total 21 questions → now 33).
+    {"task": "repeat_sentence",            "count": 10, "module": "speaking", "time_seconds":  21, "prep_seconds": 0,  "rec_seconds": 9},
+    {"task": "retell_lecture",             "count": 2,  "module": "speaking", "time_seconds": 125, "prep_seconds": 10, "rec_seconds": 40},
+    {"task": "summarize_group_discussion", "count": 2,  "module": "speaking", "time_seconds": 125, "prep_seconds": 3,  "rec_seconds": 120},
+    {"task": "answer_short_question",      "count": 5,  "module": "speaking", "time_seconds":  19, "prep_seconds": 0,  "rec_seconds": 5},
     # ── Pure listening tasks (sync scored) ────────────────────────────────────
     {"task": "summarize_spoken_text",      "count": 1, "module": "listening", "time_seconds": 675, "prep_seconds": 0, "rec_seconds": 0},
     {"task": "listening_mcq_multiple",     "count": 2, "module": "listening", "time_seconds":  90, "prep_seconds": 0, "rec_seconds": 0},
