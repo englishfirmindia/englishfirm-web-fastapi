@@ -56,8 +56,8 @@ MOCK_STRUCTURE = [
     {"task_type": "describe_image",             "module": "speaking",  "section": "speaking", "part": 1, "count": 5,  "scoring": "async", "prep_seconds": 25, "rec_seconds": 40},
     {"task_type": "retell_lecture",             "module": "speaking",  "section": "speaking", "part": 1, "count": 2,  "scoring": "async", "prep_seconds": 10, "rec_seconds": 40},
     {"task_type": "answer_short_question",      "module": "speaking",  "section": "speaking", "part": 1, "count": 5,  "scoring": "async", "prep_seconds": 3,  "rec_seconds": 5},
-    {"task_type": "respond_to_situation",       "module": "speaking",  "section": "speaking", "part": 1, "count": 2,  "scoring": "async", "prep_seconds": 10, "rec_seconds": 40},
     {"task_type": "summarize_group_discussion", "module": "speaking",  "section": "speaking", "part": 1, "count": 2,  "scoring": "async", "prep_seconds": 3,  "rec_seconds": 120},
+    {"task_type": "respond_to_situation",       "module": "speaking",  "section": "speaking", "part": 1, "count": 2,  "scoring": "async", "prep_seconds": 10, "rec_seconds": 40},
     # ── Part 1: Writing ───────────────────────────────────────────────────────
     {"task_type": "summarize_written_text",     "module": "writing",   "section": "writing",  "part": 1, "count": 2,  "scoring": "sync",  "time_seconds": 600},
     {"task_type": "write_essay",                "module": "writing",   "section": "writing",  "part": 1, "count": 1,  "scoring": "sync",  "time_seconds": 1200},
