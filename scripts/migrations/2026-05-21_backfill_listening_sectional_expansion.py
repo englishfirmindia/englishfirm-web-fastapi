@@ -41,18 +41,19 @@ from db.database import SessionLocal  # noqa: E402
 
 
 # Target counts per task (matching the new LISTENING_STRUCTURE).
+# Order updated 2026-05-21 to match APEUni Mock Test sequence.
 TARGET_COUNTS = [
     ("repeat_sentence", 10, "speaking"),
     ("retell_lecture", 2, "speaking"),
-    ("summarize_group_discussion", 2, "speaking"),
     ("answer_short_question", 5, "speaking"),
+    ("summarize_group_discussion", 2, "speaking"),
     ("summarize_spoken_text", 1, "listening"),
     ("listening_mcq_multiple", 2, "listening"),
     ("listening_fib", 2, "listening"),
     ("listening_hcs", 2, "listening"),
+    ("listening_mcq_single", 1, "listening"),
     ("listening_smw", 1, "listening"),
     ("highlight_incorrect_words", 2, "listening"),
-    ("listening_mcq_single", 1, "listening"),
     ("listening_wfd", 3, "listening"),
 ]
 
