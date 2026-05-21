@@ -654,6 +654,19 @@ def persist_answer_to_db(
     # ⇔ all rows committed. Worst-case latency is bounded by the engine's
     # 10s statement_timeout × 3 retries; happy path is ~30ms.
     _write()
+    # Structured submit log — single tag so CloudWatch filter "[SUBMIT]"
+    # captures every sync-scored answer (mock + sectional + practice) with
+    # the metadata needed to reconstruct the order a student answered in.
+    log.info(
+        "[SUBMIT] mode=%s user=%s sid=%s qid=%s type=%s score=%s status=%s",
+        session.get("module") or "?",
+        user_id,
+        session_id,
+        question_id,
+        question_type,
+        score,
+        scoring_status,
+    )
 
 
 def persist_speaking_answer_pending(
@@ -734,6 +747,19 @@ def persist_speaking_answer_pending(
 
     # Synchronous (Option A) — see persist_answer_to_db comment above.
     _write()
+    # Structured submit log for async speaking — captures the moment the
+    # student's audio upload was accepted (scoring still runs later in a
+    # background thread). Counterpart to the [SUBMIT] log emitted by
+    # persist_answer_to_db for sync submits.
+    log.info(
+        "[SUBMIT] mode=%s user=%s sid=%s qid=%s type=%s status=pending audio=%s",
+        session.get("module") or "?",
+        session.get("user_id"),
+        session.get("session_id"),
+        question_id,
+        question_type,
+        (audio_url or "").rsplit("/", 1)[-1][:60],
+    )
 
 
 def update_speaking_score_in_db(
@@ -815,6 +841,13 @@ def update_speaking_score_in_db(
                     answer.result_json = rj
                     answer.scoring_status = "complete"
                     db.flush()
+                    log.info(
+                        "[SUBMIT] async-scored user=%s qid=%s pte=%s "
+                        "c=%.1f f=%.1f p=%.1f",
+                        user_id, question_id, floored,
+                        float(content or 0), float(fluency or 0),
+                        float(pronunciation or 0),
+                    )
                     # For sectional attempts the background aggregation thread owns
                     # total_score and scoring_status — skip the raw-sum accumulation
                     # so the bg thread's weighted PTE score is never overwritten.
