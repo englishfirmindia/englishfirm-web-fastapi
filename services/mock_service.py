@@ -64,7 +64,7 @@ MOCK_STRUCTURE = [
     # ── Part 2: Reading (block timer 25 min) ──────────────────────────────────
     {"task_type": "reading_fib_drop_down",      "module": "reading",   "section": "reading",  "part": 2, "count": 6,  "scoring": "sync"},
     {"task_type": "mcq_multiple",               "module": "reading",   "section": "reading",  "part": 2, "count": 3,  "scoring": "sync"},
-    {"task_type": "reorder_paragraphs",         "module": "reading",   "section": "reading",  "part": 2, "count": 1,  "scoring": "sync"},
+    {"task_type": "reorder_paragraphs",         "module": "reading",   "section": "reading",  "part": 2, "count": 2,  "scoring": "sync"},
     {"task_type": "reading_drag_and_drop",      "module": "reading",   "section": "reading",  "part": 2, "count": 4,  "scoring": "sync"},
     {"task_type": "mcq_single",                 "module": "reading",   "section": "reading",  "part": 2, "count": 2,  "scoring": "sync"},
     # ── Part 3: Listening ─────────────────────────────────────────────────────
