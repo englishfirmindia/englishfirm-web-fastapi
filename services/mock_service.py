@@ -606,6 +606,12 @@ def _extract_score_and_max(breakdown: dict, persist_type: str) -> tuple:
     # MCQScorer single — is_correct bool, max is always 1
     if 'is_correct' in bd:
         return (1.0 if bd['is_correct'] else 0.0), 1.0
+    # AI-scored writing/SST — earned (sum of sub-scores) + max_pts (rubric ceiling).
+    # Without this branch SST/SWT/WE persist score=0 even when the LLM rubric
+    # awarded full marks — every review header read "0 / 12".
+    if 'earned' in bd and ('max_pts' in bd or 'maxScore' in bd):
+        max_val = bd.get('max_pts') or bd.get('maxScore') or 0
+        return float(bd['earned']), float(max_val)
     # Async speaking or missing breakdown — keep old behaviour
     return 0.0, float(_MAX_FALLBACK.get(persist_type, 1))
 
