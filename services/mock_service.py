@@ -865,7 +865,12 @@ def get_mock_review(session_id: str, user_id: int, db: Session) -> dict:
                 except Exception:
                     pass
             if q.evaluation and q.evaluation.evaluation_json:
-                correct_payload = q.evaluation.evaluation_json.get("correctAnswers", {}) or {}
+                raw_correct = q.evaluation.evaluation_json.get("correctAnswers", {}) or {}
+                # Merge processed shape (incorrect_word_indices, passage_tokens,
+                # corrections_by_index for HIW) so review screens can use
+                # positional indices and avoid duplicate-word over-highlighting.
+                from services.review_enrichment import _extract_correct as _ec
+                correct_payload = {**raw_correct, **_ec(q)}
 
         items.append({
             "question_number":     i,

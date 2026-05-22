@@ -22,10 +22,33 @@ Output dict shape:
       "audio_url":      str | None,   # presigned, for listening / RA-like
     }
 """
+import re
 from typing import Optional
 
 from services.session_service import enrich_content_json
 from services.s3_service import generate_presigned_url
+
+
+def _hiw_norm(w: str) -> str:
+    """HIW word normaliser — mirrors the submit endpoint (routers/listening/hiw.py)
+    so review-side index lookup matches what the scorer indexed at submit time."""
+    return re.sub(r"[^\w]", "", str(w)).lower()
+
+
+def _hiw_passage_tokens(q) -> list:
+    """Tokenise an HIW passage the same way the submit endpoint does, so
+    the indices computed below align with the scorer's incorrect_word_indices."""
+    content = q.content_json or {}
+    pre = content.get("words")
+    if isinstance(pre, list) and pre:
+        return [str(w) for w in pre]
+    text = (
+        content.get("transcript")
+        or content.get("passage")
+        or content.get("text")
+        or ""
+    )
+    return [w for w in str(text).split() if w]
 
 
 def _extract_correct(q) -> dict:
@@ -77,14 +100,35 @@ def _extract_correct(q) -> dict:
     elif qt in ("listening_hiw", "highlight_incorrect_words"):
         # Two shapes — list of strings OR list of dicts {wrong, correct, index}
         raw = ca.get("incorrectWords") or []
+        wrong_to_correct: dict = {}
         if raw and isinstance(raw[0], dict):
             out["incorrect_words"] = [w.get("wrong") for w in raw if isinstance(w, dict)]
             out["corrections"] = {
                 str(w.get("index", "")): w.get("correct")
                 for w in raw if isinstance(w, dict) and w.get("correct")
             }
+            for w in raw:
+                if isinstance(w, dict) and w.get("wrong") and w.get("correct"):
+                    wrong_to_correct[_hiw_norm(w["wrong"])] = str(w["correct"]).strip()
         else:
             out["incorrect_words"] = [str(w) for w in raw]
+
+        # Positional index path — eliminates string-match over-highlighting
+        # when the same word appears multiple times in the passage. Mirrors
+        # the submit-time computation so frontend renders match the scorer.
+        tokens = _hiw_passage_tokens(q)
+        incorrect_norm_set = {_hiw_norm(w) for w in out["incorrect_words"] if w}
+        incorrect_indices = [
+            i for i, t in enumerate(tokens) if _hiw_norm(t) in incorrect_norm_set
+        ]
+        out["passage_tokens"] = tokens
+        out["incorrect_word_indices"] = incorrect_indices
+        if wrong_to_correct:
+            out["corrections_by_index"] = {
+                str(i): wrong_to_correct[_hiw_norm(t)]
+                for i, t in enumerate(tokens)
+                if _hiw_norm(t) in wrong_to_correct
+            }
 
     # SST / SWT / WE — store the source transcript/passage if available
     elif qt in ("summarize_spoken_text", "listening_sst",
