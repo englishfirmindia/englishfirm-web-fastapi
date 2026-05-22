@@ -1054,10 +1054,26 @@ def _build_mock_score_args(task_type, payload, content_json, eval_json, question
 
     if task_type == "highlight_incorrect_words":
         hw = payload.get("highlighted_words")
+        hi = payload.get("highlighted_indices")
+        words = content_json.get("words") or content_json.get("transcript", "").split()
         if hw is None:
-            indices = payload.get("highlighted_indices", [])
-            words = content_json.get("words") or content_json.get("transcript", "").split()
+            indices = hi or []
             hw = [words[i] for i in indices if isinstance(i, int) and i < len(words)]
-        return "listening_hiw", {"highlighted_words": hw, "evaluation_json": eval_json}, task_type, {"highlighted_words": list(hw or [])}
+        if hi is None and hw:
+            # Words-only payload — freeze positions at submit time so
+            # resume/review can re-render without the duplicate-word ambiguity.
+            derived = []
+            search_from = 0
+            for w in hw:
+                for i in range(search_from, len(words)):
+                    if words[i] == w:
+                        derived.append(i)
+                        search_from = i + 1
+                        break
+            hi = derived
+        return "listening_hiw", \
+               {"highlighted_words": hw, "evaluation_json": eval_json}, \
+               task_type, \
+               {"highlighted_words": list(hw or []), "highlighted_indices": list(hi or [])}
 
     raise HTTPException(status_code=400, detail=f"Unsupported task_type for mock submit: {task_type}")

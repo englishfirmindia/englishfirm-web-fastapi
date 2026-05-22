@@ -132,14 +132,31 @@ def submit(
     if not question or not question.evaluation:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    # Accept word strings or convert from 0-based word indices
+    # Accept word strings or convert from 0-based word indices.
+    # We persist BOTH below so on resume/review the frontend can restore
+    # the exact positions the user clicked — string-only is ambiguous when
+    # the passage has duplicate words.
     highlighted_words = req.highlighted_words
+    highlighted_indices = req.highlighted_indices
     content = question.content_json or {}
     words = content.get("words") or (content.get("transcript") or content.get("passage") or content.get("text") or "").split()
 
     if highlighted_words is None:
-        indices = req.highlighted_indices or []
+        indices = highlighted_indices or []
         highlighted_words = [words[i] for i in indices if isinstance(i, int) and i < len(words)]
+    if highlighted_indices is None and highlighted_words:
+        # Words-only payload (legacy clients): best-effort leftmost-match.
+        # Still vulnerable to duplicates here, but at least we freeze the
+        # positions at submit time so resume/review stay consistent.
+        derived: list[int] = []
+        search_from = 0
+        for w in highlighted_words:
+            for i in range(search_from, len(words)):
+                if words[i] == w:
+                    derived.append(i)
+                    search_from = i + 1
+                    break
+        highlighted_indices = derived
 
     eval_json = question.evaluation.evaluation_json or {}
     correct_answers = eval_json.get("correctAnswers", {}) or {}
@@ -204,7 +221,10 @@ def submit(
     mark_submitted(session_id, question_id, result.pte_score)
     persist_answer_to_db(
         session=session, question_id=question_id, question_type="listening_hiw",
-        user_answer_json={"highlighted_words": list(highlighted_words or [])},
+        user_answer_json={
+            "highlighted_words":   list(highlighted_words or []),
+            "highlighted_indices": list(highlighted_indices or []),
+        },
         correct_answer_json={},
         result_json={
             **breakdown,

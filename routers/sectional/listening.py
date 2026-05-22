@@ -68,7 +68,10 @@ def _extract_user_answer(question_type: str, payload: dict) -> dict:
     if question_type in ("listening_mcm", "listening_mcq_multiple"):
         return {"selected_options": payload.get("selected_options", [])}
     if question_type in ("listening_hiw", "highlight_incorrect_words"):
-        return {"highlighted_words": payload.get("highlighted_words", [])}
+        return {
+            "highlighted_words":   payload.get("highlighted_words", []),
+            "highlighted_indices": payload.get("highlighted_indices", []),
+        }
     return {}
 
 
