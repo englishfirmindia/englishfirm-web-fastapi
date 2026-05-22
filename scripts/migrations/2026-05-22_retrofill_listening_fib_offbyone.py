@@ -71,20 +71,27 @@ def rescore_row(db, row: AttemptAnswer) -> tuple[int, int]:
         answer={"user_answers": shifted, "evaluation_json": eval_row.evaluation_json},
     )
 
+    # Mock convention: score column stores raw hits (not PTE-scaled), and
+    # result_json carries `maxScore` so the review screen renders "hits/total".
+    bd = result.breakdown or {}
+    new_score = int(bd.get("hits") or 0)
+    max_raw = int(bd.get("total") or 0) or new_score
+
     old_score = row.score
-    row.score = result.pte_score
+    row.score = new_score
     new_ua = dict(row.user_answer_json or {})
     new_ua["user_answers"] = shifted
     new_ua["_retrofilled_2026_05_22"] = {"prior_keys": list(ua.keys())}
     row.user_answer_json = new_ua
     flag_modified(row, "user_answer_json")
     row.result_json = {
-        **(result.breakdown or {}),
+        **bd,
+        "maxScore": max_raw,
         "pte_score": result.pte_score,
         "_retrofilled_2026_05_22": True,
     }
     flag_modified(row, "result_json")
-    return old_score, result.pte_score
+    return old_score, new_score
 
 
 def main():
