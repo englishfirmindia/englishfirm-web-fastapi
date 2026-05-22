@@ -743,6 +743,7 @@ def _format_results(attempt: PracticeAttempt) -> dict:
             "listening": tb.get("listening"),
         },
         "scoring_health":     tb.get("scoring_health"),
+        "auto_skipped_qids":  list(tb.get("auto_skipped_qids") or []),
         "total_questions":    attempt.total_questions,
         "questions_answered": attempt.questions_answered,
         "completed_at":       attempt.completed_at.isoformat() if attempt.completed_at else None,

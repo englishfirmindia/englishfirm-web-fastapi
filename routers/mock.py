@@ -140,6 +140,43 @@ def mock_finish(
         result["pending_questions"] = pending_failed
         if result.get("scoring_status") == "complete":
             result["scoring_status"] = "partial"
+
+    # auto_skipped_qids: questions silently dropped when the Part-1 speaking
+    # block timer expired mid-attempt. Pre-2026-05-22 these vanished from
+    # attempt_answers entirely; now the client builds pending_submits for
+    # them AND ships the qid list here so we can stamp it on the attempt
+    # row for the feedback screen ("we ran out of time and skipped N").
+    auto_skipped = payload.get("auto_skipped_qids") or []
+    if auto_skipped:
+        try:
+            from db.models import PracticeAttempt
+            from sqlalchemy.orm.attributes import flag_modified
+            attempt = (
+                db.query(PracticeAttempt)
+                .filter_by(session_id=session_id, user_id=current_user.id, module="mock")
+                .first()
+            )
+            if attempt is not None:
+                tb = dict(attempt.task_breakdown or {})
+                existing = list(tb.get("auto_skipped_qids") or [])
+                # De-duplicate but preserve order.
+                seen = set(existing)
+                for qid in auto_skipped:
+                    if qid not in seen:
+                        existing.append(qid)
+                        seen.add(qid)
+                tb["auto_skipped_qids"] = existing
+                attempt.task_breakdown = tb
+                flag_modified(attempt, "task_breakdown")
+                db.commit()
+                log.info(
+                    f"[MOCK_FF] session={session_id} skipped_count={len(auto_skipped)} qids={auto_skipped}"
+                )
+        except Exception as e:
+            log.error(f"[Mock] failed to record auto_skipped_qids: {e}")
+        if isinstance(result, dict):
+            result["auto_skipped_qids"] = auto_skipped
+
     return result
 
 
