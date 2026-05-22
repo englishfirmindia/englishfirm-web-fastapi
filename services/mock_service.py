@@ -1049,7 +1049,17 @@ def _build_mock_score_args(task_type, payload, content_json, eval_json, question
 
     if task_type == "listening_fib":
         raw = payload.get("user_answers", {})
-        ua = {str(i + 1): v for i, v in enumerate(raw)} if isinstance(raw, list) else raw
+        if isinstance(raw, list):
+            ua = {str(i + 1): v for i, v in enumerate(raw)}
+        elif isinstance(raw, dict) and raw and all(
+            isinstance(k, str) and k.isdigit() for k in raw.keys()
+        ) and "0" in raw:
+            # Legacy 0-indexed dict from older clients — shift up so it lines up
+            # with the scorer's 1-based blankId lookup. Without this, every
+            # blank gets scored against the next blank's correct answer.
+            ua = {str(int(k) + 1): v for k, v in raw.items()}
+        else:
+            ua = raw
         return "listening_fib", {"user_answers": ua, "evaluation_json": eval_json}, task_type, {"user_answers": ua}
 
     if task_type == "highlight_incorrect_words":
