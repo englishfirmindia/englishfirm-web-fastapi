@@ -204,67 +204,83 @@ def get_mock_info(db: Session) -> dict:
 
 # ─── Start ────────────────────────────────────────────────────────────────────
 
-def start_mock_test(db: Session, user_id: int, test_number: int = 1) -> dict:
-    """Pick 65 questions (one set per task/section), create single PracticeAttempt."""
-    # Exclude questions already SUBMITTED (attempt_answers row); merely-shown
-    # but unanswered questions stay in the pool.
-    practiced_ids = set(
-        row[0] for row in db.query(AttemptAnswer.question_id)
-        .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
-        .filter(PracticeAttempt.user_id == user_id)
-        .all()
-    ) if test_number != 0 else set()
-
+def _pick_random_set_for_debug(db: Session, user_id: int) -> list:
+    """Legacy random-sample path retained for test_number=0 (debug). Picks
+    65 questions from the pool with the same MOCK_STRUCTURE distribution
+    as the locked sets. Excludes nothing — debug mode reuses already-
+    submitted questions deliberately so internal testers can re-attempt
+    after seeing scoring."""
     structure = _apply_mock_counts(db)
-
     selected: list = []
     for t in structure:
         task_type = t["task_type"]
-        module    = t["module"]
-        count     = t["count"]
+        module = t["module"]
+        count = t["count"]
         if count == 0:
             continue
-
         opts = [joinedload(QuestionFromApeuni.evaluation)]
-        # Accept canonical + legacy names from the DB (e.g. ptea_respond_situation)
         db_type_candidates = _DB_TYPE_ALIASES.get(task_type, [task_type])
-        base_filter = [
-            QuestionFromApeuni.module == module,
-            QuestionFromApeuni.question_type.in_(db_type_candidates),
-        ]
-
-        if test_number != 0 and practiced_ids:
-            fresh = db.query(QuestionFromApeuni).options(*opts).filter(
-                *base_filter,
-                ~QuestionFromApeuni.question_id.in_(practiced_ids),
-            ).all()
-            pool = fresh if len(fresh) >= count else (
-                db.query(QuestionFromApeuni).options(*opts).filter(*base_filter).all()
+        pool = (
+            db.query(QuestionFromApeuni)
+            .options(*opts)
+            .filter(
+                QuestionFromApeuni.module == module,
+                QuestionFromApeuni.question_type.in_(db_type_candidates),
             )
-        else:
-            pool = db.query(QuestionFromApeuni).options(*opts).filter(*base_filter).all()
-
-        # Normalize legacy question_type → canonical so the rest of the pipeline
-        # (submit routes, Flutter widget switch, scoring) stays consistent.
-        # Use set_committed_value so the ORM doesn't mark the row as dirty and
-        # try to rename the DB row on the next commit.
+            .all()
+        )
         for q in pool:
             if q.question_type in _NORMALIZE_TYPE:
                 set_committed_value(q, "question_type", _NORMALIZE_TYPE[q.question_type])
-
-        # HIW: filter to questions with passage + incorrectWords populated
         if task_type == "highlight_incorrect_words":
             pool = [
                 q for q in pool
                 if (q.content_json or {}).get("passage")
-                and (q.evaluation.evaluation_json if q.evaluation else {}).get("correctAnswers", {}).get("incorrectWords")
+                and (q.evaluation.evaluation_json if q.evaluation else {}).get(
+                    "correctAnswers", {}
+                ).get("incorrectWords")
             ]
-
         n = min(count, len(pool))
         if n == 0:
-            log.warning(f"[Mock] WARNING: no questions available for {task_type}")
+            log.warning(f"[Mock-debug] no questions for {task_type}")
             continue
         selected.extend(random.sample(pool, n))
+    return selected
+
+
+def start_mock_test(db: Session, user_id: int, test_number: int = 1) -> dict:
+    """Create a PracticeAttempt for mock test_number.
+
+    For test_number ∈ [1, 40]: serves the locked set from
+    `mock_test_questions` (every user, every redo, same 65 questions).
+    For test_number == 0: keeps the legacy random-sample path with
+    "exclude already-practiced" filter — debug/internal only.
+    """
+    if test_number == 0:
+        selected = _pick_random_set_for_debug(db, user_id)
+    else:
+        from services.mock_test_catalog import get_locked_mock_question_ids
+        locked_ids = get_locked_mock_question_ids(db, test_number)
+        rows_by_id = {
+            q.question_id: q
+            for q in db.query(QuestionFromApeuni)
+            .options(joinedload(QuestionFromApeuni.evaluation))
+            .filter(QuestionFromApeuni.question_id.in_(locked_ids))
+            .all()
+        }
+        # Preserve seed order — that IS the in-test sequence.
+        selected = [rows_by_id[qid] for qid in locked_ids if qid in rows_by_id]
+        missing = [qid for qid in locked_ids if qid not in rows_by_id]
+        if missing:
+            log.warning(
+                "[Mock] %d locked question_ids missing for test %d: %s",
+                len(missing), test_number, missing,
+            )
+        # Normalise legacy question_type → canonical (e.g. ptea_respond_situation
+        # → respond_to_situation) so the rest of the pipeline stays consistent.
+        for q in selected:
+            if q.question_type in _NORMALIZE_TYPE:
+                set_committed_value(q, "question_type", _NORMALIZE_TYPE[q.question_type])
 
     if not selected:
         raise HTTPException(status_code=404, detail="No questions available for mock test")
@@ -302,7 +318,11 @@ def start_mock_test(db: Session, user_id: int, test_number: int = 1) -> dict:
         if q.question_type in _NORMALIZE_TYPE:
             set_committed_value(q, "question_type", _NORMALIZE_TYPE[q.question_type])
 
-    # Order questions per MOCK_STRUCTURE order (speaking → writing → reading → listening)
+    # Order questions per MOCK_STRUCTURE (speaking → writing → reading →
+    # listening). Locked sets are already written in this order by the seed
+    # script; the sort below is defensive against future seed drift and is
+    # the only ordering pass for the random debug path (test_number=0).
+    structure = _apply_mock_counts(db)
     order_map = {t["task_type"]: i for i, t in enumerate(structure)}
     selected.sort(key=lambda q: order_map.get(q.question_type, 999))
 

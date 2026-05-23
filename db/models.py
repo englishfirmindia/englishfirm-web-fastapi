@@ -507,6 +507,21 @@ class SectionalTestQuestions(Base):
     seeded_at    = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class MockTestQuestions(Base):
+    """Locked question set per mock test_number (1..40).
+
+    Unlike `sectional_test_questions` which is treated as permanent, this
+    table is re-seedable: the team can refresh sets via the seed script's
+    --reseed flag when the question pool grows. Existing PracticeAttempt
+    rows are unaffected because each attempt freezes its 65 qids in
+    `practice_attempts.selected_question_ids` at start time.
+    """
+    __tablename__ = "mock_test_questions"
+    test_number  = Column(Integer, primary_key=True)
+    question_ids = Column(ARRAY(Integer), nullable=False)
+    seeded_at    = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class AuthRefreshToken(Base):
     """Stored refresh tokens for /auth/refresh rotation. Hashed; raw value
        never lives server-side after issue."""
