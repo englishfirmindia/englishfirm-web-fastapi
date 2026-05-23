@@ -224,6 +224,53 @@ def mock_resume(
     return resume_mock_test(session_id=session_id, user_id=current_user.id, db=db)
 
 
+@router.get("/mock/pending")
+def mock_pending(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List pending mock attempts the user can resume.
+
+    Joins `practice_attempts` (status='pending') with
+    `practice_session_states` (saved state blob, must not be expired) so
+    the client can surface a "Resume" row without relying on a
+    browser-local cache that may have been cleared.
+    """
+    from sqlalchemy import text as _sql_text
+    rows = db.execute(_sql_text(
+        """
+        SELECT pa.id            AS attempt_id,
+               pa.session_id    AS session_id,
+               pa.started_at    AS started_at,
+               COUNT(aa.id)     AS submitted_count,
+               pss.updated_at   AS state_updated_at,
+               pss.expires_at   AS state_expires_at
+        FROM practice_attempts pa
+        JOIN practice_session_states pss ON pss.session_id = pa.session_id
+        LEFT JOIN attempt_answers aa ON aa.attempt_id = pa.id
+        WHERE pa.user_id = :uid
+          AND pa.module = 'mock'
+          AND pa.status = 'pending'
+          AND pss.expires_at > NOW()
+        GROUP BY pa.id, pa.session_id, pa.started_at, pss.updated_at, pss.expires_at
+        ORDER BY pss.updated_at DESC
+        """
+    ), {"uid": current_user.id}).all()
+    return {
+        "pending": [
+            {
+                "attempt_id":      r.attempt_id,
+                "session_id":      r.session_id,
+                "started_at":      r.started_at.isoformat() if r.started_at else None,
+                "submitted_count": int(r.submitted_count or 0),
+                "last_saved_at":   r.state_updated_at.isoformat() if r.state_updated_at else None,
+                "expires_at":      r.state_expires_at.isoformat() if r.state_expires_at else None,
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.get("/mock/attempted-tests")
 def mock_attempted_tests(
     db: Session = Depends(get_db),
