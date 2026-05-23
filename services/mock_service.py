@@ -830,6 +830,18 @@ def get_mock_review(session_id: str, user_id: int, db: Session) -> dict:
                     "multiple_choice_single", "multiple_choice_multiple",
                     "select_missing_word"):
             context["options"] = cj.get("options", [])
+        elif qt in ("respond_to_situation", "ptea_respond_situation"):
+            # Authoritative scenario text lives in
+            # evaluation_json.correctAnswers.transcript across all RTS vintages.
+            # The older content_json.situation_text on some rows stores the
+            # spoken AUDIO dialogue, not the scenario the student should read.
+            if q and q.evaluation and q.evaluation.evaluation_json:
+                ca = q.evaluation.evaluation_json.get("correctAnswers", {}) or {}
+                auth = (ca.get("transcript", "") or "").strip()
+                if auth:
+                    context["situation_text"] = auth
+            if not context.get("situation_text"):
+                context["situation_text"] = cj.get("situation_text", "") or ""
 
         # Audio stimulus for any task with audio
         if qt not in ("read_aloud", "describe_image"):
@@ -856,6 +868,17 @@ def get_mock_review(session_id: str, user_id: int, db: Session) -> dict:
         if q is not None:
             from services.session_service import enrich_content_json as _enrich
             full_content_json = _enrich(q)
+            # RTS authoritative scenario text: always source from
+            # evaluation_json.correctAnswers.transcript when present (the
+            # situation_text on some legacy rows holds the audio dialogue
+            # instead of the scenario). enrich_content_json gates on the
+            # raw DB type; do an explicit override here so the canonical
+            # text shows regardless of in-memory type normalisation.
+            if qt in ("respond_to_situation", "ptea_respond_situation") and q.evaluation and q.evaluation.evaluation_json:
+                _ca = q.evaluation.evaluation_json.get("correctAnswers", {}) or {}
+                _auth = (_ca.get("transcript", "") or "").strip()
+                if _auth:
+                    full_content_json["situation_text"] = _auth
             stim2 = (full_content_json.get("audio_url")
                      or full_content_json.get("s3_key")
                      or full_content_json.get("audio_s3_key"))
