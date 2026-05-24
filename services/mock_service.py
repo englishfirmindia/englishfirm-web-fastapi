@@ -696,10 +696,14 @@ def finish_mock_test(db: Session, session_id: str, user_id: int) -> dict:
     # scored ~Y."
     from services.scoring_health import is_row_failed, build_scoring_health
     failed_qids: list = []
+    failed_qnums: list = []
     failed_per_section: dict = {"speaking": 0, "writing": 0, "reading": 0, "listening": 0}
-    for a in answers:
+    # enumerate(answers, 1) → 1-based position within the attempt, matches
+    # the "Q3 / Q7" labelling the feedback screen uses.
+    for idx, a in enumerate(answers, 1):
         if is_row_failed(a):
             failed_qids.append(int(a.question_id))
+            failed_qnums.append(idx)
             qt = a.question_type
             rds = _rds_key(qt)
             # Which section does this question belong to? The pte_question_weightage
@@ -721,6 +725,7 @@ def finish_mock_test(db: Session, session_id: str, user_id: int) -> dict:
         score_with_failures=overall,
         score_excluding_failures=overall_excl,
         per_section_failed={k: v for k, v in failed_per_section.items() if v > 0},
+        failed_question_numbers=failed_qnums,
     )
 
     task_breakdown = {
