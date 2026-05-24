@@ -644,7 +644,11 @@ def _resolve_score_max(a, max_pts_map: dict) -> tuple:
     Three cases:
     - Async speaking (PTE 10-90 stored): de-normalise back to rubric scale.
     - Rule-scored (FIB/MCQ/HIW/Reorder/WFD): read real counts from result_json breakdown.
-    - AI-scored sync (SWT/WE/SST): use stored score + maxScore directly.
+    - AI-scored sync (SWT/WE/SST): read earned + max_pts from the breakdown
+      directly. Reading `a.score` here is unsafe — pre-fix rows stored raw
+      `earned` in that column, post-fix (2026-05-23 onward) rows store PTE
+      10-90. Same row, two different scales depending on vintage. The
+      breakdown's `earned` + `max_pts` are stable across vintages.
     """
     qt = a.question_type
     rj = a.result_json or {}
@@ -655,7 +659,12 @@ def _resolve_score_max(a, max_pts_map: dict) -> tuple:
         return max(0.0, ((float(a.score or 0) - 10.0) / 80.0) * max_pts), max_pts
     if _RULE_SCORED_KEYS & rj.keys():
         return _extract_score_and_max(rj, qt)
-    # AI-scored sync: trust stored score and maxScore
+    # AI-scored sync (SWT/WE/SST): prefer rubric `earned` + `max_pts` from
+    # the breakdown — these are scale-stable. _extract_score_and_max's
+    # `earned + max_pts/maxScore` branch handles it. Falls through to
+    # legacy aa.score + maxScore only if breakdown lacks earned.
+    if "earned" in rj and ("max_pts" in rj or "maxScore" in rj):
+        return _extract_score_and_max(rj, qt)
     max_pts = float(rj.get("maxScore") or max_pts_map.get(qt, 1))
     return float(a.score or 0), max_pts
 
