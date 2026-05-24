@@ -1008,8 +1008,8 @@ def _score_speaking_v2(
         _seg_norm, _norm_gain = _normalize_for_silence_detection(_seg)
         if _norm_gain > 0:
             log.info(
-                "[NORMALIZE] type=%s dBFS=%.2f→%.2f gain=+%.2f",
-                question_type, _seg.dBFS, _seg_norm.dBFS, _norm_gain,
+                "[NORMALIZE] type=%s q=%s dBFS=%.2f→%.2f gain=+%.2f",
+                task_type, question_id, _seg.dBFS, _seg_norm.dBFS, _norm_gain,
             )
         _sils = detect_silence(
             _seg_norm,
