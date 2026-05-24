@@ -147,17 +147,24 @@ def submit(
         )
         mark_submitted(session_id, question_id, result.pte_score)
         status_str = "failed" if result.error else "complete"
+        # Persist with:
+        #  - score = pte_score (10-90 PTE scale, the canonical answer "score")
+        #  - max_pts spread at top-level so review screens render rich
+        #    sub-pillars (matches the writing sectional persist shape)
+        #  - maxScore = max_pts (aligned with new 26-pt rubric, not legacy 15)
+        breakdown = result.breakdown or {}
+        result_json = {
+            **breakdown,
+            "pte_score": result.pte_score,
+            "maxScore": breakdown.get("max_pts", 26),
+            "error": result.error,
+        }
         persist_answer_to_db(
             session=session, question_id=question_id, question_type="write_essay",
             user_answer_json={"text": user_answer},
             correct_answer_json={},
-            result_json={
-                "pte_score": result.pte_score,
-                "breakdown": result.breakdown,
-                "error": result.error,
-                "maxScore": result.breakdown.get("max_pts", 15),
-            },
-            score=result.breakdown.get("earned", 0),
+            result_json=result_json,
+            score=result.pte_score,
         )
         store_score(current_user.id, question_id, {
             "status": status_str,
