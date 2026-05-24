@@ -74,6 +74,36 @@ _TRAILING_TOLERANCE_MS = 200
 _SILENCE_THRESH_DBFS = -30
 
 
+# Loudness-normalization target for pause detection. Quiet recordings (low
+# mic gain) used to over-count pauses because pydub's silence threshold is
+# absolute (-30 dBFS). Boosting to a fixed target before detect_silence makes
+# scoring invariant to recording level. -20 dBFS matches the loudness of
+# healthy practice recordings observed in production audio.
+_NORMALIZE_TARGET_DBFS = -20.0
+# Floor below which we treat the recording as silent and skip amplification —
+# otherwise pure noise would be boosted into "speech".
+_NORMALIZE_DEAD_AIR_DBFS = -50.0
+
+
+def _normalize_for_silence_detection(seg):
+    """Boost quiet audio to a fixed loudness so absolute silence thresholds
+    aren't biased by mic gain.
+
+    Returns (segment, gain_db_applied). Gain is 0.0 if no change made.
+    Never attenuates; never amplifies near-silent recordings.
+    """
+    try:
+        cur = seg.dBFS
+        if cur < _NORMALIZE_DEAD_AIR_DBFS:
+            return seg, 0.0           # near-silent — leave alone
+        if cur >= _NORMALIZE_TARGET_DBFS:
+            return seg, 0.0           # already loud enough
+        gain = _NORMALIZE_TARGET_DBFS - cur
+        return seg.apply_gain(gain), gain
+    except Exception:
+        return seg, 0.0
+
+
 def _silence_ratio_pct(seg) -> tuple:
     """
     Return (silence_ratio_pct, pause_count) for the within-speech window.
@@ -265,7 +295,14 @@ def _apply_speaking_fluency_formula(
             return content, fluency, pronunciation, {}
 
         wpm = words_spoken * 60.0 / duration_sec
-        silence_pct, pause_count = _silence_ratio_pct(seg)
+        seg_for_silence, norm_gain_db = _normalize_for_silence_detection(seg)
+        if norm_gain_db > 0:
+            log.info(
+                "[NORMALIZE] q=%s type=%s user=%s dBFS=%.2f→%.2f gain=+%.2f",
+                question_id, question_type, user_id,
+                seg.dBFS, seg_for_silence.dBFS, norm_gain_db,
+            )
+        silence_pct, pause_count = _silence_ratio_pct(seg_for_silence)
 
         # Sentence count — reference passage for RA/RS, transcript otherwise.
         if question_type in ('read_aloud', 'repeat_sentence'):
@@ -968,8 +1005,14 @@ def _score_speaking_v2(
         _seg = AudioSegment.from_file(_io.BytesIO(audio_bytes))
         _total_ms = len(_seg)
         audio_dur = _seg.duration_seconds
+        _seg_norm, _norm_gain = _normalize_for_silence_detection(_seg)
+        if _norm_gain > 0:
+            log.info(
+                "[NORMALIZE] type=%s dBFS=%.2f→%.2f gain=+%.2f",
+                question_type, _seg.dBFS, _seg_norm.dBFS, _norm_gain,
+            )
         _sils = detect_silence(
-            _seg,
+            _seg_norm,
             min_silence_len=cfg.pause_min_ms,
             silence_thresh=cfg.silence_thresh_dbfs,
         )
