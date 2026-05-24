@@ -795,6 +795,14 @@ def _score_speaking_v2(
     pronunciation = 0.0
     word_scores = []
     azure_free_transcript = ""
+    # When Azure exhausts its 3 retries we used to leave pronunciation at 0,
+    # which crushed overall PTE on every speaking row during an Azure outage.
+    # `pronunciation_fallback` flips True so the post-content substitution
+    # below copies content → pronunciation (same 0-100 internal scale, so
+    # the proportional rescale is a numeric copy). The flag rides into
+    # the returned dict so review screens / trainers can see "Pronunciation
+    # was estimated due to a service outage."
+    pronunciation_fallback = False
     if cfg.pronunciation_source == "azure_assessment":
         try:
             azure = assess_pronunciation_with_timestamps(audio_bytes, reference_text)
@@ -809,7 +817,8 @@ def _score_speaking_v2(
                 for w in azure_words
             ]
         except Exception as e:
-            log.warning("[V2] Azure pronunciation_assessment failed (continuing with 0): %s", e)
+            log.warning("[V2] Azure pronunciation_assessment failed after 3 retries — falling back to content: %s", e)
+            pronunciation_fallback = True
     elif cfg.pronunciation_source == "azure_freeform":
         try:
             free = transcribe_and_score_free(audio_bytes)
@@ -817,7 +826,8 @@ def _score_speaking_v2(
             word_scores = free.get("word_scores", []) or []
             azure_free_transcript = (free.get("transcript") or "").strip()
         except Exception as e:
-            log.warning("[V2] Azure free transcribe failed (continuing with 0): %s", e)
+            log.warning("[V2] Azure free transcribe failed after 3 retries — falling back to content: %s", e)
+            pronunciation_fallback = True
 
     # Whisper for transcript (preferred — handles accented PTE vocabulary
     # better than Azure on free-speech-like reads). On free-speech tasks
@@ -965,6 +975,22 @@ def _score_speaking_v2(
     elif cfg.content_method in ("regex_match", "binary"):
         is_correct = _content_regex_match(transcript, expected_answers)
         content = 100.0 if is_correct else 0.0
+
+    # Pronunciation fallback — Azure exhausted retries earlier. Use the
+    # final content score (same 0-100 internal scale as pronunciation, so
+    # this is the proportional substitution by definition). Skips the
+    # cross-penalty block below by short-circuiting via the warning flag
+    # — keeping cross-penalty here would double-punish a service-outage
+    # row when content is also low.
+    if pronunciation_fallback:
+        pronunciation = float(content)
+        if "pronunciation_fallback_azure" not in scoring_warnings:
+            scoring_warnings.append("pronunciation_fallback_azure")
+        log.info(
+            "[FALLBACK] axis=pronunciation primary=azure backup=content_proxy "
+            "q=%s type=%s content=%.1f → pron=%.1f",
+            question_id, task_type, content, pronunciation,
+        )
 
     # transcript_annotated is the matched/extra word-chip data the
     # frontend's TranscriptDisplayCard renders. Only meaningful for
@@ -1136,7 +1162,10 @@ def _score_speaking_v2(
     # longer read by the algorithm but are kept on the row for rollback.
     content_pre, fluency_pre, pron_pre = content, fluency, pronunciation
     mC = mF = mP = 1.0
-    if cfg.uses_cross_penalty:
+    # Skip cross-penalty when pronunciation came from the Azure-failure
+    # fallback — it's already a copy of content; multiplying by a
+    # min(content, fluency)-derived factor would double-deduct.
+    if cfg.uses_cross_penalty and not pronunciation_fallback:
         mP = _cross_multiplier(
             min(content, fluency),
             cfg.pronunciation_content_threshold or 100.0,
@@ -1201,16 +1230,17 @@ def _score_speaking_v2(
     }
 
     return {
-        "content":            round(content, 1),
-        "fluency":            fluency,
-        "pronunciation":      pronunciation,
-        "transcript":         transcript,
-        "word_scores":        word_scores,
-        "fluency_metrics":    fluency_metrics,
-        "content_llm_scored": content_llm_scored,
-        "content_reasoning":  content_reasoning,
-        "scoring_warnings":   scoring_warnings,
-        "is_correct":         is_correct,
+        "content":               round(content, 1),
+        "fluency":               fluency,
+        "pronunciation":         pronunciation,
+        "pronunciation_fallback": pronunciation_fallback,
+        "transcript":            transcript,
+        "word_scores":           word_scores,
+        "fluency_metrics":       fluency_metrics,
+        "content_llm_scored":    content_llm_scored,
+        "content_reasoning":     content_reasoning,
+        "scoring_warnings":      scoring_warnings,
+        "is_correct":            is_correct,
     }
 
 
