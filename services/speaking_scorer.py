@@ -976,20 +976,21 @@ def _score_speaking_v2(
         is_correct = _content_regex_match(transcript, expected_answers)
         content = 100.0 if is_correct else 0.0
 
-    # Pronunciation fallback — Azure exhausted retries earlier. Use the
-    # final content score (same 0-100 internal scale as pronunciation, so
-    # this is the proportional substitution by definition). Skips the
-    # cross-penalty block below by short-circuiting via the warning flag
-    # — keeping cross-penalty here would double-punish a service-outage
-    # row when content is also low.
+    # Pronunciation fallback — Azure exhausted retries earlier. Substitute
+    # 90.0 (Azure-max stand-in) and let the cross-penalty below scale it by
+    # min(content, fluency). Healthy rows preserve high pron (~81-90); rows
+    # with weak content or fluency see pron proportionally lowered to a
+    # floor of 45 (= 90 × mP floor of 0.5). This replaces the older
+    # "pron = content" rule that inflated pron when a disfluent user
+    # happened to have high content (q=7265 / aid 2981, 2026-05-25).
     if pronunciation_fallback:
-        pronunciation = float(content)
+        pronunciation = 90.0
         if "pronunciation_fallback_azure" not in scoring_warnings:
             scoring_warnings.append("pronunciation_fallback_azure")
         log.info(
-            "[FALLBACK] axis=pronunciation primary=azure backup=content_proxy "
-            "q=%s type=%s content=%.1f → pron=%.1f",
-            question_id, task_type, content, pronunciation,
+            "[FALLBACK] axis=pronunciation primary=azure backup=cross_penalty_scaled "
+            "q=%s type=%s pron_pre=%.1f (will be scaled by mP downstream)",
+            question_id, task_type, pronunciation,
         )
 
     # transcript_annotated is the matched/extra word-chip data the
@@ -1162,10 +1163,13 @@ def _score_speaking_v2(
     # longer read by the algorithm but are kept on the row for rollback.
     content_pre, fluency_pre, pron_pre = content, fluency, pronunciation
     mC = mF = mP = 1.0
-    # Skip cross-penalty when pronunciation came from the Azure-failure
-    # fallback — it's already a copy of content; multiplying by a
-    # min(content, fluency)-derived factor would double-deduct.
-    if cfg.uses_cross_penalty and not pronunciation_fallback:
+    # Cross-penalty is applied uniformly — including when pronunciation came
+    # from the Azure-failure fallback path (where pron_pre = 90.0 stand-in).
+    # The scaling by min(content, fluency) is what produces a fair fallback
+    # value: healthy rows preserve high pron; rows with weak content or
+    # fluency see pron scaled down proportionally rather than copying content
+    # blindly.
+    if cfg.uses_cross_penalty:
         mP = _cross_multiplier(
             min(content, fluency),
             cfg.pronunciation_content_threshold or 100.0,
