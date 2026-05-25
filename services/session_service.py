@@ -730,6 +730,26 @@ def persist_speaking_answer_pending(
                         audio_url=audio_url,
                         scoring_status="pending",
                     ))
+                # Same-txn UQA upsert — guarantees the "Done" badge and "New"
+                # filter source-of-truth stays in sync with attempt_answers.
+                # Mirrors the block in persist_answer_to_db that handles sync
+                # types. Commit a9cd37f (2026-05-15) moved this off the
+                # mark_submitted daemon thread but only added it to the sync
+                # persist path — async speaking submissions (RA/RS/DI/RL/ASQ/
+                # SGD/RTS) lost their UQA writes for 10 days. Restoring here
+                # brings practice "Done" badges back to pre-refactor behaviour.
+                user_id = session.get("user_id")
+                if user_id:
+                    uqa_exists = db.query(UserQuestionAttempt).filter_by(
+                        user_id=user_id, question_id=question_id
+                    ).first()
+                    if not uqa_exists:
+                        db.add(UserQuestionAttempt(
+                            user_id=user_id,
+                            question_id=question_id,
+                            question_type=question_type,
+                            module=session.get("module") or "speaking",
+                        ))
                 db.commit()
                 return
             except Exception as e:
