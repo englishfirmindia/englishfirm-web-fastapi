@@ -118,6 +118,13 @@ def get_last_answer(
             # A cleared attempt must not restore on re-entry — the screen
             # should look fresh, exactly as if the user had never submitted.
             AttemptAnswer.scoring_status != "cleared",
+            # Practice screens must NEVER restore from a sectional/mock
+            # attempt of the same question. Without this filter, clearing
+            # a practice attempt would fall back to the user's sectional
+            # or mock answer for the same question_id and the practice
+            # screen would silently show that score as if the practice
+            # attempt was never cleared.
+            PracticeAttempt.filter_type == "practice",
         )
         .order_by(AttemptAnswer.submitted_at.desc())
         .first()

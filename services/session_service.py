@@ -1010,6 +1010,12 @@ def get_score_from_store(user_id: int, question_id: int) -> Optional[dict]:
                 PracticeAttempt.user_id == user_id,
                 AttemptAnswer.question_id == question_id,
                 AttemptAnswer.scoring_status == "complete",
+                # Practice score polling must not surface a sectional/mock
+                # answer for the same question_id. Without this filter,
+                # clearing a practice attempt and re-entering would poll up
+                # the user's sectional/mock score and display it as if the
+                # practice attempt was never cleared.
+                PracticeAttempt.filter_type == "practice",
             )
             .order_by(AttemptAnswer.submitted_at.desc())
             .first()
