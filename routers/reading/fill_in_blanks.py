@@ -84,6 +84,31 @@ def _get_or_generate_explanations(
     return result
 
 
+def _merge_user_answers_into_explanations(
+    explanations: list,
+    user_answers: dict,
+    blank_results: dict,
+) -> list:
+    """Layer per-request user_answer + is_correct on top of the cached
+    user-agnostic LLM output. Mirror of the helper in fib_drag_drop.py."""
+    out: list = []
+    for item in explanations or []:
+        if not isinstance(item, dict):
+            continue
+        bid = str(item.get("blank_id") or "").strip()
+        if not bid:
+            continue
+        merged = dict(item)
+        merged["user_answer"] = (
+            user_answers.get(bid) or user_answers.get(f"blank_{bid}")
+        )
+        merged["is_correct"] = bool(
+            blank_results.get(bid) or blank_results.get(f"blank_{bid}")
+        )
+        out.append(merged)
+    return out
+
+
 router = APIRouter(prefix="/reading/fill-in-blanks", tags=["Reading - Fill in the Blanks"])
 
 
@@ -240,6 +265,10 @@ def submit(
     total_score = session.get("score", 0)
 
     # ── AI explanations (lazy cache: RDS → LLM on miss → write-through) ──
+    # Cached LLM output is user-agnostic; merge per-request user_answer +
+    # is_correct on top so the per-attempt response (and persisted
+    # result_json) reflects THIS attempt's picks. Mirror of the fix in
+    # fib_drag_drop.py for Stefy's report (qid 1182, 2026-05-27).
     explanations = _get_or_generate_explanations(
         db=db,
         question=question,
@@ -247,6 +276,9 @@ def submit(
         correct_answers=correct_answers,
         user_answers=user_answers,
         blank_results=blank_results,
+    )
+    explanations = _merge_user_answers_into_explanations(
+        explanations, user_answers, blank_results,
     )
 
     persisted_result = dict(result.breakdown or {})

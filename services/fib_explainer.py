@@ -53,11 +53,10 @@ _SYSTEM_PROMPT = """You are a friendly PTE Academic reading tutor.
 For each blank in a fill-in-the-blanks question, write ONE short sentence
 (max 25 words) explaining WHY the correct word fits — grammar, collocation,
 or meaning from the passage. Use a warm, teacher-friendly tone. Do not
-mention "PTE", "blank N", or repeat the word back.
-
-If the student's answer was wrong, focus your sentence on why the CORRECT
-word is right — not on shaming the student's choice. If their answer was
-right, briefly confirm why it works.
+mention "PTE", "blank N", or repeat the word back. Do NOT reference any
+particular student's choice — explanations are cached and shared across
+all users, so they must read correctly regardless of what any individual
+student picked.
 
 Return ONLY this JSON shape, no commentary:
 {
@@ -114,10 +113,15 @@ def generate_fib_explanations(
     blanks: list,
     timeout_seconds: float = 15.0,
 ) -> list:
-    """Generate one-sentence explanations for each blank.
+    """Generate one-sentence user-agnostic explanations for each blank.
 
-    `blanks` is a list of dicts: [{blank_id, correct, user_answer, is_correct}].
-    Returns a list of dicts mirroring input plus an `explanation` string.
+    `blanks` is a list of dicts. Only `blank_id` and `correct` are read;
+    any `user_answer` / `is_correct` keys are ignored so the LLM output
+    stays user-agnostic and the result is safe to cache cross-attempt
+    and cross-user. Routers merge per-request user data on top of the
+    cached output before returning to the frontend.
+
+    Returns a list of dicts: `{blank_id, correct, explanation, scorer}`.
     On total LLM failure returns []."""
     if not blanks:
         return []
@@ -156,11 +160,12 @@ def generate_fib_explanations(
             if alias in by_id:
                 explanation = by_id[alias]
                 break
+        # Strictly user-agnostic — no user_answer / is_correct in the cached
+        # row. Routers merge those in per-request from current attempt data
+        # so a Redo with different picks renders correctly.
         out.append({
             "blank_id": bid,
             "correct": b.get("correct"),
-            "user_answer": b.get("user_answer"),
-            "is_correct": bool(b.get("is_correct")),
             "explanation": explanation,
             "scorer": scorer,
         })
@@ -190,11 +195,13 @@ def _build_user_block(passage: str, blanks: list) -> str:
         # Strip the "blank_" prefix so the LLM sees the bare numeric form
         # used in the JSON example in _SYSTEM_PROMPT and echoes it back.
         bare_id = str(b.get("blank_id") or "").replace("blank_", "").replace("Blank ", "").strip()
-        rows.append(
-            f"  Blank {bare_id}: correct=\"{b.get('correct')}\", "
-            f"student=\"{b.get('user_answer')}\", "
-            f"correct?={'yes' if b.get('is_correct') else 'no'}"
-        )
+        # Deliberately user-agnostic — do NOT include the student's pick or
+        # is_correct flag. The LLM output is cached and shared across all
+        # users and all redo attempts; baking a specific student's choice
+        # into the cached explanation text caused Stefy's bug report
+        # (qid 1182, 2026-05-27): on Redo the cached row referenced her
+        # FIRST attempt's wrong pick.
+        rows.append(f"  Blank {bare_id}: correct=\"{b.get('correct')}\"")
     return (
         f"PASSAGE (blanks marked ___1___, ___2___, …):\n{passage}\n\n"
         f"BLANKS:\n" + "\n".join(rows) + "\n\n"

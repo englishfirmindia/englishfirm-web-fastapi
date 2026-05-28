@@ -91,6 +91,34 @@ def _get_or_generate_explanations(
     return result
 
 
+def _merge_user_answers_into_explanations(
+    explanations: list,
+    user_answers: dict,
+    blank_results: dict,
+) -> list:
+    """Layer per-request user_answer + is_correct on top of the cached
+    user-agnostic LLM output. The cache stores only the explanation text;
+    the response (and persisted result_json) gets the current attempt's
+    pick + correctness so Redo / cross-user views render correctly."""
+    out: list = []
+    for item in explanations or []:
+        if not isinstance(item, dict):
+            continue
+        bid = str(item.get("blank_id") or "").strip()
+        if not bid:
+            continue
+        merged = dict(item)
+        # Accept both numeric ("1") and prefixed ("blank_1") blank-id forms.
+        merged["user_answer"] = (
+            user_answers.get(bid) or user_answers.get(f"blank_{bid}")
+        )
+        merged["is_correct"] = bool(
+            blank_results.get(bid) or blank_results.get(f"blank_{bid}")
+        )
+        out.append(merged)
+    return out
+
+
 router = APIRouter(prefix="/reading/fib-drag-drop", tags=["Reading - FIB Drag & Drop"])
 
 
@@ -251,6 +279,13 @@ def submit(
     is_correct = bool(blank_results) and all(blank_results.values())
 
     # ── AI explanations (lazy cache: RDS → LLM on miss → write-through) ──
+    # The cached LLM output is strictly user-agnostic — only
+    # {blank_id, correct, explanation}. We merge the current request's
+    # user_answer + is_correct on top so the per-attempt response (and
+    # the persisted result_json) shows THIS attempt's picks, not whatever
+    # picks happened to be cached. Stefy's bug report (qid 1182,
+    # 2026-05-27) was the cached row baking in her FIRST attempt's wrong
+    # pick — on Redo she saw old picks.
     explanations = _get_or_generate_explanations(
         db=db,
         question=question,
@@ -258,6 +293,9 @@ def submit(
         correct_answers=correct_answers,
         user_answers=user_answers,
         blank_results=blank_results,
+    )
+    explanations = _merge_user_answers_into_explanations(
+        explanations, user_answers, blank_results,
     )
 
     persisted_result = {
