@@ -373,7 +373,9 @@ def grant_vip(
     Idempotent-ish: replaying with the same args inserts another VIP
     grant that supersedes the previous (period_end resets from now).
     """
-    user = db.query(User).filter(User.email == body.student_email).first()
+    user = db.query(User).filter(
+        func.lower(User.email) == body.student_email.lower()
+    ).first()
     if user is None:
         raise HTTPException(
             status_code=404,
