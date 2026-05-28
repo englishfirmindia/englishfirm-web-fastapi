@@ -89,7 +89,12 @@ def get_answered_questions(
     query = (
         db.query(AttemptAnswer.question_id)
         .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
-        .filter(PracticeAttempt.user_id == current_user.id)
+        .filter(
+            PracticeAttempt.user_id == current_user.id,
+            # Cleared rows are kept for audit but treated as not-answered
+            # so the practice list flips back to "New" after Clear.
+            AttemptAnswer.scoring_status != "cleared",
+        )
     )
     if question_type:
         types = _QUESTION_TYPE_ALIASES.get(question_type, (question_type,))
@@ -110,6 +115,9 @@ def get_last_answer(
         .filter(
             PracticeAttempt.user_id == current_user.id,
             AttemptAnswer.question_id == question_id,
+            # A cleared attempt must not restore on re-entry — the screen
+            # should look fresh, exactly as if the user had never submitted.
+            AttemptAnswer.scoring_status != "cleared",
         )
         .order_by(AttemptAnswer.submitted_at.desc())
         .first()

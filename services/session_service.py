@@ -828,6 +828,21 @@ def update_speaking_score_in_db(
                     .first()
                 )
                 if answer:
+                    # Race guard with /questions/clear-attempt: the user can
+                    # clear an attempt while it's still being scored. The
+                    # initial query already filters scoring_status=="pending",
+                    # but Clear may have flipped the row to "cleared" between
+                    # that read and now. Re-read and bail rather than writing
+                    # a score onto a cleared row. Cleared rows must stay
+                    # cleared until the user explicitly re-submits.
+                    db.refresh(answer)
+                    if answer.scoring_status == "cleared":
+                        log.info(
+                            "[SUBMIT] race-skip: user=%s qid=%s was cleared "
+                            "mid-scoring — not writing score back",
+                            user_id, question_id,
+                        )
+                        return
                     # Display floor: PTE score never shown below PTE_FLOOR (10)
                     # even when scoring failed/returned 0. The raw azure
                     # subscores stay as-is.
@@ -895,6 +910,80 @@ def update_speaking_score_in_db(
         log.error(f"[UPDATE_SCORE] failed after 3 attempts q={question_id}: {last_exc}")
 
     threading.Thread(target=_update, daemon=True).start()
+
+
+def clear_attempt_in_db(user_id: int, question_id: int) -> bool:
+    """Soft-clear a user's latest answer for a question.
+
+    Sets the most recent (user_id, question_id) AttemptAnswer row to
+    scoring_status="cleared" with all scoring fields nulled, and deletes
+    the matching UserQuestionAttempt row so the "Done" badge resets.
+
+    The row itself stays for audit. The user's S3 audio is left in place
+    and ages out via the bucket's lifecycle policy.
+
+    Returns True when at least one row was cleared, False when no answer
+    exists for this user+question (the router maps that to 404). Both
+    writes happen in a single transaction — if the UQA delete throws the
+    answer update is rolled back.
+
+    Background scorer race: `update_speaking_score_in_db` re-checks
+    scoring_status before writing, so if Azure scoring is in flight it
+    will notice the "cleared" status and skip the score write. The
+    cleared row stays cleared.
+    """
+    db = SessionLocal()
+    try:
+        # Latest PRACTICE-mode answer for this user+question. Sectional and
+        # mock answers are deliberately excluded — clearing a question from
+        # the practice screen must never wipe a sectional/mock submission,
+        # since those feed the scored-test history and are read-only after
+        # the test is finished.
+        answer = (
+            db.query(AttemptAnswer)
+            .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
+            .filter(
+                PracticeAttempt.user_id == user_id,
+                PracticeAttempt.filter_type == "practice",
+                AttemptAnswer.question_id == question_id,
+            )
+            .order_by(AttemptAnswer.submitted_at.desc())
+            .first()
+        )
+        if not answer:
+            return False
+        answer.user_answer_json = {}
+        answer.correct_answer_json = {}
+        answer.result_json = {}
+        answer.score = 0
+        answer.content_score = None
+        answer.fluency_score = None
+        answer.pronunciation_score = None
+        answer.audio_url = None
+        answer.scoring_status = "cleared"
+        db.query(UserQuestionAttempt).filter_by(
+            user_id=user_id, question_id=question_id,
+        ).delete()
+        # Drop any cached score so the next poll doesn't surface the old
+        # value. _SCORE_STORE is in-memory and per-process; the next read
+        # will fall through to AttemptAnswer where scoring_status is now
+        # "cleared" and get_score_from_store will return None.
+        _SCORE_STORE.pop((user_id, question_id), None)
+        db.commit()
+        log.info(
+            "[CLEAR_ATTEMPT] user=%s qid=%s answer_id=%s — soft-cleared",
+            user_id, question_id, answer.id,
+        )
+        return True
+    except Exception as e:
+        log.error(
+            "[CLEAR_ATTEMPT] DB error user=%s qid=%s: %s",
+            user_id, question_id, e,
+        )
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def get_score_from_store(user_id: int, question_id: int) -> Optional[dict]:

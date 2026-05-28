@@ -113,6 +113,7 @@ from routers.sectional import listening as sectional_listening
 from routers.mock import router as mock_router
 from routers.resources import router as resources_router
 from routers.mic_check import router as mic_check_router
+from routers.clear_attempt import router as clear_attempt_router
 
 PREFIX = "/api/v1/questions"
 
@@ -130,5 +131,6 @@ for r in [
     mock_router,
     resources_router,
     mic_check_router,
+    clear_attempt_router,
 ]:
     app.include_router(r, prefix=PREFIX)
