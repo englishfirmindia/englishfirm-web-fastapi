@@ -54,6 +54,35 @@ def get_current_user(
     return user
 
 
+def try_get_user(
+    request: Request,
+    token: Optional[str] = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> Optional[User]:
+    """Soft-auth dependency: returns the authenticated User if the
+    Authorization header (or session cookie) carries a valid JWT,
+    otherwise returns None instead of raising 401.
+
+    Use ONLY for endpoints that must accept anonymous requests by design.
+    Built for the frontend telemetry endpoint, which must work even
+    before login (boot errors, login-page JS errors) and from
+    `navigator.sendBeacon` calls which cannot carry the Authorization
+    header. Do NOT use on any endpoint that touches user-scoped data —
+    keep `get_current_user` for those.
+    """
+    raw = _extract_token(request, token)
+    if not raw:
+        return None
+    try:
+        payload = jwt.decode(raw, config.JWT_SECRET_KEY, algorithms=[config.JWT_ALGORITHM])
+        user_id = payload.get("sub")
+        if user_id is None:
+            return None
+    except JWTError:
+        return None
+    return db.query(User).filter(User.id == int(user_id)).first()
+
+
 def get_subscription_context(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
