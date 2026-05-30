@@ -1336,32 +1336,92 @@ def _transcribe_azure_with_whisper_parallel(audio_bytes: bytes) -> dict:
 def _get_stimulus_key_points(question_type: str, audio_url: str) -> dict:
     """Transcribe stimulus audio + GPT-extract key points for RL/RTS/SGD.
 
-    Returns the same dict shape as `extract_key_points` so callers can
-    distinguish "no key points because the stimulus was empty" from
-    "no key points because Azure/Whisper/LLM was unreachable":
+    Primary: Azure continuous STT (`transcribe_audio_full`). Fallback: OpenAI
+    Whisper (`transcribe_with_whisper`). Whisper picks up whenever Azure
+    returns empty / whitespace / None or raises — Azure's silent-cancellation
+    bug (Q31 case, 2026-05-29) returns "" without retrying, so this fallback
+    is what closes the silent-cascade hole.
+
+    Returns the same dict shape as `extract_key_points`:
         {"key_points": list, "scored": bool, "warning_code": Optional[str]}
     """
+    from services.llm_content_scoring_service import extract_key_points
+
+    transcript: str = ""
+    audio_bytes: Optional[bytes] = None
+    used_fallback = False
+
+    # ── Step 1: try Azure ──────────────────────────────────────────────────
     try:
         from services.azure_speech_service import transcribe_audio_full
-        from services.llm_content_scoring_service import extract_key_points
         audio_bytes = _download_audio_with_retry(audio_url, label="STIMULUS_DOWNLOAD")
-        transcript = transcribe_audio_full(audio_bytes)
-        if not transcript:
-            # Azure STT-only `transcribe_audio_full` is fail-open empty —
-            # this is W8's silent-cascade entry point. Surface explicitly.
-            log.warning(
-                "[SCORER] Stimulus transcription returned empty for %s — "
-                "downstream content score will be flagged degraded",
-                question_type,
-            )
-            return {
-                "key_points": [],
-                "scored": False,
-                "warning_code": "stimulus_transcription_unavailable",
-            }
-        return extract_key_points(transcript, question_type)
+        transcript = transcribe_audio_full(audio_bytes) or ""
+        transcript = transcript.strip()
     except Exception as e:
-        log.error(f"[SCORER] Stimulus key-point extraction failed ({question_type}): {e}")
+        log.warning(
+            "[SCORER] Stimulus Azure transcribe raised for %s: %s — trying Whisper fallback",
+            question_type, e,
+        )
+        transcript = ""
+
+    # ── Step 2: Whisper fallback if Azure returned anything blank ──────────
+    if not transcript:
+        if audio_bytes is None:
+            try:
+                audio_bytes = _download_audio_with_retry(
+                    audio_url, label="STIMULUS_DOWNLOAD_RETRY"
+                )
+            except Exception as e:
+                log.error(
+                    "[SCORER] Stimulus audio download failed for %s: %s",
+                    question_type, e,
+                )
+                return {
+                    "key_points": [],
+                    "scored": False,
+                    "warning_code": "stimulus_transcription_unavailable",
+                }
+        try:
+            from services.whisper_service import transcribe_with_whisper
+            transcript = (transcribe_with_whisper(audio_bytes) or "").strip()
+            if transcript:
+                used_fallback = True
+                log.info(
+                    "[FALLBACK] axis=stimulus_transcribe primary=azure backup=whisper "
+                    "q_type=%s len=%d",
+                    question_type, len(transcript),
+                )
+        except Exception as e:
+            log.error(
+                "[SCORER] Whisper fallback also failed for %s: %s",
+                question_type, e,
+            )
+            transcript = ""
+
+    # ── Step 3: still empty after both providers ───────────────────────────
+    if not transcript:
+        log.warning(
+            "[SCORER] Stimulus transcription returned empty for %s after Azure + "
+            "Whisper — downstream content score will be flagged degraded",
+            question_type,
+        )
+        return {
+            "key_points": [],
+            "scored": False,
+            "warning_code": "stimulus_transcription_unavailable",
+        }
+
+    # ── Step 4: extract key-points from the transcript ─────────────────────
+    try:
+        result = extract_key_points(transcript, question_type)
+        if used_fallback:
+            existing = result.get("warning_code")
+            result["warning_code"] = existing or "stimulus_whisper_fallback_used"
+        return result
+    except Exception as e:
+        log.error(
+            "[SCORER] Stimulus key-point extraction failed ({question_type}): %s", e,
+        )
         return {
             "key_points": [],
             "scored": False,
@@ -1435,6 +1495,25 @@ def _run_scoring(
             **extra,
         })
         pte = _pte_score(computed["pct"])
+
+        # ── Off-topic content gate for llm_keypoints types ─────────────────
+        # When the LLM (gpt-4o-mini → claude-haiku-4-5 backup) was actually
+        # consulted and confidently returned content=0, floor the PTE to 10.
+        # Mirrors the writing scorer's gate at services/scoring/ai_scorer.py:508
+        # and matches the natural floor that RA/RS get via their LCS clamp.
+        # Only fires when content_llm_scored=True so an unreachable-LLM
+        # outage isn't treated as a deliberate off-topic verdict.
+        if (cfg.content_method == "llm_keypoints"
+                and content == 0.0
+                and content_llm_scored
+                and pte > config.PTE_FLOOR):
+            log.info(
+                "[OFF_TOPIC_FLOOR] q=%s type=%s LLM-judged content=0 → PTE %d→%d",
+                question_id, question_type, pte, config.PTE_FLOOR,
+            )
+            pte = config.PTE_FLOOR
+            if "off_topic_floor_applied" not in scoring_warnings:
+                scoring_warnings.append("off_topic_floor_applied")
 
         # W7: per-component status — "scored" when the dimension was
         # produced cleanly, "degraded" when its value reflects a fall-open
