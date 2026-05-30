@@ -469,6 +469,19 @@ _LLM_CONTENT_FALLBACK_TARGETS = {
     "summarize_group_discussion": 50,
 }
 
+# Task types whose pte_speaking_scoring_config row has
+# `content_method = "llm_keypoints"`. Used by the off-topic content gate
+# in _run_scoring to floor PTE to 10 when the LLM judged content=0.
+# Keep in sync with the config table — read at module import is fine
+# because we ship a new task def whenever the config changes.
+_LLM_KEYPOINTS_TYPES = frozenset({
+    "describe_image",
+    "retell_lecture",
+    "respond_to_situation",
+    "ptea_respond_situation",
+    "summarize_group_discussion",
+})
+
 # Pause / hesitation / WPM / cross-penalty / LCS-K constants now live per
 # task in the pte_speaking_scoring_config table. The fallback below is the
 # fail-open safety net only — never the live source of truth.
@@ -1503,7 +1516,9 @@ def _run_scoring(
         # and matches the natural floor that RA/RS get via their LCS clamp.
         # Only fires when content_llm_scored=True so an unreachable-LLM
         # outage isn't treated as a deliberate off-topic verdict.
-        if (cfg.content_method == "llm_keypoints"
+        # `cfg` from _score_speaking_v2 isn't in scope here, so check the
+        # task_type directly against the known llm_keypoints set.
+        if (question_type in _LLM_KEYPOINTS_TYPES
                 and content == 0.0
                 and content_llm_scored
                 and pte > config.PTE_FLOOR):
