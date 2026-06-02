@@ -14,7 +14,7 @@ from services.s3_service import generate_presigned_url
 from schemas.submit_requests import MultiOptionSubmitRequest
 from core.logging_config import get_logger
 from services.question_search import apply_search_filter
-from services.question_list_helper import paginate_by_practice_recency, iso
+from services.question_list_helper import paginate_by_practice_recency, iso, practiced_questions_subq, practiced_question_ids_in
 
 log = get_logger(__name__)
 

@@ -19,7 +19,7 @@ from services.session_service import (
 from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url
 from services.question_search import apply_search_filter
-from services.question_list_helper import paginate_by_practice_recency, iso
+from services.question_list_helper import paginate_by_practice_recency, iso, practiced_questions_subq, practiced_question_ids_in
 from schemas.submit_requests import TextSubmitRequest
 
 router = APIRouter(prefix="/listening/sst", tags=["Listening - Summarize Spoken Text"])

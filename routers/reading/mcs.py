@@ -13,7 +13,7 @@ from services.scoring import get_scorer
 from schemas.submit_requests import SingleOptionSubmitRequest
 from core.logging_config import get_logger
 from services.question_search import apply_search_filter
-from services.question_list_helper import paginate_by_practice_recency, iso
+from services.question_list_helper import paginate_by_practice_recency, iso, practiced_questions_subq, practiced_question_ids_in
 
 log = get_logger(__name__)
 
