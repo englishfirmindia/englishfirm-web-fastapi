@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import asc, desc
 
 from db.database import get_db
-from db.models import User, QuestionFromApeuni, UserQuestionAttempt
+from db.models import User, QuestionFromApeuni
 from core.dependencies import get_current_user
 from services.billing.enforce_limit import EnforceLimit
 from services.session_service import start_session, get_session, mark_submitted, persist_answer_to_db
@@ -42,11 +42,7 @@ def list_questions(
     if is_prediction is not None:
         query = query.filter(QuestionFromApeuni.is_prediction == is_prediction)
     if practiced is not None:
-        practiced_subq = (
-            db.query(UserQuestionAttempt.question_id)
-            .filter(UserQuestionAttempt.user_id == current_user.id)
-            .subquery()
-        )
+        practiced_subq = practiced_questions_subq(db, current_user.id, "listening_smw")
         if practiced:
             query = query.filter(QuestionFromApeuni.question_id.in_(practiced_subq))
         else:
@@ -76,17 +72,7 @@ def list_questions(
     total_pages = math.ceil(total / limit) if total > 0 else 1
 
     page_qids = [q.question_id for q in questions]
-    practiced_ids: set = set()
-    if page_qids:
-        rows = (
-            db.query(UserQuestionAttempt.question_id)
-            .filter(
-                UserQuestionAttempt.user_id == current_user.id,
-                UserQuestionAttempt.question_id.in_(page_qids),
-            )
-            .all()
-        )
-        practiced_ids = {r[0] for r in rows}
+    practiced_ids = practiced_question_ids_in(db, current_user.id, "listening_smw", page_qids)
 
     return {
         "questions": [

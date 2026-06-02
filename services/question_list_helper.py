@@ -43,6 +43,63 @@ _QUESTION_TYPE_ALIASES: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def practiced_questions_subq(
+    db: Session, user_id: int, question_type: str
+):
+    """SQL subquery of qids the user has practised IN PRACTICE MODE.
+
+    Use with `.in_()` / `.not_in_()` on QuestionFromApeuni.question_id when
+    applying the "Done" / "New" filter to a list endpoint.
+
+    Replaces the prior pattern of selecting from `user_question_attempts`
+    (which counts all modes, including mock and sectional). UQA-based Done
+    diverged from the recency map (practice-mode only) — questions only
+    attempted via mock/sectional appeared in Done with a "Never practiced"
+    header, and the last-answer endpoint correctly returned null for them.
+    Aligning Done to practice-mode-only fixes that mismatch AND implicitly
+    hides any orphan UQA rows (UQA without matching attempt_answers).
+    """
+    types = _QUESTION_TYPE_ALIASES.get(question_type, (question_type,))
+    return (
+        db.query(AttemptAnswer.question_id)
+        .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
+        .filter(
+            PracticeAttempt.user_id == user_id,
+            PracticeAttempt.filter_type == "practice",
+            AttemptAnswer.scoring_status != "cleared",
+            AttemptAnswer.question_type.in_(types),
+        )
+        .distinct()
+        .subquery()
+    )
+
+
+def practiced_question_ids_in(
+    db: Session, user_id: int, question_type: str, restrict_to: List[int]
+) -> set:
+    """Return the subset of `restrict_to` qids the user has practised
+    in practice mode. Used for per-page enrichment so each returned row
+    can be tagged `practiced: true/false` without re-querying UQA.
+    """
+    if not restrict_to:
+        return set()
+    types = _QUESTION_TYPE_ALIASES.get(question_type, (question_type,))
+    rows = (
+        db.query(AttemptAnswer.question_id)
+        .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
+        .filter(
+            PracticeAttempt.user_id == user_id,
+            PracticeAttempt.filter_type == "practice",
+            AttemptAnswer.scoring_status != "cleared",
+            AttemptAnswer.question_type.in_(types),
+            AttemptAnswer.question_id.in_(restrict_to),
+        )
+        .distinct()
+        .all()
+    )
+    return {r[0] for r in rows}
+
+
 def fetch_practice_recency_map(
     db: Session, user_id: int, question_type: str
 ) -> Dict[int, datetime]:
