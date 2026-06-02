@@ -17,6 +17,7 @@ from services.scoring import get_scorer
 from services.s3_service import generate_presigned_url, generate_presigned_upload_url
 from core.security_helpers import safe_question_id, assert_audio_url_owned, resolve_question_with_retry
 from services.question_search import apply_search_filter
+from services.question_list_helper import paginate_by_practice_recency, iso
 
 router = APIRouter(prefix="/speaking/summarize-group-discussion", tags=["Speaking - Summarize Group Discussion"])
 
@@ -63,16 +64,27 @@ def list_questions(
             query = query.filter(~QuestionFromApeuni.question_id.in_(practiced_subq))
     query = apply_search_filter(query, search)
 
-    total = query.count()
+    if sort == 'recent':
+        questions, total, recency = paginate_by_practice_recency(
+            db=db,
+            filtered_query=query,
+            user_id=current_user.id,
+            question_type="summarize_group_discussion",
+            page=page,
+            limit=limit,
+        )
+    else:
+        total = query.count()
+        order_dir = desc if sort == 'desc' else asc
+        questions = (
+            query
+            .order_by(order_dir(QuestionFromApeuni.question_id))
+            .offset((page - 1) * limit)
+            .limit(limit)
+            .all()
+        )
+        recency = {}
     total_pages = math.ceil(total / limit) if total > 0 else 1
-    order_dir = desc if sort == 'desc' else asc
-    questions = (
-        query
-        .order_by(order_dir(QuestionFromApeuni.question_id))
-        .offset((page - 1) * limit)
-        .limit(limit)
-        .all()
-    )
 
     page_qids = [q.question_id for q in questions]
     practiced_ids: set = set()
@@ -96,6 +108,7 @@ def list_questions(
                 "difficulty_level": q.difficulty_level,
                 "is_prediction": bool(q.is_prediction),
                 "practiced": q.question_id in practiced_ids,
+                "last_practiced_at": iso(recency.get(q.question_id)),
             }
             for q in questions
         ],
