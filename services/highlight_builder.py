@@ -23,6 +23,8 @@ correction.
 
 Pure function. No external state, no I/O.
 """
+import difflib
+import re
 from typing import Iterable, Optional, Tuple
 
 
@@ -126,7 +128,7 @@ def build_highlights(
         quote, correction, reason = _normalize_mistake(item)
         if not quote:
             continue
-        rng = _first_match(body, quote, used_ranges)
+        rng = _first_match(body, quote, used_ranges, correction)
         if rng is None:
             continue
         used_ranges.add(rng)
@@ -145,7 +147,7 @@ def build_highlights(
         quote, correction, reason = _normalize_mistake(item)
         if not quote:
             continue
-        rng = _first_match(body, quote, used_ranges)
+        rng = _first_match(body, quote, used_ranges, correction)
         if rng is None:
             continue
         used_ranges.add(rng)
@@ -192,23 +194,58 @@ def _build_hint(prefix: str, quote: str, correction: Optional[str], reason: Opti
     return base
 
 
-def _first_match(body: str, needle: str, used: set) -> Optional[Tuple[int, int]]:
-    """Return (start, end) of the first occurrence of `needle` in `body` that
-    doesn't fall entirely inside an already-used range. Case-sensitive first;
-    falls back to case-insensitive if no exact match. Returns None if not found."""
+def _first_match(
+    body: str,
+    needle: str,
+    used: set,
+    correction: Optional[str] = None,
+) -> Optional[Tuple[int, int]]:
+    """Locate `needle` in `body`, preferring whole-word matches.
+
+    Tier 1 — case-sensitive word-boundary. The LLM almost always quotes the
+    typo verbatim including its (incorrect) casing, so a case-sensitive whole-
+    word hit is the gold standard. Short quotes like 'th', 'an', 'is' get
+    correctly anchored to the standalone word instead of latching onto the
+    first occurrence inside an unrelated longer word.
+
+    Tier 2 — case-INsensitive word-boundary. Handles LLM quotes that flipped
+    the casing (e.g. it returns 'english' but the body has 'English' lower-
+    cased mid-sentence).
+
+    Tier 3 — substring fallback (the legacy behaviour). Used when the quote
+    contains punctuation/whitespace such that word-boundary anchors can't
+    apply (e.g. multi-word phrase, leading punctuation).
+
+    Whenever a tier returns more than one candidate, the candidates are
+    ranked by surrounding-word similarity to `correction`: a match whose
+    surrounding word is already identical to the correction is almost
+    certainly the corrected form (not the typo) and is pushed to the back.
+    Otherwise, closeness-to-correction is treated as typo-likelihood (a
+    typo is usually a small edit away from the correction).
+    """
     if not needle or not body:
         return None
     needle = needle.strip()
     if not needle:
         return None
-    # Exact match
+
+    # Tier 1: case-sensitive word boundary
+    candidates = [r for r in _wb_matches(body, needle, ci=False) if not _contained(r, used)]
+    if candidates:
+        return _rank(candidates, body, correction)[0]
+
+    # Tier 2: case-insensitive word boundary
+    candidates = [r for r in _wb_matches(body, needle, ci=True) if not _contained(r, used)]
+    if candidates:
+        return _rank(candidates, body, correction)[0]
+
+    # Tier 3: substring fallback — case-sensitive first, then insensitive.
     idx = body.find(needle)
     while idx != -1:
         rng = (idx, idx + len(needle))
         if not _contained(rng, used):
             return rng
         idx = body.find(needle, idx + 1)
-    # Case-insensitive fallback
     lower_body = body.lower()
     lower_needle = needle.lower()
     idx = lower_body.find(lower_needle)
@@ -218,6 +255,58 @@ def _first_match(body: str, needle: str, used: set) -> Optional[Tuple[int, int]]
             return rng
         idx = lower_body.find(lower_needle, idx + 1)
     return None
+
+
+def _wb_matches(body: str, needle: str, *, ci: bool) -> list:
+    """All word-boundary positions of `needle` in `body`. Boundary anchors
+    are only added on alphanumeric edges of the needle — quotes that start
+    or end with punctuation drop through to substring fallback in Tier 3."""
+    left = r"\b" if needle[0].isalnum() or needle[0] == "_" else ""
+    right = r"\b" if needle[-1].isalnum() or needle[-1] == "_" else ""
+    pattern = left + re.escape(needle) + right
+    flags = re.IGNORECASE if ci else 0
+    try:
+        return [(m.start(), m.end()) for m in re.finditer(pattern, body, flags=flags)]
+    except re.error:
+        return []
+
+
+def _rank(candidates: list, body: str, correction: Optional[str]) -> list:
+    """Sort candidates by typo-likelihood (lower score = more typo-like).
+    Stable for a single candidate; meaningful only when multiple matches
+    compete for the same quote."""
+    if len(candidates) == 1:
+        return candidates
+    return sorted(candidates, key=lambda r: _typo_likelihood(body, r, correction))
+
+
+def _typo_likelihood(body: str, rng: Tuple[int, int], correction: Optional[str]) -> float:
+    """Lower = more likely to be the actual typo location.
+
+    If `correction` isn't provided we can't differentiate, so all candidates
+    get the same score (zero) and the iteration order wins — equivalent to
+    the old "first match" behaviour.
+
+    If the surrounding word at `rng` already IS the correction (case-
+    insensitive), this candidate can't be the typo and gets pushed to the
+    back. Otherwise we use 1 - SequenceMatcher.ratio() so candidates closer
+    to `correction` (small edit distance ⇒ likely typo) rank earlier."""
+    if not correction:
+        return 0.0
+    surrounding = _surrounding_word(body, rng)
+    if surrounding.lower() == correction.lower():
+        return 99.0
+    return 1.0 - difflib.SequenceMatcher(None, surrounding.lower(), correction.lower()).ratio()
+
+
+def _surrounding_word(body: str, rng: Tuple[int, int]) -> str:
+    """Extend `rng` outwards to the surrounding word's boundaries in `body`."""
+    s, e = rng
+    while s > 0 and (body[s - 1].isalpha() or body[s - 1] in "'-"):
+        s -= 1
+    while e < len(body) and (body[e].isalpha() or body[e] in "'-"):
+        e += 1
+    return body[s:e]
 
 
 def _contained(rng: Tuple[int, int], used: set) -> bool:
