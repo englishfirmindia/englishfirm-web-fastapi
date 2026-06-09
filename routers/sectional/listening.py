@@ -152,6 +152,18 @@ def resume_exam(
     return resume_listening_sectional_exam(session_id=session_id, user_id=current_user.id, db=db)
 
 
+@router.get("/in-progress")
+def in_progress(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List in-progress listening sectionals the user can resume, sourced
+    from `practice_attempts` (not from browser localStorage) so the resume
+    CTA surfaces on any device the user logs into."""
+    from services.sectional_pending_helper import fetch_pending_sectionals
+    return {"pending": fetch_pending_sectionals(db, current_user.id, "listening")}
+
+
 @router.post("/submit")
 def submit_answer(
     payload: dict = Body(...),
