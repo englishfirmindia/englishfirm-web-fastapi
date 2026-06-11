@@ -33,14 +33,53 @@ from sqlalchemy.orm import Session, Query
 from db.models import AttemptAnswer, PracticeAttempt, QuestionFromApeuni
 
 
-# Mapping from the question_type stored in `questions_from_apeuni` to the
-# set of question_types that may appear in `attempt_answers` for that
-# question. Defaults to identity when not aliased. Mirrors the table in
-# routers/user.py:_QUESTION_TYPE_ALIASES — keep these two in sync.
-_QUESTION_TYPE_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "reading_fib":           ("reading_fib", "reading_drag_and_drop"),
-    "reading_drag_and_drop": ("reading_fib", "reading_drag_and_drop"),
+# Source-of-truth alias map for question_type strings. Different layers
+# of the app historically named the same question type differently:
+# the submit handler stores one canonical (e.g. "listening_sst" in
+# `attempt_answers.question_type`) while the matching `/list` endpoint
+# passes a legacy descriptive name (e.g. "summarize_spoken_text"). When
+# the strings don't match, the "Done" / "practiced" badge silently
+# returns no rows — questions stay flagged "New" forever on the practice
+# list even after the user submits them. Same root cause as the 7-type
+# audit on 2026-06-09.
+#
+# Strategy: every drift pair below maps BOTH directions to the same
+# tuple. The helpers below expand the lookup IN-clause via this map, so
+# the badge lookup matches whichever string the submit OR list side
+# happens to pass. Identity-fallback for any unlisted type.
+#
+# This is the SINGLE SOURCE OF TRUTH for these aliases. routers/user.py
+# imports from here — do NOT duplicate the table there.
+QUESTION_TYPE_ALIASES: Dict[str, Tuple[str, ...]] = {
+    # Reading FIB drag-drop — original alias (2026-04 era)
+    "reading_fib":            ("reading_fib", "reading_drag_and_drop"),
+    "reading_drag_and_drop":  ("reading_fib", "reading_drag_and_drop"),
+    # Speaking — Respond To a Situation (legacy "ptea_" prefix from
+    # the mobile app naming)
+    "respond_to_situation":   ("respond_to_situation", "ptea_respond_situation"),
+    "ptea_respond_situation": ("respond_to_situation", "ptea_respond_situation"),
+    # Reading MCQs — legacy generic names without module prefix
+    "reading_mcs":            ("reading_mcs", "mcq_single"),
+    "mcq_single":             ("reading_mcs", "mcq_single"),
+    "reading_mcm":            ("reading_mcm", "mcq_multiple"),
+    "mcq_multiple":           ("reading_mcm", "mcq_multiple"),
+    # Listening SST — descriptive name used by /list, shortened by submit
+    "listening_sst":          ("listening_sst", "summarize_spoken_text"),
+    "summarize_spoken_text":  ("listening_sst", "summarize_spoken_text"),
+    # Listening MCQs — same shortening-drift as reading MCQs
+    "listening_mcs":          ("listening_mcs", "listening_mcq_single"),
+    "listening_mcq_single":   ("listening_mcs", "listening_mcq_single"),
+    "listening_mcm":          ("listening_mcm", "listening_mcq_multiple"),
+    "listening_mcq_multiple": ("listening_mcm", "listening_mcq_multiple"),
+    # Listening HIW — descriptive name vs shortened
+    "listening_hiw":          ("listening_hiw", "highlight_incorrect_words"),
+    "highlight_incorrect_words": ("listening_hiw", "highlight_incorrect_words"),
 }
+
+# Internal alias for backwards-compat with prior private name. New code
+# should import QUESTION_TYPE_ALIASES (no underscore) since it's now a
+# public, shared constant.
+_QUESTION_TYPE_ALIASES = QUESTION_TYPE_ALIASES
 
 
 def practiced_questions_subq(

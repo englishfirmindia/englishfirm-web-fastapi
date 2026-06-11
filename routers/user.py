@@ -50,17 +50,12 @@ def get_dashboard(
     }
 
 
-# Question-type aliases — the FE and BE historically diverged on the
-# Reading FIB drag-drop name. Flutter ships `reading_fib` (route /practice/
-# reading-fib, HttpGenericPracticeApiService('reading_fib')), but the
-# fill_in_blanks.py submit handler persists AA rows with
-# `question_type='reading_drag_and_drop'`. Map both names to the same
-# bucket so /answered-questions returns the right set regardless of which
-# name the caller sends.
-_QUESTION_TYPE_ALIASES: dict[str, tuple[str, ...]] = {
-    "reading_fib": ("reading_fib", "reading_drag_and_drop"),
-    "reading_drag_and_drop": ("reading_fib", "reading_drag_and_drop"),
-}
+# Question-type aliases — historical drift between submit-side and
+# list-side strings. Centralised in services/question_list_helper.py so
+# the /user/answered-questions endpoint (this file) and the per-type
+# /list endpoints share a single source of truth. Don't redefine the
+# map here.
+from services.question_list_helper import QUESTION_TYPE_ALIASES as _QUESTION_TYPE_ALIASES
 
 
 @router.get("/answered-questions")
