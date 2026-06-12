@@ -35,16 +35,27 @@ from typing import Iterable, List, Optional
 _USER_SKIP_SCORERS = {"form-gate-floor"}
 
 
-# Warning codes / messages that are user-fault or designed-in scoring
-# decisions, not system failures. Anything not in this list is treated
-# as a real failure.
+# Warning codes / messages that should NOT trigger the "couldn't be scored"
+# banner. Two flavours mixed in here:
+#   (a) user-fault — bad input the rubric correctly rejected.
+#   (b) designed-in successful fallbacks — the primary scoring pathway was
+#       unavailable but a deterministic backup completed scoring normally.
+#       The scores in result_json are real and final.
+# Anything NOT in this set is treated as a real system failure.
 _USER_FAULT_WARNINGS = {
+    # (a) user-fault / rubric-gated:
     "Empty response.",
     "content_off_topic",
     "essay_paragraph_count_cap",
     "sst_paragraph_count_cap",
-    # Claude fallback path succeeded — scoring completed normally
-    "gpt4o_unavailable_used_claude",
+    # (b) successful fallbacks — all three share the same shape: a primary
+    # backbone (gpt-4o / Azure GoP / canonical stimulus transcript) was
+    # unavailable, a backup ran cleanly. Flagging these as "couldn't be
+    # scored" gave Anish a misleading banner on 2026-06-12 (sectional 5630
+    # — 12 of 32 rows tripped it despite all 32 scoring normally).
+    "gpt4o_unavailable_used_claude",         # Claude scored the response
+    "pronunciation_fallback_azure",          # Azure exhausted → cross-penalty path
+    "stimulus_whisper_fallback_used",        # Whisper transcribed the stimulus
 }
 
 
