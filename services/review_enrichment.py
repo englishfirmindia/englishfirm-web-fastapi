@@ -177,3 +177,46 @@ def enrich_answer_for_review(q, attempt_answer) -> dict:
         "correct":          _extract_correct(q) if q else {},
         "audio_url":        _maybe_presigned_audio(q) if q else None,
     }
+
+
+def compute_time_taken_seconds(attempt, answers_ordered) -> dict:
+    """Derive per-question "time spent" from submitted_at deltas.
+
+    Q1 = submitted_at[0] - attempt.started_at
+    Qn = submitted_at[n] - submitted_at[n-1]
+
+    No per-Q stopwatch is persisted today, so this is the cheapest fallback
+    that works retroactively for every historical attempt. Returns a dict
+    keyed by AttemptAnswer.id → int seconds (clamped to [0, 7200] to drop
+    pause-the-tab outliers). Answers missing submitted_at map to None.
+
+    Caller is responsible for ordering `answers_ordered` by submitted_at
+    (which all the get_*_sectional_results functions already do).
+    """
+    out: dict = {}
+    prev = getattr(attempt, "started_at", None)
+    for a in answers_ordered:
+        ts = getattr(a, "submitted_at", None)
+        if ts is None or prev is None:
+            out[a.id] = None
+            if ts is not None:
+                prev = ts
+            continue
+        try:
+            delta = (ts - prev).total_seconds()
+        except Exception:
+            out[a.id] = None
+            prev = ts
+            continue
+        if delta < 0:
+            delta = 0
+        # Cap absurd outliers (paused tab, browser-suspended session). Two
+        # hours is well beyond any single PTE question's natural ceiling
+        # (WE is the longest at 20 min total). Beyond this, render the cell
+        # as `—` rather than misleading the user with a 14h figure.
+        if delta > 7200:
+            out[a.id] = None
+        else:
+            out[a.id] = int(delta)
+        prev = ts
+    return out

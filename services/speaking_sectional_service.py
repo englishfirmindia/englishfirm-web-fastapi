@@ -597,6 +597,9 @@ def get_speaking_sectional_results(session_id: str, user_id: int, db: Session) -
         )
         qmap = {q.question_id: q for q in q_rows}
 
+    from services.review_enrichment import compute_time_taken_seconds
+    time_map = compute_time_taken_seconds(attempt, answers)
+
     questions = []
     for a in answers:
         q = qmap.get(a.question_id)
@@ -642,6 +645,7 @@ def get_speaking_sectional_results(session_id: str, user_id: int, db: Session) -
             "audio_url":       recording_url,
             "content_json":    content_json,
             "correct":         correct,
+            "time_taken_seconds": time_map.get(a.id),
         })
 
     # ── Cross-section: listening contribution from each speaking question ──

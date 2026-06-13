@@ -620,7 +620,7 @@ def finish_listening_sectional(
 
 
 def get_listening_sectional_results(session_id: str, user_id: int, db: Session) -> dict:
-    from services.review_enrichment import enrich_answer_for_review
+    from services.review_enrichment import enrich_answer_for_review, compute_time_taken_seconds
     from sqlalchemy.orm import joinedload
 
     attempt = db.query(PracticeAttempt).filter_by(
@@ -649,6 +649,9 @@ def get_listening_sectional_results(session_id: str, user_id: int, db: Session) 
         )
         qmap = {q.question_id: q for q in q_rows}
     questions = [enrich_answer_for_review(qmap.get(a.question_id), a) for a in answers]
+    time_map = compute_time_taken_seconds(attempt, answers)
+    for q_dict, a in zip(questions, answers):
+        q_dict["time_taken_seconds"] = time_map.get(a.id)
 
     return {
         "attempt_id":         attempt.id,

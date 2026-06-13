@@ -825,6 +825,9 @@ def get_mock_review(session_id: str, user_id: int, db: Session) -> dict:
         .all()
     }
 
+    from services.review_enrichment import compute_time_taken_seconds
+    time_map = compute_time_taken_seconds(attempt, answers)
+
     # Map task_type → section for grouping
     task_section = {t["task_type"]: t["section"] for t in MOCK_STRUCTURE}
 
@@ -955,6 +958,7 @@ def get_mock_review(session_id: str, user_id: int, db: Session) -> dict:
             "audio_url":           context.get("recording_url"),
             "content_json":        full_content_json,
             "correct":             correct_payload,
+            "time_taken_seconds":  time_map.get(a.id),
         })
 
     return {"found": True, "items": items}
