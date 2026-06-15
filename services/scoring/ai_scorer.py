@@ -390,7 +390,11 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
     from services.spelling_checker import check_spelling, format_spelling_reasoning
 
     scoring_warnings: list = []
-    scorer_label = "gpt-4o-split(content+grammar+vocab)+hybrid(spell)"
+    # SWT primary scorer: gpt-4o for content + vocab, Claude Sonnet 4.6 for
+    # grammar (shipped 2026-06-15 after a 25-attempt benchmark showed Sonnet
+    # rejects ~18% of gpt-4o's false-positive grammar flags). WE + SST keep
+    # the all-gpt-4o pipeline until they get their own benchmark.
+    scorer_label = "gpt-4o(content+vocab)+sonnet(grammar)+hybrid(spell)"
 
     def _run_gpt4o():
         try:
@@ -438,10 +442,13 @@ def _score_swt_with_claude(text: str, prompt: str) -> ScoringResult:
         # Surface mistake_quotes under the legacy key the highlight builder reads.
         gr_quotes = list(grammar_sub.get("mistake_quotes") or [])
         grammar_sub["grammar_mistake_quotes"] = gr_quotes
-        # Tag scorer on each sub-score for trainer audit.
-        scorer_tag = "gpt-4o" if scorer_label.startswith("gpt-4o") else "claude-haiku-4-5"
-        grammar_sub["grammar_scorer"] = scorer_tag
-        vocabulary_sub["vocab_scorer"] = scorer_tag
+        # Tag scorer on each sub-score for trainer audit. SWT grammar is now
+        # routed through Sonnet (see scorer_label above); vocab still gpt-4o.
+        is_gpt4o_path = scorer_label.startswith("gpt-4o")
+        vocab_tag = "gpt-4o" if is_gpt4o_path else "claude-haiku-4-5"
+        grammar_tag = "claude-sonnet-4-6" if is_gpt4o_path else "claude-haiku-4-5"
+        grammar_sub["grammar_scorer"] = grammar_tag
+        vocabulary_sub["vocab_scorer"] = vocab_tag
 
         # ── Validator: gpt-4o sometimes returns grammar<2 with mistakes=[]
         # despite the prompt's mandatory-itemisation rule. Re-run grammar via

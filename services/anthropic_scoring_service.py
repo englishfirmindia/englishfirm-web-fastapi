@@ -32,6 +32,11 @@ log = get_logger(__name__)
 
 _client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _MODEL = "claude-haiku-4-5"
+# Sonnet is used for SWT grammar only — benchmarked against 25 live attempts
+# and shown to overturn ~18% of gpt-4o's false-positive grammar flags (e.g.
+# proposing "say they will invests" for a plural subject). WE and SST grammar
+# stay on the existing pipeline until they have their own benchmark.
+_SONNET_MODEL = "claude-sonnet-4-6"
 
 _SWT_SYSTEM_PROMPT = """You are scoring a PTE Academic Summarize Written Text response.
 
@@ -244,15 +249,21 @@ Return JSON only, exactly this shape:
 
 
 def _swt_call_one(system_prompt: str, passage: str, user_text: str,
-                  max_tokens: int, log_tag: str) -> Optional[dict]:
+                  max_tokens: int, log_tag: str,
+                  model: str = _MODEL) -> Optional[dict]:
     """Single Claude call for one SWT sub-score. Returns parsed dict on
     success, None on failure after 3 retries. Never raises.
+
+    `model` defaults to `_MODEL` (Haiku) for backward compatibility. Pass
+    `_SONNET_MODEL` to route a specific sub-call through Sonnet — used by
+    `score_swt_grammar_with_sonnet` to swap the primary SWT grammar
+    pipeline off gpt-4o.
     """
     last_exc: Exception = RuntimeError(f"{log_tag}: no attempts made")
     for attempt in range(1, 4):
         try:
             response = _client.messages.create(
-                model=_MODEL,
+                model=model,
                 temperature=0,
                 max_tokens=max_tokens,
                 system=[
@@ -503,6 +514,50 @@ def score_swt_grammar_only(passage: str, user_text: str) -> dict:
         "score": _clamp(gr.get("score"), 0, 2),
         "reasoning": _reasoning(gr.get("reasoning")),
         "mistakes": _parse_mistakes(gr),
+    }
+
+
+def score_swt_grammar_with_sonnet(passage: str, user_text: str) -> Optional[dict]:
+    """Primary SWT grammar scorer — Claude Sonnet 4.6 with the same grammar
+    prompt the Haiku validator uses.
+
+    Replaces the grammar sub-call inside `score_swt_subscores_with_gpt4o`'s
+    parallel pool. Returns a dict in the SAME shape as the gpt-4o grammar
+    parser expects (so the calling site doesn't need to know which model
+    produced the result):
+
+        {"grammar": {"score": float, "reasoning": str|None,
+                     "mistakes": [{"quote", "correction", "reason"}, ...],
+                     "mistake_quotes": [str, ...]}}
+
+    Returns None when all 3 retries fail — caller falls through to the
+    existing gpt-4o-fail handling (grammar_score=0, then Haiku fallback,
+    then heuristic).
+    """
+    if not user_text or not user_text.strip():
+        return {
+            "grammar": {
+                "score": 0.0,
+                "reasoning": None,
+                "mistakes": [],
+                "mistake_quotes": [],
+            }
+        }
+    parsed = _swt_call_one(
+        _SWT_GRAMMAR_PROMPT, passage or "", user_text, 500,
+        "GRAMMAR-SONNET", model=_SONNET_MODEL,
+    )
+    if parsed is None:
+        return None
+    gr = parsed.get("grammar") or {}
+    mistakes = _parse_mistakes(gr)
+    return {
+        "grammar": {
+            "score": _clamp(gr.get("score"), 0, 2),
+            "reasoning": _reasoning(gr.get("reasoning")),
+            "mistakes": mistakes,
+            "mistake_quotes": [m["quote"] for m in mistakes],
+        }
     }
 
 

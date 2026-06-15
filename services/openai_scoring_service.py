@@ -484,15 +484,22 @@ def score_swt_subscores_with_gpt4o(passage: str, user_text: str) -> dict:
     # Import prompts from anthropic_scoring_service to keep them defined in
     # ONE place (avoids drift if the rubric is iterated).
     from services.anthropic_scoring_service import (
-        _SWT_CONTENT_V3_PROMPT, _SWT_GRAMMAR_PROMPT, _SWT_VOCAB_V31_PROMPT
+        _SWT_CONTENT_V3_PROMPT, _SWT_VOCAB_V31_PROMPT,
+        score_swt_grammar_with_sonnet,
     )
 
+    # SWT grammar is routed through Claude Sonnet 4.6 (benchmarked 2026-06-15
+    # against 25 live attempts — overturns ~18% of gpt-4o's false-positive
+    # grammar flags like "say they will invests" for plural subjects).
+    # Content + vocab keep using gpt-4o. WE + SST grammar are unchanged.
+    # Sonnet failure falls through to the existing fallback ladder
+    # (Claude split → heuristic) via the caller in ai_scorer.py.
     t0 = time.monotonic()
     with _ThreadPoolExecutor(max_workers=3) as pool:
         f_content = pool.submit(_gpt4o_call_one, _SWT_CONTENT_V3_PROMPT,
                                 passage, user_text, 800, "CONTENT")
-        f_grammar = pool.submit(_gpt4o_call_one, _SWT_GRAMMAR_PROMPT,
-                                passage, user_text, 400, "GRAMMAR")
+        f_grammar = pool.submit(score_swt_grammar_with_sonnet,
+                                passage, user_text)
         f_vocab   = pool.submit(_gpt4o_call_one, _SWT_VOCAB_V31_PROMPT,
                                 passage, user_text, 400, "VOCAB")
         content_parsed = f_content.result()
