@@ -54,6 +54,12 @@ async def _startup_migrations():
     from db.database import engine
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS title TEXT"))
+        # Acquisition attribution flag — populated by the frontend signup
+        # path when a ?gclid=... was seen on first landing.
+        conn.execute(text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS from_google_ads "
+            "BOOLEAN NOT NULL DEFAULT false"
+        ))
         conn.commit()
     # Start the pending-score reaper. Marks orphan scoring_status='pending'
     # rows as 'failed' after 5 min so the frontend can leave the "scoring

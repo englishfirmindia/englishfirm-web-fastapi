@@ -38,6 +38,16 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Acquisition attribution — set to True only when the user's first
+    # landing URL carried a `?gclid=...` parameter (i.e. they clicked a
+    # Google Ads link to reach the app). All other signups (organic,
+    # direct, social, OAuth without prior gclid touch) stay False.
+    # First-touch only — the frontend writes this once on first capture
+    # and never overwrites.
+    from_google_ads = Column(
+        Boolean, nullable=False, server_default="false", default=False,
+    )
+
     conversations = relationship(
         "Conversation",
         back_populates="user",

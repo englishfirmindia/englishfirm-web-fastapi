@@ -34,10 +34,17 @@ class SignupRequest(BaseModel):
     phone: Optional[str] = None
     score_requirement: Optional[int] = None
     exam_date: Optional[str] = None
+    # True when the frontend captured a ?gclid=... on first landing. False
+    # for organic / direct / social / unknown. Frontend is authoritative.
+    from_google_ads: bool = False
 
 
 class GoogleAuthRequest(BaseModel):
     id_token: str
+    # Same semantics as SignupRequest.from_google_ads. Only respected when
+    # this Google OAuth call creates a NEW user; returning users keep their
+    # existing flag (first-touch wins, even across login methods).
+    from_google_ads: bool = False
 
 
 class AppleAuthRequest(BaseModel):
@@ -181,6 +188,7 @@ def signup(request: Request, req: SignupRequest, background_tasks: BackgroundTas
         phone=req.phone,
         score_requirement=req.score_requirement,
         exam_date=parsed_exam_date,
+        from_google_ads=req.from_google_ads,
     )
     db.add(user)
     db.commit()
@@ -296,18 +304,27 @@ def google_auth(
         raise HTTPException(status_code=401, detail="Google email not verified")
 
     user = db.query(User).filter(User.email == email).first()
+    is_new_user = False
     if not user:
         name = token_info.get("name") or token_info.get("given_name") or email.split("@")[0]
         user = User(
             username=name,
             email=email,
             hashed_password=_pwd.hash(token_info.get("sub", "")),
+            from_google_ads=req.from_google_ads,
         )
         db.add(user)
         db.commit()
         db.refresh(user)
+        is_new_user = True
 
-    return _issue_pair_and_set_cookies(db, user.id, request, response)
+    # _issue_pair_and_set_cookies returns the token dict; we merge in
+    # is_new_user so the frontend can fire the Google Ads signup
+    # conversion only on first-time signup, not returning logins.
+    payload = _issue_pair_and_set_cookies(db, user.id, request, response)
+    if isinstance(payload, dict):
+        payload["is_new_user"] = is_new_user
+    return payload
 
 
 @router.post("/apple")
