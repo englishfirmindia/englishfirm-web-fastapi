@@ -262,12 +262,18 @@ def signup(request: Request, req: SignupRequest, background_tasks: BackgroundTas
     db.add(user)
     db.commit()
     db.refresh(user)
-    background_tasks.add_task(
-        send_signup_webhook,
-        student_name=req.username,
-        phone_number=req.phone,
-        exam_date=parsed_exam_date,
-    )
+    # Zapier contact-sharing webhook fires ONLY for signups originating from
+    # a Google Ads click (from_google_ads=True on first landing, captured by
+    # the frontend via ?gclid=). Organic / direct / social / unknown signups
+    # are intentionally skipped — the Zap is wired to a CRM workflow that's
+    # only relevant for paid-acquisition leads. Decision date 2026-06-16.
+    if req.from_google_ads:
+        background_tasks.add_task(
+            send_signup_webhook,
+            student_name=req.username,
+            phone_number=req.phone,
+            exam_date=parsed_exam_date,
+        )
     # Server-side GeoIP enrichment after response is sent — signup latency
     # unaffected. Best-effort; columns stay NULL if ipapi.co is slow/down.
     background_tasks.add_task(_enrich_user_geoip, user.id, _client_ip(request))
