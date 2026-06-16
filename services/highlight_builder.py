@@ -49,11 +49,17 @@ def build_highlights(
 
     # ── Heuristic positions ──────────────────────────────────────────────
     for start, end in (heuristic_findings.get("extra_space_ranges") or []):
+        # Capture a word-window around the offending whitespace so the
+        # CorrectionsPanel pill has something to render — `word: None`
+        # silently filters the entry out in _corrections_by_category, and
+        # painting a highlight over pure whitespace is visually mute.
+        # Quote: e.g. "Games   say" ; Correction: "Games say".
+        quote, correction = _spacing_snippet(body, start, end)
         highlights.append({
             "start": start, "end": end,
             "type": "grammar", "category": "spacing", "kind": "extra_space",
             "hint": "Spacing: extra space → single space",
-            "word": None, "correction": " ", "reason": "double space",
+            "word": quote, "correction": correction, "reason": "double space",
         })
     if heuristic_findings.get("missing_initial_cap"):
         pos = heuristic_findings.get("initial_cap_position")
@@ -163,6 +169,52 @@ def build_highlights(
 
     highlights.sort(key=lambda h: (h["start"], h["end"]))
     return _dedupe_overlaps(highlights)
+
+
+def _spacing_snippet(body: str, start: int, end: int) -> Tuple[Optional[str], Optional[str]]:
+    """Build a (quote, correction) pair around an extra-space range so the
+    spacing correction has something to render in the CorrectionsPanel.
+
+    Strategy: snap the range outward to the nearest word boundaries on each
+    side. Quote includes the bad whitespace ("Games   say"); correction
+    collapses internal runs of whitespace to a single space ("Games say").
+
+    Falls back to (None, None) when the range can't be widened (e.g. body
+    edges, malformed input) — the highlight then keeps the legacy
+    word: None shape and is silently dropped by _corrections_by_category,
+    same as before the fix. Never raises.
+    """
+    if not body:
+        return None, None
+    n = len(body)
+    if start < 0 or end > n or start >= end:
+        return None, None
+
+    # Snap left: walk back past the whitespace, then back through the
+    # preceding word until another whitespace (or BOS) is hit.
+    left = start
+    while left > 0 and body[left - 1].isspace():
+        left -= 1
+    while left > 0 and not body[left - 1].isspace():
+        left -= 1
+
+    # Snap right: walk forward past the whitespace, then forward through
+    # the following word until another whitespace (or EOS) is hit.
+    right = end
+    while right < n and body[right].isspace():
+        right += 1
+    while right < n and not body[right].isspace():
+        right += 1
+
+    quote = body[left:right]
+    if not quote or quote.isspace():
+        return None, None
+    correction = re.sub(r"\s+", " ", quote).strip()
+    if quote == correction:
+        # Range somehow didn't have extra whitespace after the snap (e.g.
+        # the bad range was at a word edge). Bail and keep legacy shape.
+        return None, None
+    return quote, correction
 
 
 def _normalize_mistake(item):
