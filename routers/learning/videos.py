@@ -5,8 +5,11 @@ on the `learning_videos` table (videos/*.mp4, thumbnails/*.jpg). Run-time
 generates short-lived presigned GETs so the bucket stays private.
 """
 import logging
+import os
 from typing import Optional
 
+import boto3
+from botocore.config import Config
 from fastapi import APIRouter, Depends, HTTPException, Path
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -14,7 +17,6 @@ from sqlalchemy.orm import Session
 from core.dependencies import get_current_user
 from db.database import get_db
 from db.models import User
-from services.s3_service import generate_presigned_url
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/learning", tags=["Learning - Videos"])
@@ -26,9 +28,36 @@ _REGION = "ap-southeast-2"
 _VIDEO_TTL_SEC = 3 * 60 * 60  # 3 hours
 _THUMB_TTL_SEC = 24 * 60 * 60  # 24 hours
 
+# Dedicated S3 client pinned to the regional endpoint. The shared
+# services.s3_service._S3_CLIENT uses boto's default endpoint resolution
+# which generates URLs against the global s3.amazonaws.com host — fine
+# for legacy buckets but new buckets (post-2024) issue a 307 redirect
+# from the global host to the regional one, and the redirect target
+# hostname doesn't match what the signature was computed for → 403.
+# Pinning endpoint_url here forces virtual-hosted regional URLs that
+# resolve directly with no redirect.
+_S3 = boto3.client(
+    "s3",
+    region_name=_REGION,
+    endpoint_url=f"https://s3.{_REGION}.amazonaws.com",
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    config=Config(
+        signature_version="s3v4",
+        s3={"addressing_style": "virtual"},
+        connect_timeout=5,
+        read_timeout=5,
+        retries={"max_attempts": 1, "mode": "standard"},
+    ),
+)
 
-def _s3_url(key: str) -> str:
-    return f"https://{_BUCKET}.s3.{_REGION}.amazonaws.com/{key}"
+
+def _presign(key: str, ttl: int) -> str:
+    return _S3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": _BUCKET, "Key": key},
+        ExpiresIn=ttl,
+    )
 
 
 @router.get("/videos")
@@ -56,9 +85,7 @@ def list_videos(
         thumb_url: Optional[str] = None
         if r["thumbnail_s3_key"]:
             try:
-                thumb_url = generate_presigned_url(
-                    _s3_url(r["thumbnail_s3_key"]), expires_in=_THUMB_TTL_SEC,
-                )
+                thumb_url = _presign(r["thumbnail_s3_key"], _THUMB_TTL_SEC)
             except Exception as e:
                 log.warning("[LEARNING] thumb presign failed id=%s: %s", r["id"], e)
         items.append({
@@ -101,7 +128,7 @@ def get_video_url(
         }
 
     try:
-        url = generate_presigned_url(_s3_url(row["s3_key"]), expires_in=_VIDEO_TTL_SEC)
+        url = _presign(row["s3_key"], _VIDEO_TTL_SEC)
     except Exception as e:
         log.error("[LEARNING] video presign failed id=%s: %s", video_id, e)
         raise HTTPException(status_code=503, detail="Video URL temporarily unavailable")
