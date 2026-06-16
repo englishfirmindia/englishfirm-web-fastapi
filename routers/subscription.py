@@ -51,6 +51,9 @@ def get_my_subscription(
         "features":             sorted(ctx.features), # stable order for client diffing
         "mock_review_days":     ctx.mock_review_days,
         "source":               ctx.source,
+        # Perpetual Learn-resources flag — survives this subscription's
+        # period_end. Set by trainer-granted VIP w/ lifetime-Learn checkbox.
+        "unlimited_learn_access": ctx.unlimited_learn_access,
     }
 
 

@@ -345,6 +345,10 @@ _GRANT_DURATION_DAYS = {
 class GrantVipRequest(BaseModel):
     student_email: str
     tier: str   # bronze | silver | gold
+    # When true, also set the user's lifetime `unlimited_learn_access`
+    # flag so Learning Resources stay accessible after the VIP period
+    # ends. Default false → behaviour unchanged from prior callers.
+    unlimited_learn: bool = False
 
     @field_validator("student_email")
     @classmethod
@@ -433,6 +437,12 @@ def grant_vip(
     user.plan_end_at = period_end.date()
     user.updated_at = now
 
+    # Lifetime Learn add-on (optional). One-way write — never resets when
+    # the VIP period ends. If a future grant turns the box off, we leave
+    # the flag alone (additive only); flip via admin tooling if needed.
+    if body.unlimited_learn:
+        user.unlimited_learn_access = True
+
     db.add(SubscriptionEvent(
         id=uuid.uuid4(),
         user_id=user.id,
@@ -446,6 +456,7 @@ def grant_vip(
             "paid_tier": body.tier,
             "duration_days": duration_days,
             "prior_source": prior_source,
+            "unlimited_learn": body.unlimited_learn,
         },
     ))
     db.commit()
@@ -461,6 +472,7 @@ def grant_vip(
         "prior_plan_id": prior_plan_id,
         "prior_source": prior_source,
         "warning_stripe_active": prior_source == "stripe",
+        "unlimited_learn": bool(user.unlimited_learn_access),
     }
 
 

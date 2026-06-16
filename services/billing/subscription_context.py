@@ -71,6 +71,12 @@ class SubscriptionContext:
     features: frozenset = field(default_factory=frozenset)
     mock_review_days: Optional[int] = None  # None = lifetime
     source: Optional[str] = None            # stripe | manual_admin | None (free)
+    # Lifetime Learning Resources access — mirrored from
+    # `users.unlimited_learn_access`. Independent of any active sub; set
+    # by trainer-granted VIP when the lifetime-Learn checkbox is on.
+    # Used by /subscription/me so the Flutter client knows to keep
+    # Learn unlocked even when the live subscription has lapsed.
+    unlimited_learn_access: bool = False
 
     # ---- Convenience accessors used by EnforceLimit / client code ----
 
@@ -95,6 +101,7 @@ def _build_from_plan(
     user_id: int,
     plan: SubscriptionPlan,
     subscription: Optional[UserSubscription],
+    unlimited_learn_access: bool = False,
 ) -> SubscriptionContext:
     """Fold a SubscriptionPlan row + (optional) UserSubscription row into
     the immutable context dataclass. Centralises limits_json parsing so
@@ -120,6 +127,7 @@ def _build_from_plan(
             features=features,
             mock_review_days=mock_review_days,
             source=None,
+            unlimited_learn_access=unlimited_learn_access,
         )
 
     return SubscriptionContext(
@@ -137,7 +145,21 @@ def _build_from_plan(
         features=features,
         mock_review_days=mock_review_days,
         source=subscription.source,
+        unlimited_learn_access=unlimited_learn_access,
     )
+
+
+def _fetch_unlimited_learn_flag(db: Session, user_id: int) -> bool:
+    """Cheap PK lookup for `users.unlimited_learn_access`. Returns False on
+    any failure / missing row so the gate keeps its safe default."""
+    try:
+        from db.models import User as _User
+        row = db.execute(
+            select(_User.unlimited_learn_access).where(_User.id == user_id)
+        ).first()
+        return bool(row[0]) if row else False
+    except Exception:
+        return False
 
 
 def resolve_subscription_context(db: Session, user_id: int) -> SubscriptionContext:
@@ -147,6 +169,7 @@ def resolve_subscription_context(db: Session, user_id: int) -> SubscriptionConte
     in the worst case (paid user); one query for Free. Both hit
     primary-key / unique-index lookups.
     """
+    unlimited_learn = _fetch_unlimited_learn_flag(db, user_id)
     # Hot query 1: find a live subscription row. Partial unique index
     # `ix_user_subscriptions_one_live` makes this a single index hit.
     live = (
@@ -175,7 +198,10 @@ def resolve_subscription_context(db: Session, user_id: int) -> SubscriptionConte
                 live.plan_id, live.id, user_id,
             )
         else:
-            return _build_from_plan(user_id=user_id, plan=plan, subscription=live)
+            return _build_from_plan(
+                user_id=user_id, plan=plan, subscription=live,
+                unlimited_learn_access=unlimited_learn,
+            )
 
     # Free path — synthesize from the free plan row. If even that row is
     # missing (seed not run), return a hard-coded zero-permission stub so
@@ -201,6 +227,10 @@ def resolve_subscription_context(db: Session, user_id: int) -> SubscriptionConte
             features=frozenset(),
             mock_review_days=7,
             source=None,
+            unlimited_learn_access=unlimited_learn,
         )
 
-    return _build_from_plan(user_id=user_id, plan=free_plan, subscription=None)
+    return _build_from_plan(
+        user_id=user_id, plan=free_plan, subscription=None,
+        unlimited_learn_access=unlimited_learn,
+    )

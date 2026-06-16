@@ -25,6 +25,14 @@ class User(Base):
     plan_started_at = Column(Date, nullable=True)
     plan_end_at = Column(Date, nullable=True)
 
+    # Lifetime Learn-resources access. Set TRUE by a trainer-granted VIP
+    # whose "unlimited Learn" checkbox was on. Survives the VIP period_end
+    # — see services/billing/require_paid_plan.py:RequireLearnAccess for
+    # the gate logic. Never auto-reset; admin/trainer flips it back off.
+    unlimited_learn_access = Column(
+        Boolean, nullable=False, server_default="false", default=False,
+    )
+
     status = Column(String, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
