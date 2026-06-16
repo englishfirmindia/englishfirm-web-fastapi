@@ -48,6 +48,21 @@ class User(Base):
         Boolean, nullable=False, server_default="false", default=False,
     )
 
+    # Acquisition detail (all nullable — populated at signup time by the
+    # frontend AdsAttribution helper + backend GeoIP lookup, both
+    # fault-tolerant so a failure here cannot block signup itself).
+    # Captured for every signup, not just Google Ads cohort, so we can
+    # cohort by device / city / etc. across the whole user base.
+    device_class    = Column(String(10),  nullable=True)  # mobile|tablet|desktop
+    signup_country  = Column(String(2),   nullable=True)  # ISO-3166 country code
+    signup_region   = Column(String(64),  nullable=True)  # full region/state name
+    signup_city     = Column(String(128), nullable=True)
+    # Google Ads only — keyword that was bid on (`utm_term`, from
+    # Google's `{keyword}` ValueTrack), and the actual search the user
+    # typed (`q`, from `{query}`). Both null for organic users.
+    ads_keyword     = Column(Text, nullable=True)
+    ads_query       = Column(Text, nullable=True)
+
     conversations = relationship(
         "Conversation",
         back_populates="user",

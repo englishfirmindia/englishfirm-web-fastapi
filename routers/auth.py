@@ -11,8 +11,9 @@ import requests as _requests
 
 import core.config as config
 from core.dependencies import get_current_user
+from core.logging_config import get_logger
 from core.rate_limit import limiter
-from db.database import get_db
+from db.database import SessionLocal, get_db
 from db.models import User
 from services.email import send_password_reset
 from services.zapier import send_signup_webhook
@@ -25,6 +26,63 @@ from services.auth_token_service import (
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_log = get_logger(__name__)
+
+
+def _client_ip(request: Request) -> Optional[str]:
+    """Best-effort original client IP. ALB sets X-Forwarded-For; the first
+    entry is the user, subsequent entries are intermediaries. Falls back
+    to the direct connection IP for local/test environments."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip() or None
+    return request.client.host if request.client else None
+
+
+def _enrich_user_geoip(user_id: int, ip: Optional[str]) -> None:
+    """Background task: look up country/region/city for `ip` via ipapi.co
+    and UPDATE users for `user_id`. Never raises — failure leaves the
+    columns NULL so signup is unaffected.
+
+    Runs OUTSIDE the request lifecycle (BackgroundTasks) so signup
+    latency is unaffected. 1.5s timeout; signups average <10/min in
+    production so the free tier (1k/day) is never strained.
+    """
+    if not ip:
+        return
+    # Skip private / loopback ranges where geo lookup is meaningless.
+    if ip.startswith(("10.", "127.", "192.168.", "172.16.", "172.17.",
+                       "172.18.", "172.19.", "172.20.", "172.21.",
+                       "172.22.", "172.23.", "172.24.", "172.25.",
+                       "172.26.", "172.27.", "172.28.", "172.29.",
+                       "172.30.", "172.31.", "::1", "fc", "fd")):
+        return
+    try:
+        resp = _requests.get(f"https://ipapi.co/{ip}/json/", timeout=1.5)
+        if resp.status_code != 200:
+            _log.info("[GEOIP] non-200 status=%s ip=%s", resp.status_code, ip)
+            return
+        data = resp.json() or {}
+        country = (data.get("country_code") or "").strip()[:2] or None
+        region  = (data.get("region") or "").strip()[:64] or None
+        city    = (data.get("city") or "").strip()[:128] or None
+        if not any((country, region, city)):
+            return
+        db = SessionLocal()
+        try:
+            u = db.query(User).filter(User.id == user_id).first()
+            if u is None:
+                return
+            u.signup_country = country
+            u.signup_region  = region
+            u.signup_city    = city
+            db.commit()
+        finally:
+            db.close()
+    except Exception as exc:
+        # Network blip / ipapi outage / bad JSON — best-effort only.
+        _log.info("[GEOIP] failed user=%s ip=%s err=%s",
+                  user_id, ip, type(exc).__name__)
 
 
 class SignupRequest(BaseModel):
@@ -37,6 +95,11 @@ class SignupRequest(BaseModel):
     # True when the frontend captured a ?gclid=... on first landing. False
     # for organic / direct / social / unknown. Frontend is authoritative.
     from_google_ads: bool = False
+    # Acquisition detail — all optional, captured by the frontend before
+    # submit. Backend persists as-is; missing fields stay NULL in the DB.
+    device_class: Optional[str] = None   # mobile | tablet | desktop
+    ads_keyword:  Optional[str] = None   # `utm_term` (Google's {keyword})
+    ads_query:    Optional[str] = None   # `q` (Google's {query})
 
 
 class GoogleAuthRequest(BaseModel):
@@ -45,6 +108,9 @@ class GoogleAuthRequest(BaseModel):
     # this Google OAuth call creates a NEW user; returning users keep their
     # existing flag (first-touch wins, even across login methods).
     from_google_ads: bool = False
+    device_class: Optional[str] = None
+    ads_keyword:  Optional[str] = None
+    ads_query:    Optional[str] = None
 
 
 class AppleAuthRequest(BaseModel):
@@ -189,15 +255,22 @@ def signup(request: Request, req: SignupRequest, background_tasks: BackgroundTas
         score_requirement=req.score_requirement,
         exam_date=parsed_exam_date,
         from_google_ads=req.from_google_ads,
+        device_class=req.device_class,
+        ads_keyword=req.ads_keyword,
+        ads_query=req.ads_query,
     )
     db.add(user)
     db.commit()
+    db.refresh(user)
     background_tasks.add_task(
         send_signup_webhook,
         student_name=req.username,
         phone_number=req.phone,
         exam_date=parsed_exam_date,
     )
+    # Server-side GeoIP enrichment after response is sent — signup latency
+    # unaffected. Best-effort; columns stay NULL if ipapi.co is slow/down.
+    background_tasks.add_task(_enrich_user_geoip, user.id, _client_ip(request))
     return {"message": "Account created"}
 
 
@@ -280,6 +353,7 @@ def google_auth(
     request: Request,
     response: Response,
     req: GoogleAuthRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     """Verify a Google id_token and return a JWT. Creates the user if they don't exist."""
@@ -312,11 +386,17 @@ def google_auth(
             email=email,
             hashed_password=_pwd.hash(token_info.get("sub", "")),
             from_google_ads=req.from_google_ads,
+            device_class=req.device_class,
+            ads_keyword=req.ads_keyword,
+            ads_query=req.ads_query,
         )
         db.add(user)
         db.commit()
         db.refresh(user)
         is_new_user = True
+        # GeoIP enrichment for new OAuth signups only; returning users
+        # already have their location from the original signup.
+        background_tasks.add_task(_enrich_user_geoip, user.id, _client_ip(request))
 
     # _issue_pair_and_set_cookies returns the token dict; we merge in
     # is_new_user so the frontend can fire the Google Ads signup

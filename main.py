@@ -60,6 +60,28 @@ async def _startup_migrations():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS from_google_ads "
             "BOOLEAN NOT NULL DEFAULT false"
         ))
+        # Acquisition-detail columns. All nullable — populated by the
+        # signup endpoint (frontend device hint + backend GeoIP); failure
+        # to populate leaves them NULL without blocking signup.
+        for col_ddl in (
+            "device_class    VARCHAR(10)",
+            "signup_country  VARCHAR(2)",
+            "signup_region   VARCHAR(64)",
+            "signup_city     VARCHAR(128)",
+            "ads_keyword     TEXT",
+            "ads_query       TEXT",
+        ):
+            col_name = col_ddl.split()[0]
+            conn.execute(text(
+                f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_ddl}"
+            ))
+            # Index on country for cohort queries — cheap, nullable so no
+            # backfill cost.
+            if col_name == "signup_country":
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS "
+                    "ix_users_signup_country ON users (signup_country)"
+                ))
         conn.commit()
     # Start the pending-score reaper. Marks orphan scoring_status='pending'
     # rows as 'failed' after 5 min so the frontend can leave the "scoring
