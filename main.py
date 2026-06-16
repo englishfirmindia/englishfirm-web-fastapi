@@ -23,7 +23,6 @@ from routers.subscription import router as subscription_router
 from routers.billing import router as billing_router
 from routers.save_exit import router as save_exit_router
 from routers.telemetry import router as telemetry_router
-from routers.learning.videos import router as learning_videos_router
 
 app = FastAPI(title="EnglishFirm Web API", version="1.0.0")
 
@@ -111,7 +110,6 @@ app.include_router(subscription_router, prefix="/api/v1")
 app.include_router(billing_router, prefix="/api/v1")
 app.include_router(save_exit_router, prefix="/api/v1")
 app.include_router(telemetry_router, prefix="/api/v1")
-app.include_router(learning_videos_router, prefix="/api/v1")
 
 import core.config as _config
 
