@@ -211,7 +211,14 @@ _CATALOGUE = {
                     {"title": "PTE Practice Schedule",         "key": "quick-ref/PTE Practice Schedule.xlsx",         "type": "xlsx"},
                     {"title": "Online Class Timetable",        "key": "quick-ref/Online Class Timetable.docx",        "type": "docx"},
                     {"title": "Face to Face Class Timetable",  "key": "quick-ref/Face to Face Class Timetable.docx",  "type": "docx"},
-                    {"title": "Class Videos Links",            "key": "quick-ref/Class Videos Links.docx",            "type": "docx"},
+                    # Skip both viewers — gview chokes on this file's empty-
+                    # paragraph spacers and renders page 1 mostly blank
+                    # (diagnosed 2026-06-17). Office Online would render it
+                    # fine, but it's a hyperlink-index file by nature — the
+                    # user wants the YouTube URLs, not a preview. Frontend
+                    # honours this flag by skipping the modal and triggering
+                    # a direct download instead.
+                    {"title": "Class Videos Links",            "key": "quick-ref/Class Videos Links.docx",            "type": "docx", "download_only": True},
                 ],
             },
         },
@@ -235,11 +242,18 @@ def get_resources() -> list:
                     url = _url(item["key"])
                 except Exception:
                     url = ""
-                items.append({
+                out_item = {
                     "title": item["title"],
                     "url":   url,
                     "type":  item["type"],
-                })
+                }
+                # Per-item override: when True, the frontend skips the
+                # preview modal and triggers a direct download. Emitted
+                # conditionally so the response stays compact for the 56
+                # other items that don't set it.
+                if item.get("download_only"):
+                    out_item["download_only"] = True
+                items.append(out_item)
             subsections.append({
                 "id":    sub_id,
                 "label": sub["label"],
