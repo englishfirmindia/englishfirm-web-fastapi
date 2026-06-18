@@ -629,15 +629,21 @@ def score_we_subscores_with_gpt4o(prompt: str, user_text: str) -> dict:
     # Import prompts from anthropic_scoring_service to keep them defined in
     # ONE place (avoids drift if the rubric is iterated).
     from services.anthropic_scoring_service import (
-        _WE_CONTENT_PROMPT, _WE_DSC_PROMPT, _WE_GRAMMAR_PROMPT,
-        _WE_GLR_PROMPT, _WE_VOCAB_PROMPT
+        _WE_CONTENT_PROMPT, _WE_DSC_PROMPT,
+        _WE_GLR_PROMPT, _WE_VOCAB_PROMPT,
+        score_we_grammar_with_sonnet,
     )
 
+    # WE grammar routes through Claude Sonnet 4.6 (2026-06-18 follow-up to
+    # the 2026-06-15 SWT migration). Same rationale: 25-attempt benchmark
+    # showed Sonnet rejects ~18% of gpt-4o's false-positive grammar flags.
+    # Content / DSC / GLR / vocab keep using gpt-4o. Sonnet failure falls
+    # through to ai_scorer's existing fallback ladder (Claude split → heur).
     t0 = time.monotonic()
     with _ThreadPoolExecutor(max_workers=5) as pool:
         f_c = pool.submit(_gpt4o_we_call_one, _WE_CONTENT_PROMPT, prompt, user_text, 600, "CONTENT")
         f_d = pool.submit(_gpt4o_we_call_one, _WE_DSC_PROMPT,     prompt, user_text, 400, "DSC")
-        f_g = pool.submit(_gpt4o_we_call_one, _WE_GRAMMAR_PROMPT, prompt, user_text, 500, "GRAMMAR")
+        f_g = pool.submit(score_we_grammar_with_sonnet,           prompt, user_text)
         f_l = pool.submit(_gpt4o_we_call_one, _WE_GLR_PROMPT,     prompt, user_text, 400, "GLR")
         f_v = pool.submit(_gpt4o_we_call_one, _WE_VOCAB_PROMPT,   prompt, user_text, 400, "VOCAB")
         content_parsed = f_c.result()
@@ -853,13 +859,17 @@ def score_sst_subscores_with_gpt4o(reference: str, user_text: str) -> dict:
 
     # Import prompts from anthropic_scoring_service to keep them in ONE place.
     from services.anthropic_scoring_service import (
-        _SST_CONTENT_PROMPT, _SST_GRAMMAR_PROMPT, _SST_VOCAB_PROMPT
+        _SST_CONTENT_PROMPT, _SST_VOCAB_PROMPT,
+        score_sst_grammar_with_sonnet,
     )
 
+    # SST grammar routes through Claude Sonnet 4.6 (2026-06-18 follow-up to
+    # the 2026-06-15 SWT migration). Content + vocab keep using gpt-4o.
+    # Sonnet failure falls through to ai_scorer's existing ladder.
     t0 = time.monotonic()
     with _ThreadPoolExecutor(max_workers=3) as pool:
         f_c = pool.submit(_gpt4o_sst_call_one, _SST_CONTENT_PROMPT, reference, user_text, 400, "CONTENT")
-        f_g = pool.submit(_gpt4o_sst_call_one, _SST_GRAMMAR_PROMPT, reference, user_text, 400, "GRAMMAR")
+        f_g = pool.submit(score_sst_grammar_with_sonnet,            reference, user_text)
         f_v = pool.submit(_gpt4o_sst_call_one, _SST_VOCAB_PROMPT,   reference, user_text, 400, "VOCAB")
         content_parsed = f_c.result()
         grammar_parsed = f_g.result()

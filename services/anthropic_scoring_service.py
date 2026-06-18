@@ -579,6 +579,84 @@ def score_we_grammar_only(prompt: str, user_text: str) -> dict:
     }
 
 
+def score_we_grammar_with_sonnet(prompt: str, user_text: str) -> Optional[dict]:
+    """Primary WE grammar scorer — Claude Sonnet 4.6 with the same grammar
+    prompt the Haiku validator uses.
+
+    Replaces the grammar sub-call inside `score_we_subscores_with_gpt4o`'s
+    parallel pool. Output shape matches what the gpt-4o parser produces so
+    the caller is model-agnostic:
+
+        {"grammar": {"score": float, "reasoning": str|None,
+                     "mistakes": [{"quote", "correction", "reason"}, ...],
+                     "mistake_quotes": [str, ...]}}
+
+    Returns None when all 3 retries fail — caller falls through to the
+    existing gpt-4o-fail handling (grammar_score=0, then Haiku fallback,
+    then heuristic). Mirror of score_swt_grammar_with_sonnet.
+    """
+    if not user_text or not user_text.strip():
+        return {
+            "grammar": {
+                "score": 0.0,
+                "reasoning": None,
+                "mistakes": [],
+                "mistake_quotes": [],
+            }
+        }
+    parsed = _we_call_one(
+        _WE_GRAMMAR_PROMPT, prompt or "", user_text, 500,
+        "GRAMMAR-SONNET", model=_SONNET_MODEL,
+    )
+    if parsed is None:
+        return None
+    gr = parsed.get("grammar") or {}
+    mistakes = _parse_mistakes(gr)
+    return {
+        "grammar": {
+            "score": _clamp(gr.get("score"), 0, 2),
+            "reasoning": _reasoning(gr.get("reasoning")),
+            "mistakes": mistakes,
+            "mistake_quotes": [m["quote"] for m in mistakes],
+        }
+    }
+
+
+def score_sst_grammar_with_sonnet(reference: str, user_text: str) -> Optional[dict]:
+    """Primary SST grammar scorer — Claude Sonnet 4.6 with the same grammar
+    prompt the Haiku validator uses. Mirror of the SWT + WE wrappers.
+
+    Replaces the grammar sub-call inside `score_sst_subscores_with_gpt4o`'s
+    parallel pool. Returns None on 3-retry failure so the caller can
+    fall back to gpt-4o → Haiku → heuristic, same ladder as today.
+    """
+    if not user_text or not user_text.strip():
+        return {
+            "grammar": {
+                "score": 0.0,
+                "reasoning": None,
+                "mistakes": [],
+                "mistake_quotes": [],
+            }
+        }
+    parsed = _sst_call_one(
+        _SST_GRAMMAR_PROMPT, reference or "", user_text, 500,
+        "GRAMMAR-SONNET", model=_SONNET_MODEL,
+    )
+    if parsed is None:
+        return None
+    gr = parsed.get("grammar") or {}
+    mistakes = _parse_mistakes(gr)
+    return {
+        "grammar": {
+            "score": _clamp(gr.get("score"), 0, 2),
+            "reasoning": _reasoning(gr.get("reasoning")),
+            "mistakes": mistakes,
+            "mistake_quotes": [m["quote"] for m in mistakes],
+        }
+    }
+
+
 def _parse_paraphrasing_block(parsed: dict) -> dict:
     """Pull the paraphrasing-audit block off the Claude response. Mirrors
     services.openai_scoring_service._parse_paraphrasing."""
@@ -980,15 +1058,21 @@ Return JSON only, exactly this shape:
 
 
 def _we_call_one(system_prompt: str, prompt: str, user_text: str,
-                 max_tokens: int, log_tag: str) -> Optional[dict]:
+                 max_tokens: int, log_tag: str,
+                 model: str = _MODEL) -> Optional[dict]:
     """Single Claude call for one WE sub-score. Returns parsed dict on
     success, None on failure after 3 retries. Never raises.
+
+    `model` defaults to `_MODEL` (Haiku) for backward compatibility. Pass
+    `_SONNET_MODEL` to route a specific sub-call through Sonnet — used by
+    `score_we_grammar_with_sonnet` to swap the primary WE grammar
+    pipeline off gpt-4o (2026-06-18 follow-up to the SWT migration).
     """
     last_exc: Exception = RuntimeError(f"{log_tag}: no attempts made")
     for attempt in range(1, 4):
         try:
             response = _client.messages.create(
-                model=_MODEL,
+                model=model,
                 temperature=0,
                 max_tokens=max_tokens,
                 system=[
@@ -1517,14 +1601,21 @@ Return JSON only, exactly this shape:
 
 
 def _sst_call_one(system_prompt: str, reference: str, user_text: str,
-                  max_tokens: int, log_tag: str) -> Optional[dict]:
+                  max_tokens: int, log_tag: str,
+                  model: str = _MODEL) -> Optional[dict]:
     """Single Claude call for one SST sub-score. Returns parsed dict or None.
-    Never raises."""
+    Never raises.
+
+    `model` defaults to `_MODEL` (Haiku) for backward compatibility. Pass
+    `_SONNET_MODEL` to route a specific sub-call through Sonnet — used by
+    `score_sst_grammar_with_sonnet` to swap the primary SST grammar
+    pipeline off gpt-4o (2026-06-18 follow-up to the SWT migration).
+    """
     last_exc: Exception = RuntimeError(f"{log_tag}: no attempts made")
     for attempt in range(1, 4):
         try:
             response = _client.messages.create(
-                model=_MODEL,
+                model=model,
                 temperature=0,
                 max_tokens=max_tokens,
                 system=[

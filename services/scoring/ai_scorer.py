@@ -756,7 +756,11 @@ def _score_we_with_claude(text: str, prompt: str) -> ScoringResult:
     from services.spelling_checker import check_spelling, format_spelling_reasoning
 
     scoring_warnings: list = []
-    scorer_label = "gpt-4o-split(content+dsc+grammar+glr+vocab)+hybrid(spell)"
+    # WE grammar routes through Claude Sonnet 4.6 as of 2026-06-18 (mirror
+    # of the 2026-06-15 SWT migration). Content / DSC / GLR / vocab still
+    # gpt-4o. Label kept consistent with the SWT label shape so reviewers
+    # / dashboards can grep for the per-stage scorer.
+    scorer_label = "gpt-4o(content+dsc+glr+vocab)+sonnet(grammar)+hybrid(spell)"
 
     def _run_gpt4o_we():
         try:
@@ -1232,7 +1236,9 @@ def _score_sst_with_claude(text: str, prompt: str) -> ScoringResult:
     from services.spelling_checker import check_spelling, format_spelling_reasoning
 
     scoring_warnings: list = []
-    scorer_label = "gpt-4o-split(content+grammar+vocab)+hybrid(spell)"
+    # SST grammar routes through Claude Sonnet 4.6 as of 2026-06-18 (mirror
+    # of the 2026-06-15 SWT migration). Content + vocab still gpt-4o.
+    scorer_label = "gpt-4o(content+vocab)+sonnet(grammar)+hybrid(spell)"
 
     def _run_gpt4o_sst():
         try:
