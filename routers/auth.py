@@ -5,7 +5,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from fastapi.security import OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from jose import jwt, jwk as jose_jwk, JWTError
-from pydantic import BaseModel
+import re
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 import requests as _requests
 
@@ -85,11 +86,41 @@ def _enrich_user_geoip(user_id: int, ip: Optional[str]) -> None:
                   user_id, ip, type(exc).__name__)
 
 
+_AU_PHONE_BODY_RE = re.compile(r"^(0\d{9}|[45]\d{8})$")
+
+
+def _normalise_au_phone(raw: str) -> str:
+    """Accept any of:
+        +61412345678   (E.164 — typical iOS Safari autofill)
+        0412345678     (10-digit AU local)
+        412345678 / 512345678 (9-digit, no leading 0)
+    …after stripping spaces, dashes, brackets. Returns canonical E.164
+    `+61<9 digits>` form for storage. Raises ValueError when the digits
+    don't match the AU mobile pattern the frontend enforces.
+    """
+    if raw is None:
+        raise ValueError("Phone number required")
+    cleaned = re.sub(r"[\s\-\(\)]", "", raw.strip())
+    if cleaned.startswith("+61"):
+        cleaned = cleaned[3:]
+    # Now we expect either 10-digit local (leading 0) or 9-digit national.
+    if not _AU_PHONE_BODY_RE.match(cleaned):
+        raise ValueError(
+            "Enter 10 digits starting with 0, or 9 digits starting with 4 or 5"
+        )
+    if cleaned.startswith("0"):
+        cleaned = cleaned[1:]
+    return f"+61{cleaned}"
+
+
 class SignupRequest(BaseModel):
     username: str
     email: str
     password: str
-    phone: Optional[str] = None
+    # Mandatory as of 2026-06-19. Frontend signup screen pins a +61 prefix
+    # on the input and validates the same regex; this validator is the
+    # authoritative second line so direct API calls can't bypass.
+    phone: str
     score_requirement: Optional[int] = None
     exam_date: Optional[str] = None
     # True when the frontend captured a ?gclid=... on first landing. False
@@ -100,6 +131,11 @@ class SignupRequest(BaseModel):
     device_class: Optional[str] = None   # mobile | tablet | desktop
     ads_keyword:  Optional[str] = None   # `utm_term` (Google's {keyword})
     ads_query:    Optional[str] = None   # `q` (Google's {query})
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_phone(cls, v: str) -> str:
+        return _normalise_au_phone(v)
 
 
 class GoogleAuthRequest(BaseModel):

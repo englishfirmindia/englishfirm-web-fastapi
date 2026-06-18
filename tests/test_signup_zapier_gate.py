@@ -124,7 +124,10 @@ def test_from_google_ads_true_fires_zapier(client_and_calls):
     assert len(zap_calls) == 1, "Zap should fire exactly once for a Google-Ads signup"
     payload = zap_calls[0]
     assert payload["student_name"] == "tester"
-    assert payload["phone_number"] == "0400000000"
+    # Phone is normalised to E.164 by the SignupRequest validator
+    # (2026-06-19): all of 0400000000 / 400000000 / +61400000000 collapse
+    # to the same canonical +61... form before persistence.
+    assert payload["phone_number"] == "+61400000000"
     # exam_date wasn't provided — must be None, not crashing the call
     assert payload["exam_date"] is None
 
