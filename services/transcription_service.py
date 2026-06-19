@@ -48,6 +48,73 @@ def _filename_from_url(url: str) -> str:
     return name
 
 
+def _sniff_audio_extension(audio_bytes: bytes) -> Optional[str]:
+    """Inspect the first ~12 bytes of `audio_bytes` and return the audio
+    container extension Whisper should be told about — e.g. `'m4a'`,
+    `'mp3'`, `'ogg'`, `'wav'`, `'flac'`, `'webm'`. Returns None when the
+    bytes don't match a known signature (caller falls back to whatever
+    extension the URL implies).
+
+    Whisper's SDK routes by filename extension, not content type, so a
+    file uploaded to S3 with the wrong extension (e.g. M4A bytes saved
+    as `*.mp3` — found in apeuni's SST library, q=20679 "Female
+    Reindeer") hard-fails with 400 "Invalid file format". Sniffing the
+    magic bytes lets us route around source-data mislabels without a
+    rename across the entire bucket.
+    """
+    if not audio_bytes or len(audio_bytes) < 12:
+        return None
+    head = audio_bytes[:12]
+    # M4A / MP4 audio — `ftyp` box at offset 4-7, brand at 8-11
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in (b"M4A ", b"M4B ", b"isom", b"mp42", b"mp41", b"dash"):
+            return "m4a"
+        return "mp4"
+    # MP3 with ID3v2 tag
+    if head[:3] == b"ID3":
+        return "mp3"
+    # MP3 raw — frame sync 11-bit `1111 1111 111x` (0xFFE…)
+    if head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return "mp3"
+    # WAV — `RIFF....WAVE`
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "wav"
+    # FLAC
+    if head[:4] == b"fLaC":
+        return "flac"
+    # OGG (Vorbis/Opus container)
+    if head[:4] == b"OggS":
+        return "ogg"
+    # WebM (EBML)
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return "webm"
+    return None
+
+
+def _coerce_filename(audio_bytes: bytes, filename: str) -> str:
+    """Return a filename whose extension matches the sniffed container
+    format. Leaves the basename intact; only swaps the extension when
+    the bytes disagree with what `filename` claims. Falls through to
+    the input filename when sniff returns None — preserves legacy
+    behaviour for any container we don't recognise.
+    """
+    sniffed = _sniff_audio_extension(audio_bytes)
+    if not sniffed:
+        return filename
+    base, _, current_ext = filename.rpartition(".")
+    if not base:
+        base = filename  # no extension in source
+    if current_ext.lower() == sniffed:
+        return filename
+    corrected = f"{base}.{sniffed}"
+    log.warning(
+        "[Whisper] filename mismatch — '%s' bytes look like %s; routing as '%s'",
+        filename, sniffed, corrected,
+    )
+    return corrected
+
+
 def _download_audio(url: str) -> Optional[bytes]:
     """Download the SST audio file via a presigned URL.
 
@@ -81,12 +148,20 @@ def _download_audio(url: str) -> Optional[bytes]:
 
 
 def _transcribe(audio_bytes: bytes, filename: str) -> str:
-    """Call Whisper, returning text. Empty string on failure."""
+    """Call Whisper, returning text. Empty string on failure.
+
+    Filename is content-sniffed before submission: when the magic bytes
+    disagree with the input extension (e.g. apeuni's `sst_0666.mp3`
+    which is actually M4A) we override `buf.name` to the right
+    extension. Without this, Whisper hard-fails 400 "Invalid file
+    format" and the SST scorer falls through to heuristic-only.
+    """
+    routed_filename = _coerce_filename(audio_bytes, filename)
     last_exc: Exception = RuntimeError("_transcribe: no attempts made")
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             buf = io.BytesIO(audio_bytes)
-            buf.name = filename
+            buf.name = routed_filename
             resp = _openai.audio.transcriptions.create(
                 model="whisper-1",
                 file=buf,
