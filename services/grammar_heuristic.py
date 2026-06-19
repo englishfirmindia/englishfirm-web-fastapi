@@ -17,13 +17,20 @@ Rules (each starts the heuristic at max=2 and deducts):
   5. Space-before-comma:  −1 per occurrence of `word + space(s) + ,`
                           (e.g. "ages , peoples"). PTE rule: no space before
                           a comma.
-  6. Missing-space-after-comma: −1 per occurrence of `,` followed by a
-                          non-space, non-terminal character (e.g.
-                          "emotion,support"). Same rule applies for other
-                          basic punctuation marks (. ; : ! ?) — but only
-                          flagged when the following character is a letter,
-                          not a digit / quote / closing-bracket, to avoid
-                          tripping on numerals like "1,000" or "1.5".
+  6. Missing-space-after-punctuation: −1 per occurrence of `,` `;` `:`
+                          `.` `!` or `?` followed by a non-space letter
+                          (e.g. "emotion,support", "First.Second",
+                          "Hello!World", "Really?Yes"). Only flagged when
+                          the following character is a letter (a-z/A-Z),
+                          not a digit / quote / closing-bracket, so
+                          numerals like "1,000" and "1.5" don't trip.
+
+                          Rare false-positives on Latin abbreviations
+                          ("e.g.that") and titles ("Dr.Smith") are
+                          considered acceptable: PTE essays rarely use
+                          either, and the heuristic only LOWERS the LLM
+                          grammar score by at most 1 (via the
+                          min(heuristic, llm) cap) — never raises it.
 
 Final heuristic score = max(0, 2 − total_deductions).
 Caller takes min(heuristic_score, llm_grammar_score) and reports both for
@@ -142,11 +149,14 @@ def grammar_heuristic(text: str) -> Tuple[int, dict]:
         suggested = m.group(1) + m.group(3)
         findings["space_before_comma"].append((s - 1, e, original, suggested))
 
-    # Rule 6 — missing space after comma / semicolon / colon. Catches
-    # "emotion,support". Avoid false positives on numerals ("1,000",
-    # "1.5"), closing quotes (",\""), and end-of-string punctuation.
-    # Only flag when followed by a letter (a-z / A-Z).
-    for m in re.finditer(r"([,;:])([A-Za-z])", body):
+    # Rule 6 — missing space after , ; : . ! ?. Catches "emotion,support",
+    # "First.Second", "Hello!World", "Really?Yes". Avoid false positives on
+    # numerals ("1,000", "1.5"), closing quotes (",\""), and end-of-string
+    # punctuation — only flag when followed by a letter (a-z / A-Z).
+    # Latin abbreviations ("e.g.X") and titles ("Dr.Smith") are knowingly
+    # not exempted; both should have a space in formal writing anyway, and
+    # the min(heuristic, llm) cap bounds the false-positive impact at -1.
+    for m in re.finditer(r"([,;:.!?])([A-Za-z])", body):
         s = m.start(1)
         e = m.end(2)
         original = body[s:e]
