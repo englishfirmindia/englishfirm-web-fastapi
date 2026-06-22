@@ -728,6 +728,7 @@ def finish_mock_test(db: Session, session_id: str, user_id: int) -> dict:
         failed_question_numbers=failed_qnums,
     )
 
+    prior_tb = dict(attempt.task_breakdown or {})
     task_breakdown = {
         "overall_score":      overall,
         "speaking":           speaking,
@@ -738,6 +739,10 @@ def finish_mock_test(db: Session, session_id: str, user_id: int) -> dict:
         "current_part":       3,
         "part_timer_remaining": {},
     }
+    # Preserve test_number written by start_mock_test — the /mock/attempted-tests
+    # filter requires it. Dropping it hid 100% of completed mock attempts.
+    if isinstance(prior_tb.get("test_number"), int):
+        task_breakdown["test_number"] = prior_tb["test_number"]
 
     attempt.total_score         = overall
     attempt.questions_answered  = len(answers)
