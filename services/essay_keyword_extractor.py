@@ -26,6 +26,8 @@ _ESSAY_STOPWORDS = {
     "than", "then", "if", "while", "whilst", "when", "where", "why",
     "what", "which", "who", "whom", "whose", "how", "however",
     "because", "since", "though", "although",
+    "such",                                    # connector "such as"
+    "like",                                    # preposition "like X" / verb hedge
     # Pronouns / auxiliaries
     "you", "your", "yours", "we", "our", "ours", "they", "their", "theirs",
     "them", "it", "its", "he", "his", "him", "she", "her", "hers", "i",
@@ -41,17 +43,32 @@ _ESSAY_STOPWORDS = {
     "give", "gives", "provide", "provides", "suggest", "suggests",
     "outline", "state", "states", "identify", "identifies", "list",
     "agree", "disagree", "support", "oppose",
+    "think", "thinks", "thinking", "thought",  # opinion hedge "do you think"
+    "believe", "believes", "believed",         # opinion hedge "do you believe"
+    "prefer", "prefers", "preferred",          # preference question
+    "make", "makes", "made", "making",         # generic action verb
+    "take", "takes", "took", "taken", "taking",# generic action verb
     # Generic essay-scaffold nouns
     "view", "views", "opinion", "opinions", "side", "sides", "essay",
     "topic", "topics", "point", "points", "reason", "reasons",
     "question", "questions", "answer", "answers",
+    "extent",                                  # "to what extent"
+    "statement", "statements",                 # "agree with this statement"
+    "advantage", "advantages",                 # "advantages and disadvantages"
+    "disadvantage", "disadvantages",           # paired with above
+    "idea", "ideas",                           # "your idea about"
     # Generics
     "many", "much", "few", "more", "less", "most", "least", "very",
     "people", "person", "persons", "thing", "things", "way", "ways",
     "kind", "kinds", "type", "types", "example", "examples",
+    "better", "best", "worse", "worst",        # comparison scaffold
+    "important", "importance",                 # "is X important" question framing
     # Demonstratives / hedges
     "now", "today", "yesterday", "tomorrow", "here", "there",
     "yes", "no", "not", "only", "also", "too", "just", "even",
+    "nowadays",                                # time-frame opener
+    "please",                                  # "please give opinion"
+    "rather",                                  # "would rather"
     # "Other(s)" common in essay prompts
     "other", "others",
 }
