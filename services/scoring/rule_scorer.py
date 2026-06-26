@@ -398,13 +398,32 @@ class HIWScorer(ScoringStrategy):
     def is_async(self) -> bool:
         return False
 
+    # Strip leading/trailing non-letter chars while keeping internal apostrophes
+    # and hyphens. Frontend tokenizer leaves punctuation attached to words
+    # (e.g. the user taps "dating." at sentence-end and the click is recorded
+    # as "dating." with a period). Without this stripping the scorer compares
+    # "dating." against {"dating", "sound"} and gets zero matches even when
+    # the click was semantically correct — reported 2026-06-26 (qid 15636).
+    # Applied to BOTH the user's clicks AND the answer-key entries so a
+    # data-entry person who accidentally typed "dating." into the eval row
+    # also stops breaking real scoring.
+    _PUNCT_EDGE = re.compile(r"^[^a-z]+|[^a-z]+$")
+
+    @classmethod
+    def _normalize(cls, w) -> str:
+        if w is None:
+            return ""
+        s = str(w).lower().strip()
+        return cls._PUNCT_EDGE.sub("", s)
+
     def score(self, question_id: int, session_id: str, answer: dict) -> ScoringResult:
         evaluation_json: dict = answer.get('evaluation_json', {})
 
         incorrect_words = [
-            (w['wrong'] if isinstance(w, dict) else w).lower().strip()
+            self._normalize(w['wrong'] if isinstance(w, dict) else w)
             for w in evaluation_json.get('correctAnswers', {}).get('incorrectWords', [])
         ]
+        incorrect_words = [w for w in incorrect_words if w]  # drop entries that normalized to empty
         scoring_rules = evaluation_json.get('scoringRules', {})
         correct_click = scoring_rules.get('correctClick', 1)
         incorrect_click = scoring_rules.get('incorrectClick', -1)
@@ -414,9 +433,11 @@ class HIWScorer(ScoringStrategy):
         # highlighted_words = word strings (str list)
         highlighted_words_raw = answer.get('highlighted_words', answer.get('highlighted_indices', []))
 
-        # If the caller passed indices, treat them as words (legacy compat).
-        # Normalize to lowercase strings.
-        highlighted_norm = [str(w).lower().strip() for w in highlighted_words_raw]
+        # Normalize: lowercase + strip whitespace + strip edge punctuation.
+        # Edge punctuation only — internal apostrophes ("don't") and hyphens
+        # ("old-fashioned") survive so they can still match the answer key.
+        highlighted_norm = [self._normalize(w) for w in highlighted_words_raw]
+        highlighted_norm = [w for w in highlighted_norm if w]
 
         correct_set = set(incorrect_words)
 

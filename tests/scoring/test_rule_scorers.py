@@ -453,3 +453,125 @@ class TestHIWScorer:
         )
         result = self.scorer.score(1, 'sess', answer)
         assert result.pte_score == 90
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Punctuation-edge regression (qid 15636 / aid 9108 — 2026-06-26)
+    # ─────────────────────────────────────────────────────────────────────
+    # The frontend tokenizer leaves trailing punctuation attached to the
+    # word the user taps (e.g. "dating." at sentence end). Before the fix
+    # the scorer compared "dating." against {"dating", "sound"} and counted
+    # zero matches — student saw 0/2 despite clicking the right words.
+    # Fix: lowercase + .strip() + strip non-letter chars from BOTH ENDS of
+    # every token, on both the user's clicks and the answer-key entries.
+    # Internal apostrophes and hyphens MUST survive.
+
+    def test_trailing_period_on_user_click_normalized(self):
+        """Verbatim repro of qid 15636 aid 9108: dating. sound. with answer
+        key dating sound — should now score 2/2 PTE 90 not 0/2 PTE 10."""
+        answer = self._answer(
+            highlighted=['dating.', 'sound.'],
+            incorrect_words=['dating', 'sound'],
+        )
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.raw_score == 1.0
+        assert result.pte_score == 90
+
+    def test_trailing_comma_on_user_click_normalized(self):
+        """qid 14552 used commas: 'circumstances,' should match 'circumstances'."""
+        answer = self._answer(
+            highlighted=['circumstances,', 'rehabilitation.'],
+            incorrect_words=['circumstances', 'rehabilitation'],
+        )
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.raw_score == 1.0
+        assert result.pte_score == 90
+
+    def test_mixed_punctuation_on_clicks(self):
+        """Period, comma, semicolon, exclamation — all stripped from edges."""
+        answer = self._answer(
+            highlighted=['alpha.', 'beta,', 'gamma;', 'delta!', 'epsilon?'],
+            incorrect_words=['alpha', 'beta', 'gamma', 'delta', 'epsilon'],
+        )
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.raw_score == 1.0
+        assert result.pte_score == 90
+
+    def test_leading_punctuation_also_stripped(self):
+        """Parens / quotes / em-dash at start of token also get stripped."""
+        answer = self._answer(
+            highlighted=['(alpha)', '"beta"', '"gamma"'],
+            incorrect_words=['alpha', 'beta', 'gamma'],
+        )
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.raw_score == 1.0
+
+    def test_punctuation_in_answer_key_also_normalized(self):
+        """Data-entry mistake — eval row has 'dating.' (with period). User
+        clicks 'dating' (no period). Should still match."""
+        answer = self._answer(
+            highlighted=['dating'],
+            incorrect_words=['dating.'],
+        )
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.raw_score == 1.0
+
+    def test_internal_apostrophe_preserved(self):
+        """Contractions must keep their apostrophe — answer key 'don't' must
+        match user click 'don't', NOT collapse to 'dont' or 'don't.'"""
+        answer = self._answer(
+            highlighted=["don't."],
+            incorrect_words=["don't"],
+        )
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.raw_score == 1.0
+
+    def test_internal_hyphen_preserved(self):
+        """Hyphenated words must keep their hyphen."""
+        answer = self._answer(
+            highlighted=['old-fashioned,'],
+            incorrect_words=['old-fashioned'],
+        )
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.raw_score == 1.0
+
+    def test_dict_shape_answer_key_with_punctuation(self):
+        """The newer dict-shape answer key {wrong, correct} normalizes the
+        'wrong' field with the same rule."""
+        answer = {
+            'evaluation_json': {
+                'correctAnswers': {
+                    'incorrectWords': [
+                        {'index': 1, 'wrong': 'dating.', 'correct': 'mating'},
+                        {'index': 2, 'wrong': 'sound.',  'correct': 'smell'},
+                    ],
+                },
+                'scoringRules': {'correctClick': 1, 'incorrectClick': -1},
+            },
+            'highlighted_words': ['dating.', 'sound.'],
+        }
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.raw_score == 1.0
+
+    def test_punctuation_only_token_drops_silently(self):
+        """If the user somehow submits a token that's PURELY punctuation
+        (e.g. clicked on a stray period), it normalizes to empty and is
+        dropped rather than counted as incorrect_click. No phantom -1."""
+        answer = self._answer(
+            highlighted=['dating.', '.', ','],
+            incorrect_words=['dating', 'sound'],
+        )
+        result = self.scorer.score(1, 'sess', answer)
+        # Only 'dating' matched, 'sound' missed, no spurious incorrect clicks
+        assert result.raw_score == 0.5
+        # incorrect_clicks should be empty (the '.' and ',' got dropped, not counted as -1)
+
+    def test_no_punctuation_unchanged_behaviour(self):
+        """Plain words with no punctuation continue to work exactly as before
+        — guards against accidentally over-stripping."""
+        answer = self._answer(
+            highlighted=['wrong', 'bad'],
+            incorrect_words=['wrong', 'bad'],
+        )
+        result = self.scorer.score(1, 'sess', answer)
+        assert result.pte_score == 90
+        assert result.raw_score == 1.0
