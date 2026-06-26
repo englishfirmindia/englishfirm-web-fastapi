@@ -28,6 +28,11 @@ _ESSAY_STOPWORDS = {
     "because", "since", "though", "although",
     "such",                                    # connector "such as"
     "like",                                    # preposition "like X" / verb hedge
+    "instead",                                 # "instead of" comparison framing
+    "whether",                                 # question framing
+    "before", "after", "until", "throughout",  # temporal connectors
+    "despite",                                 # discourse connector
+    "anything",                                # indefinite pronoun
     # Pronouns / auxiliaries
     "you", "your", "yours", "we", "our", "ours", "they", "their", "theirs",
     "them", "it", "its", "he", "his", "him", "she", "her", "hers", "i",
@@ -37,6 +42,7 @@ _ESSAY_STOPWORDS = {
     "do", "does", "did", "doing",
     "will", "would", "shall", "should", "can", "could", "may", "might",
     "must",
+    "cannot",                                  # modal negation
     # Common essay-prompt instruction verbs (rarely echoed verbatim)
     "discuss", "examine", "explain", "describe", "argue", "argues",
     "consider", "analyse", "analyze", "evaluate", "compare", "contrast",
@@ -48,6 +54,7 @@ _ESSAY_STOPWORDS = {
     "prefer", "prefers", "preferred",          # preference question
     "make", "makes", "made", "making",         # generic action verb
     "take", "takes", "took", "taken", "taking",# generic action verb
+    "using",                                   # generic gerund
     # Generic essay-scaffold nouns
     "view", "views", "opinion", "opinions", "side", "sides", "essay",
     "topic", "topics", "point", "points", "reason", "reasons",
@@ -63,12 +70,16 @@ _ESSAY_STOPWORDS = {
     "kind", "kinds", "type", "types", "example", "examples",
     "better", "best", "worse", "worst",        # comparison scaffold
     "important", "importance",                 # "is X important" question framing
+    "certain",                                 # qualifier
+    "general",                                 # framing word
     # Demonstratives / hedges
     "now", "today", "yesterday", "tomorrow", "here", "there",
     "yes", "no", "not", "only", "also", "too", "just", "even",
     "nowadays",                                # time-frame opener
     "please",                                  # "please give opinion"
     "rather",                                  # "would rather"
+    "well",                                    # evaluative adverb
+    "always", "often", "sometimes",            # frequency adverbs
     # "Other(s)" common in essay prompts
     "other", "others",
 }
