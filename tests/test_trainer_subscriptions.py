@@ -57,6 +57,12 @@ def db_engine():
     Avoids `Base.metadata.create_all` because unrelated tables in the
     project use Postgres-only types (INET on auth_refresh_tokens etc.)
     that SQLite can't render.
+
+    Also strips the partial unique index on user_subscriptions
+    (status IN ('active','past_due')) — SQLite doesn't honor the
+    postgresql_where dialect clause and degrades it to a full unique
+    on user_id, which blocks the legitimate (cancelled, active) pair
+    that exists in prod after grant_vip supersedes a Stripe row.
     """
     from sqlalchemy.pool import StaticPool
     eng = create_engine(
@@ -64,14 +70,28 @@ def db_engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+
+    us_tbl = UserSubscription.__table__
+    # Temporarily detach the partial unique index so create_all skips it
+    # in this SQLite test session. Restore after teardown so we don't
+    # affect later test modules that share the same metadata.
+    detached_indexes = [
+        ix for ix in list(us_tbl.indexes)
+        if ix.name == "ix_user_subscriptions_one_live"
+    ]
+    for ix in detached_indexes:
+        us_tbl.indexes.discard(ix)
+
     needed = [
         User.__table__,
         SubscriptionPlan.__table__,
-        UserSubscription.__table__,
+        us_tbl,
     ]
     Base.metadata.create_all(eng, tables=needed)
     yield eng
     Base.metadata.drop_all(eng, tables=needed)
+    for ix in detached_indexes:
+        us_tbl.indexes.add(ix)
     eng.dispose()
 
 
@@ -280,9 +300,10 @@ def test_stripe_sync_no_secret_returns_not_configured(client, db_session, seed_p
     assert sync["reason"] == "stripe_not_configured"
 
 
-def test_stripe_sync_detects_stripe_only(client, db_session, seed_plans, monkeypatch):
-    """User paying on Stripe but no source='stripe' DB row → stripe_only entry."""
-    # User exists, but only with a manual VIP grant.
+def test_stripe_sync_true_drift_no_db_row_anywhere(client, db_session, seed_plans, monkeypatch):
+    """Real webhook gap: Stripe says paying, DB has NO source='stripe' row
+    for this user at any status. The user has only a manual VIP grant,
+    never a Stripe row — so the webhook truly missed."""
     _add_user(db_session, 1, "paying@x.com")
     _add_sub(db_session, 1, "vip", source="manual_admin", billing_period="trial")
     db_session.commit()
@@ -300,10 +321,8 @@ def test_stripe_sync_detects_stripe_only(client, db_session, seed_plans, monkeyp
         "current_period_end": 9999999999,
     }]
 
-    def fake_list(**_kw): return _FakeIter(fake_subs)
-
     fake_stripe = MagicMock()
-    fake_stripe.Subscription.list = fake_list
+    fake_stripe.Subscription.list = lambda **_kw: _FakeIter(fake_subs)
     monkeypatch.setattr(
         "services.billing.stripe_client.stripe_lib",
         lambda: fake_stripe,
@@ -312,16 +331,119 @@ def test_stripe_sync_detects_stripe_only(client, db_session, seed_plans, monkeyp
     r = client.get("/api/v1/trainer/subscriptions?check_stripe=true")
     sync = r.json()["stripe_sync"]
     assert sync["checked"] is True
-    # A Stripe payment with no source='stripe' DB row IS a sync gap, even if
-    # the user has a separate manual_admin row stacked on top. Both signals
-    # surface so the trainer can see (a) the missing webhook sync, AND
-    # (b) the deliberate manual override sitting above it.
     assert len(sync["stripe_only"]) == 1
     assert sync["stripe_only"][0]["email"] == "paying@x.com"
     overrides = sync["manual_overrides_stripe"]
     assert len(overrides) == 1
     assert overrides[0]["email"] == "paying@x.com"
-    assert overrides[0]["manual_plan_id"] == "vip"
+    # NEW: even when stripe_only also flags this, the overrides row should
+    # include the Stripe billing detail so the trainer can decide what to
+    # do (cancel on Stripe or accept the double-billing).
+    assert len(overrides[0]["stripe_subs"]) == 1
+    assert overrides[0]["stripe_subs"][0]["stripe_subscription_id"] == "sub_live_1"
+    assert overrides[0]["stripe_subs"][0]["stripe_current_period_end"] == 9999999999
+
+
+def test_stripe_sync_cancelled_by_grant_vip_is_not_drift(client, db_session, seed_plans, monkeypatch):
+    """The Sheetal/sharmanikita pattern, reproduced verbatim.
+
+    Sequence:
+      1. User subscribes bronze on Stripe → webhook creates source='stripe'
+         row with status='active'.
+      2. Trainer calls /grant-vip → that row gets flipped to 'cancelled'
+         to satisfy the one-active-sub-per-user partial unique index, and
+         a manual_admin VIP row is created on top.
+
+    Result: DB has (cancelled bronze + active VIP), Stripe still lists
+    bronze as active. This is intentional, NOT a webhook sync gap.
+    The drift detector must:
+      - NOT include the bronze sub in `stripe_only` (we have it in DB,
+        just superseded)
+      - INCLUDE the user in `manual_overrides_stripe` with the Stripe
+        billing detail attached.
+    Regression: 2026-06-29 — the original implementation only checked
+    active+past_due rows, so the cancelled-by-upgrade rows reappeared as
+    `stripe_only` drift and confused trainers ("why isn't this picking?").
+    """
+    _add_user(db_session, 1, "sheetal@x.com")
+    # Cancelled bronze row from the original webhook sync.
+    _add_sub(db_session, 1, "bronze", status="cancelled", source="stripe",
+             external_id="sub_bronze_superseded",
+             stripe_customer_id="cus_sheetal")
+    # Active VIP grant that superseded it.
+    _add_sub(db_session, 1, "vip", source="manual_admin", billing_period="trial")
+    db_session.commit()
+
+    import core.config as config
+    monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "sk_test_fake", raising=False)
+
+    class _FakeIter:
+        def __init__(self, items): self._items = items
+        def auto_paging_iter(self): return iter(self._items)
+
+    fake_stripe = MagicMock()
+    # Stripe still lists the bronze as active.
+    fake_stripe.Subscription.list = lambda **_kw: _FakeIter([{
+        "id": "sub_bronze_superseded",
+        "customer": {"id": "cus_sheetal", "email": "sheetal@x.com"},
+        "current_period_end": 9999999999,
+    }])
+    monkeypatch.setattr(
+        "services.billing.stripe_client.stripe_lib",
+        lambda: fake_stripe,
+    )
+
+    r = client.get("/api/v1/trainer/subscriptions?check_stripe=true")
+    sync = r.json()["stripe_sync"]
+    assert sync["checked"] is True
+    # NOT a webhook gap — we have the DB row (cancelled by VIP grant).
+    assert sync["stripe_only"] == [], (
+        f"sheetal's bronze was synced; cancelled-by-upgrade is not drift: {sync['stripe_only']}"
+    )
+    # IS a manual override with the still-charging Stripe detail attached.
+    assert len(sync["manual_overrides_stripe"]) == 1
+    ov = sync["manual_overrides_stripe"][0]
+    assert ov["email"] == "sheetal@x.com"
+    assert ov["manual_plan_id"] == "vip"
+    assert len(ov["stripe_subs"]) == 1
+    assert ov["stripe_subs"][0]["stripe_subscription_id"] == "sub_bronze_superseded"
+
+
+def test_stripe_sync_email_match_recognises_renamed_external_id(client, db_session, seed_plans, monkeypatch):
+    """If the DB stripe row has a different external_id than Stripe's
+    current sub (e.g., a renewed subscription got a new id), the email
+    match should still keep it out of `stripe_only`.
+
+    Catches the case where Stripe issues sub_NEW after the user upgrades
+    in-portal but our DB still tracks sub_OLD (cancelled). Email anchors
+    the relationship even when the id drifts."""
+    _add_user(db_session, 1, "renewed@x.com")
+    _add_sub(db_session, 1, "bronze", status="cancelled", source="stripe",
+             external_id="sub_OLD", stripe_customer_id="cus_r")
+    db_session.commit()
+
+    import core.config as config
+    monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "sk_test_fake", raising=False)
+
+    class _FakeIter:
+        def __init__(self, items): self._items = items
+        def auto_paging_iter(self): return iter(self._items)
+
+    fake_stripe = MagicMock()
+    fake_stripe.Subscription.list = lambda **_kw: _FakeIter([{
+        "id": "sub_NEW",
+        "customer": {"id": "cus_r", "email": "renewed@x.com"},
+        "current_period_end": 9999999999,
+    }])
+    monkeypatch.setattr(
+        "services.billing.stripe_client.stripe_lib",
+        lambda: fake_stripe,
+    )
+
+    r = client.get("/api/v1/trainer/subscriptions?check_stripe=true")
+    sync = r.json()["stripe_sync"]
+    # Email match keeps this out of stripe_only even though the id differs.
+    assert sync["stripe_only"] == []
 
 
 def test_stripe_sync_detects_db_only(client, db_session, seed_plans, monkeypatch):

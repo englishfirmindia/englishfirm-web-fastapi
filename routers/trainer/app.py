@@ -754,7 +754,9 @@ def list_subscriptions(
         if email:
             stripe_emails.add(email)
 
-    # DB rows with a stripe linkage that are currently live.
+    # DB rows with a stripe linkage that are currently live — used as the
+    # source of truth for "we've synced Stripe → DB and the user's current
+    # plan is bronze/silver/gold".
     db_stripe_live = (
         db.query(UserSubscription, User)
         .join(User, User.id == UserSubscription.user_id)
@@ -771,14 +773,37 @@ def list_subscriptions(
         (u.email or "").strip().lower() for _sub, u in db_stripe_live if u.email
     }
 
-    # ── 1. stripe_only: live on Stripe, no matching DB row ──
+    # ALL stripe rows (any status) — used to distinguish "webhook never
+    # fired" (true drift) from "webhook fired then row got cancelled by a
+    # later manual VIP grant" (intentional upgrade, not drift).
+    # This catches the trainer-grants-VIP-on-paying-customer pattern
+    # without flagging it as a sync gap.
+    db_stripe_any_rows = (
+        db.query(UserSubscription, User)
+        .join(User, User.id == UserSubscription.user_id)
+        .filter(UserSubscription.source == "stripe")
+        .all()
+    )
+    db_stripe_any_sub_ids = {
+        sub.external_id for sub, _u in db_stripe_any_rows if sub.external_id
+    }
+    db_stripe_any_emails = {
+        (u.email or "").strip().lower() for _sub, u in db_stripe_any_rows if u.email
+    }
+
+    # ── 1. stripe_only: live on Stripe, no matching DB row at ANY status ──
+    # If we have ANY DB row for this Stripe sub_id (even cancelled by a
+    # later grant_vip upgrade), the webhook did its job — the row was
+    # superseded, not missed. Only flag as drift when there's literally
+    # no DB record of this Stripe subscription.
     stripe_only = []
     for sid, meta in stripe_by_sub_id.items():
-        if sid in db_stripe_sub_ids:
+        if sid in db_stripe_any_sub_ids:
             continue
-        # Email match catches the common case where the DB doesn't yet hold
-        # the external_id (webhook missed). Also catches rename mishaps.
-        if meta["email"] and meta["email"] in db_stripe_emails:
+        # Email match catches webhook-missed cases where the external_id
+        # never made it into the DB. Match against any-status rows so a
+        # cancelled bronze (later upgraded to VIP) doesn't reappear here.
+        if meta["email"] and meta["email"] in db_stripe_any_emails:
             continue
         stripe_only.append({
             "stripe_subscription_id": sid,
@@ -802,10 +827,24 @@ def list_subscriptions(
         })
 
     # ── 3. manual_overrides_stripe: paying Stripe customer also has a live
-    # manual_admin row sitting on top (typical: bronze paid → VIP grant).
-    # Surface but don't flag as drift — this is deliberate by design.
+    # manual_admin row sitting on top (typical: bronze paid → trainer
+    # granted VIP). Surface the Stripe billing detail too — the customer
+    # is still being CHARGED on Stripe despite the manual VIP grant, so
+    # the trainer needs to see when each Stripe sub renews and decide
+    # whether to cancel it on Stripe-side to stop the double-billing.
     manual_overrides = []
     if stripe_emails:
+        # Build email → Stripe sub-detail lookup so we can attach period_end
+        # + customer_id to each override row.
+        email_to_stripe = {}
+        for sid, meta in stripe_by_sub_id.items():
+            if meta["email"]:
+                email_to_stripe.setdefault(meta["email"], []).append({
+                    "stripe_subscription_id": sid,
+                    "stripe_customer_id": meta["customer_id"],
+                    "stripe_current_period_end": meta["current_period_end"],
+                })
+
         manual_rows = (
             db.query(UserSubscription, User)
             .join(User, User.id == UserSubscription.user_id)
@@ -817,6 +856,7 @@ def list_subscriptions(
             .all()
         )
         for sub, user in manual_rows:
+            stripe_detail = email_to_stripe.get((user.email or "").strip().lower(), [])
             manual_overrides.append({
                 "user_id": user.id,
                 "email": user.email,
@@ -824,6 +864,11 @@ def list_subscriptions(
                 "manual_plan_id": sub.plan_id,
                 "manual_billing_period": sub.billing_period,
                 "manual_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
+                # NEW: surface Stripe-side billing so the trainer sees what's
+                # still being charged. List form because in theory a customer
+                # could have multiple active Stripe subs (we've not seen this
+                # in practice).
+                "stripe_subs": stripe_detail,
             })
 
     response["stripe_sync"] = {
