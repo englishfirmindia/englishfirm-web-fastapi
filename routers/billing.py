@@ -380,6 +380,14 @@ def create_checkout_session(
                     "plan_id": plan_id,
                     "billing_period": billing_period,
                 },
+                # 2026-06-29: every new sub is one-shot. Stripe still creates
+                # a Subscription object (so the webhook → user_subscriptions
+                # sync stays unchanged), but `cancel_at_period_end=True` means
+                # Stripe won't auto-renew after the first paid period. To
+                # continue, the customer must start a new checkout. This
+                # prevents the silent-recharge-after-trainer-VIP-grant
+                # pattern we observed for 5 customers in May/June 2026.
+                "cancel_at_period_end": True,
             },
             allow_promotion_codes=True,
         )

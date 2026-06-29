@@ -409,6 +409,42 @@ def grant_vip(
     )
     prior_plan_id = prior_live.plan_id if prior_live else None
     prior_source = prior_live.source if prior_live else None
+    prior_external_id = prior_live.external_id if prior_live else None
+
+    # 2026-06-29: when the prior live row is a Stripe-paid sub, also tell
+    # Stripe to stop renewing — otherwise the customer's card keeps getting
+    # charged $29/mo for bronze while they have VIP access for free, then
+    # their VIP grant expires after 30 days and they silently drop to Free
+    # while still being billed. We saw this pattern for 5 customers in
+    # May/June 2026 ($145/month of silent revenue + monthly 500-error
+    # webhook retries). Best-effort: if Stripe call fails, log a warning
+    # and continue with the local cancel — the trainer's grant intent
+    # shouldn't be blocked by a transient Stripe outage, and the screen
+    # shows the lingering Stripe sub in `manual_overrides_stripe` until
+    # someone retries.
+    stripe_cancelled = False
+    stripe_cancel_error: Optional[str] = None
+    if (
+        prior_live is not None
+        and prior_source == "stripe"
+        and prior_external_id
+    ):
+        try:
+            from services.billing.stripe_client import stripe_lib
+            stripe = stripe_lib()
+            stripe.Subscription.modify(
+                prior_external_id, cancel_at_period_end=True
+            )
+            stripe_cancelled = True
+        except Exception as exc:
+            stripe_cancel_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            import logging
+            logging.getLogger(__name__).warning(
+                "[grant_vip] Stripe cancel_at_period_end failed for "
+                "user_id=%d sub=%s: %s — proceeding with local cancel anyway",
+                user.id, prior_external_id, stripe_cancel_error,
+            )
+
     if prior_live is not None:
         prior_live.status = "cancelled"
         prior_live.cancel_at_period_end = True
@@ -458,6 +494,10 @@ def grant_vip(
             "duration_days": duration_days,
             "prior_source": prior_source,
             "unlimited_learn": body.unlimited_learn,
+            # 2026-06-29 audit trail for the Stripe-cancel-on-grant change.
+            "prior_external_id": prior_external_id,
+            "stripe_cancelled_at_period_end": stripe_cancelled,
+            "stripe_cancel_error": stripe_cancel_error,
         },
     ))
     db.commit()
@@ -472,7 +512,15 @@ def grant_vip(
         "period_end": period_end.isoformat(),
         "prior_plan_id": prior_plan_id,
         "prior_source": prior_source,
-        "warning_stripe_active": prior_source == "stripe",
+        # Old field, kept for backwards compatibility — was True whenever
+        # Stripe was likely still billing. With the Stripe-cancel patch
+        # below, that's now only true when the Stripe API call itself
+        # failed.
+        "warning_stripe_active": (
+            prior_source == "stripe" and not stripe_cancelled
+        ),
+        "stripe_cancelled_at_period_end": stripe_cancelled,
+        "stripe_cancel_error": stripe_cancel_error,
         "unlimited_learn": bool(user.unlimited_learn_access),
     }
 
