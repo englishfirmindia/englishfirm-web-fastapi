@@ -21,6 +21,7 @@ from db.database import get_db
 from db.models import (
     PracticeAttempt,
     SubscriptionEvent,
+    SubscriptionPlan,
     Trainer,
     TrainerNote,
     TrainerShare,
@@ -518,3 +519,303 @@ def list_granted_vips(
             "current_status": sub.status if sub else None,
         })
     return {"grants": rows}
+
+
+# ── Subscription summary ──────────────────────────────────────────────────────
+#
+# Trainer-facing rollup of who's on which plan. Powers the
+# /trainer/subscriptions screen (subscription_summary_screen.dart).
+#
+# Endpoint: GET /trainer/subscriptions
+#   ?check_stripe=true   live-sync flag: cross-checks DB stripe rows against
+#                        Stripe's active-subscription list. Adds ~1–2s. Default
+#                        false so first paint is snappy; UI exposes a "Check
+#                        Stripe sync" button that re-fetches with the flag on.
+#
+# Response shape lets the screen render section headers (counts + MRR) and
+# expandable per-user lists without further joins.
+
+_PERIOD_TO_MONTHLY_FACTOR = {
+    # MRR normalisation. trial / unknown periods don't contribute.
+    "monthly":   1.0,
+    "quarterly": 1.0 / 3.0,
+    "annual":    1.0 / 12.0,
+}
+
+
+def _row_mrr_cents(plan: SubscriptionPlan, billing_period: str) -> int:
+    """Monthly recurring revenue this row contributes, in AUD cents.
+
+    Trial / manual / annual all collapse to a sensible per-month equivalent
+    so the trainer-side MRR pill doesn't double-count annual prepayments."""
+    factor = _PERIOD_TO_MONTHLY_FACTOR.get(billing_period or "")
+    if not factor:
+        return 0
+    price = None
+    if billing_period == "monthly":
+        price = plan.monthly_price_aud_cents
+    elif billing_period == "quarterly":
+        price = plan.quarterly_price_aud_cents
+    elif billing_period == "annual":
+        price = plan.annual_price_aud_cents
+    if not price:
+        return 0
+    return int(round(price * factor))
+
+
+@router.get("/subscriptions")
+def list_subscriptions(
+    db: Session = Depends(get_db),
+    trainer: Trainer = Depends(get_current_trainer),
+    check_stripe: bool = Query(default=False),
+):
+    """Active-subscription rollup grouped by plan + optional Stripe-sync diff.
+
+    The default response is DB-only (fast). Setting `check_stripe=true`
+    additionally lists Stripe `active` subscriptions and reports two
+    classes of drift between Stripe and our DB:
+
+      - stripe_only_emails: paying on Stripe but no `source='stripe' AND
+        status IN ('active','past_due')` row in user_subscriptions.
+      - db_only_external_ids: DB claims a live Stripe row but the
+        subscription is no longer active on Stripe (cancelled / unpaid).
+
+    The grant-vip flow can leave a paying Stripe customer with a
+    manual_admin VIP row on top — that's deliberate, so we surface it
+    as `manual_overrides_stripe` rather than treating it as drift.
+    """
+    plans = (
+        db.query(SubscriptionPlan)
+        .order_by(SubscriptionPlan.tier_rank.asc())
+        .all()
+    )
+    plans_by_id = {p.plan_id: p for p in plans}
+
+    # ── Live rows (active + past_due) for the per-plan summary + lists ──
+    live_rows = (
+        db.query(UserSubscription, User)
+        .join(User, User.id == UserSubscription.user_id)
+        .filter(UserSubscription.status.in_(("active", "past_due")))
+        .order_by(UserSubscription.started_at.desc())
+        .all()
+    )
+
+    # Recently-cancelled count per plan (last 30 days) — useful churn pulse
+    # in the section header without inflating the subscriber list itself.
+    cutoff = datetime.utcnow() - timedelta(days=30)
+    cancelled_recent_counts = dict(
+        db.query(
+            UserSubscription.plan_id,
+            func.count(UserSubscription.id),
+        )
+        .filter(
+            UserSubscription.status == "cancelled",
+            UserSubscription.updated_at >= cutoff,
+        )
+        .group_by(UserSubscription.plan_id)
+        .all()
+    )
+
+    # ── Aggregate per plan ──
+    summary_by_plan: dict[str, dict] = {}
+    subscribers_by_plan: dict[str, list[dict]] = {}
+    for p in plans:
+        summary_by_plan[p.plan_id] = {
+            "plan_id": p.plan_id,
+            "display_name": p.display_name,
+            "tier_rank": p.tier_rank,
+            "monthly_price_aud_cents": p.monthly_price_aud_cents,
+            "active": 0,
+            "trial": 0,
+            "past_due": 0,
+            "stripe_count": 0,
+            "manual_count": 0,
+            "mrr_cents": 0,
+            "cancelled_last_30d": int(cancelled_recent_counts.get(p.plan_id, 0)),
+        }
+        subscribers_by_plan[p.plan_id] = []
+
+    total_active = 0
+    total_mrr_cents = 0
+    for sub, user in live_rows:
+        bucket = summary_by_plan.get(sub.plan_id)
+        if bucket is None:
+            # Defensive: a stale plan_id shouldn't crash the page.
+            continue
+        if sub.status == "active":
+            bucket["active"] += 1
+            total_active += 1
+        elif sub.status == "past_due":
+            bucket["past_due"] += 1
+        if (sub.billing_period or "") == "trial":
+            bucket["trial"] += 1
+        if sub.source == "stripe":
+            bucket["stripe_count"] += 1
+        elif sub.source == "manual_admin":
+            bucket["manual_count"] += 1
+
+        plan_obj = plans_by_id.get(sub.plan_id)
+        row_mrr = _row_mrr_cents(plan_obj, sub.billing_period) if plan_obj else 0
+        bucket["mrr_cents"] += row_mrr
+        total_mrr_cents += row_mrr
+
+        subscribers_by_plan[sub.plan_id].append({
+            "user_id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "plan_id": sub.plan_id,
+            "billing_period": sub.billing_period,
+            "status": sub.status,
+            "source": sub.source,
+            "started_at": sub.started_at.isoformat() if sub.started_at else None,
+            "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
+            "cancel_at_period_end": bool(sub.cancel_at_period_end),
+            "stripe_customer_id": sub.stripe_customer_id,
+            "external_id": sub.external_id,
+            "mrr_cents": row_mrr,
+        })
+
+    response: dict = {
+        "summary": {
+            "total_active": total_active,
+            "total_mrr_cents": total_mrr_cents,
+            "by_plan": [summary_by_plan[p.plan_id] for p in plans],
+        },
+        "subscribers_by_plan": subscribers_by_plan,
+        "stripe_sync": None,
+    }
+
+    # ── Optional Stripe live-sync diff ──
+    if not check_stripe:
+        return response
+
+    import core.config as config
+    if not getattr(config, "STRIPE_SECRET_KEY", None):
+        response["stripe_sync"] = {
+            "checked": False,
+            "reason": "stripe_not_configured",
+            "stripe_only": [],
+            "db_only": [],
+            "manual_overrides_stripe": [],
+        }
+        return response
+
+    try:
+        from services.billing.stripe_client import stripe_lib
+        stripe = stripe_lib()
+        # Pull all active subscriptions (paginate via auto_paging_iter).
+        # On a small base this is ~one API call; on a large one it auto-pages.
+        stripe_subs = list(
+            stripe.Subscription.list(status="active", limit=100, expand=["data.customer"]).auto_paging_iter()
+        )
+    except Exception as ex:
+        response["stripe_sync"] = {
+            "checked": False,
+            "reason": f"stripe_error: {type(ex).__name__}",
+            "stripe_only": [],
+            "db_only": [],
+            "manual_overrides_stripe": [],
+        }
+        return response
+
+    # Build lookup: stripe_sub_id → email + customer_id (from Stripe).
+    stripe_by_sub_id: dict[str, dict] = {}
+    stripe_emails: set[str] = set()
+    for s in stripe_subs:
+        cust = s.get("customer") if isinstance(s, dict) else None
+        # `customer` is expanded so it's a dict; raw API also accepts string id.
+        if isinstance(cust, dict):
+            email = (cust.get("email") or "").strip().lower()
+            cust_id = cust.get("id")
+        else:
+            email = ""
+            cust_id = cust if isinstance(cust, str) else None
+        stripe_by_sub_id[s["id"]] = {
+            "email": email,
+            "customer_id": cust_id,
+            "current_period_end": s.get("current_period_end"),
+        }
+        if email:
+            stripe_emails.add(email)
+
+    # DB rows with a stripe linkage that are currently live.
+    db_stripe_live = (
+        db.query(UserSubscription, User)
+        .join(User, User.id == UserSubscription.user_id)
+        .filter(
+            UserSubscription.source == "stripe",
+            UserSubscription.status.in_(("active", "past_due")),
+        )
+        .all()
+    )
+    db_stripe_sub_ids = {
+        sub.external_id for sub, _u in db_stripe_live if sub.external_id
+    }
+    db_stripe_emails = {
+        (u.email or "").strip().lower() for _sub, u in db_stripe_live if u.email
+    }
+
+    # ── 1. stripe_only: live on Stripe, no matching DB row ──
+    stripe_only = []
+    for sid, meta in stripe_by_sub_id.items():
+        if sid in db_stripe_sub_ids:
+            continue
+        # Email match catches the common case where the DB doesn't yet hold
+        # the external_id (webhook missed). Also catches rename mishaps.
+        if meta["email"] and meta["email"] in db_stripe_emails:
+            continue
+        stripe_only.append({
+            "stripe_subscription_id": sid,
+            "email": meta["email"],
+            "stripe_customer_id": meta["customer_id"],
+            "current_period_end": meta["current_period_end"],
+        })
+
+    # ── 2. db_only: DB claims live Stripe sub but Stripe says it's gone ──
+    db_only = []
+    for sub, user in db_stripe_live:
+        if sub.external_id and sub.external_id in stripe_by_sub_id:
+            continue
+        db_only.append({
+            "user_id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "external_id": sub.external_id,
+            "stripe_customer_id": sub.stripe_customer_id,
+            "started_at": sub.started_at.isoformat() if sub.started_at else None,
+        })
+
+    # ── 3. manual_overrides_stripe: paying Stripe customer also has a live
+    # manual_admin row sitting on top (typical: bronze paid → VIP grant).
+    # Surface but don't flag as drift — this is deliberate by design.
+    manual_overrides = []
+    if stripe_emails:
+        manual_rows = (
+            db.query(UserSubscription, User)
+            .join(User, User.id == UserSubscription.user_id)
+            .filter(
+                UserSubscription.source == "manual_admin",
+                UserSubscription.status.in_(("active", "past_due")),
+                func.lower(User.email).in_(stripe_emails),
+            )
+            .all()
+        )
+        for sub, user in manual_rows:
+            manual_overrides.append({
+                "user_id": user.id,
+                "email": user.email,
+                "username": user.username,
+                "manual_plan_id": sub.plan_id,
+                "manual_billing_period": sub.billing_period,
+                "manual_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
+            })
+
+    response["stripe_sync"] = {
+        "checked": True,
+        "stripe_active_count": len(stripe_by_sub_id),
+        "db_live_stripe_count": len(db_stripe_live),
+        "stripe_only": stripe_only,
+        "db_only": db_only,
+        "manual_overrides_stripe": manual_overrides,
+    }
+    return response
