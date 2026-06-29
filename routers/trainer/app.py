@@ -719,21 +719,37 @@ def list_subscriptions(
         return response
 
     # Build lookup: stripe_sub_id → email + customer_id (from Stripe).
+    # Stripe SDK v10+ returns StripeObject (not a dict subclass), so `.get()`
+    # raises AttributeError. Use subscript via a try/except helper to stay
+    # compatible with both shapes (real Stripe response and any dict mocks).
+    def _sf(obj, key):
+        try:
+            return obj[key]
+        except (KeyError, TypeError, AttributeError):
+            return None
+
     stripe_by_sub_id: dict[str, dict] = {}
     stripe_emails: set[str] = set()
     for s in stripe_subs:
-        cust = s.get("customer") if isinstance(s, dict) else None
-        # `customer` is expanded so it's a dict; raw API also accepts string id.
-        if isinstance(cust, dict):
-            email = (cust.get("email") or "").strip().lower()
-            cust_id = cust.get("id")
+        cust = _sf(s, "customer")
+        # `customer` is expanded so it's a StripeObject (dict-like);
+        # without expansion it's a string id.
+        if cust is not None and not isinstance(cust, str):
+            email = (_sf(cust, "email") or "").strip().lower()
+            cust_id = _sf(cust, "id")
+        elif isinstance(cust, str):
+            email = ""
+            cust_id = cust
         else:
             email = ""
-            cust_id = cust if isinstance(cust, str) else None
-        stripe_by_sub_id[s["id"]] = {
+            cust_id = None
+        sub_id = _sf(s, "id")
+        if not sub_id:
+            continue
+        stripe_by_sub_id[sub_id] = {
             "email": email,
             "customer_id": cust_id,
-            "current_period_end": s.get("current_period_end"),
+            "current_period_end": _sf(s, "current_period_end"),
         }
         if email:
             stripe_emails.add(email)

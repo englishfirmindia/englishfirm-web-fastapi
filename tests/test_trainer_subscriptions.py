@@ -390,6 +390,51 @@ def test_stripe_sync_clean_no_drift(client, db_session, seed_plans, monkeypatch)
     assert sync["db_live_stripe_count"] == 1
 
 
+def test_stripe_sync_handles_stripe_object_without_get_method(client, db_session, seed_plans, monkeypatch):
+    """Stripe SDK v10+ Subscription objects are NOT dict subclasses and have
+    no `.get()` method — only subscript access. Endpoint must use subscript
+    (with KeyError fallback) so a real Stripe response doesn't crash.
+    Regression: 2026-06-29 prod-deploy 500 on first check_stripe=true call."""
+    _add_user(db_session, 1, "ghost@x.com")
+    _add_sub(db_session, 1, "gold", source="stripe",
+             external_id="sub_dead_in_stripe", stripe_customer_id="cus_g")
+    db_session.commit()
+
+    import core.config as config
+    monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "sk_test_fake", raising=False)
+
+    class _NoGetObject:
+        """Mimics stripe v10 StripeObject: subscript works, .get raises."""
+        def __init__(self, **kw): self._d = dict(kw)
+        def __getitem__(self, k): return self._d[k]
+        def __getattr__(self, k):
+            try: return self._d[k]
+            except KeyError: raise AttributeError(k)
+
+    customer_obj = _NoGetObject(id="cus_live", email="payer@x.com")
+    sub_obj = _NoGetObject(id="sub_live_1", customer=customer_obj, current_period_end=9999999999)
+
+    class _FakeIter:
+        def __init__(self, items): self._items = items
+        def auto_paging_iter(self): return iter(self._items)
+
+    fake_stripe = MagicMock()
+    fake_stripe.Subscription.list = lambda **_kw: _FakeIter([sub_obj])
+    monkeypatch.setattr(
+        "services.billing.stripe_client.stripe_lib",
+        lambda: fake_stripe,
+    )
+
+    r = client.get("/api/v1/trainer/subscriptions?check_stripe=true")
+    assert r.status_code == 200, f"endpoint must not 500 on v10 StripeObject: {r.text[:300]}"
+    sync = r.json()["stripe_sync"]
+    assert sync["checked"] is True
+    # The fake stripe sub doesn't match the DB row (sub_dead_in_stripe vs sub_live_1),
+    # so both drift signals should fire.
+    assert any(x["email"] == "payer@x.com" for x in sync["stripe_only"])
+    assert any(x["email"] == "ghost@x.com" for x in sync["db_only"])
+
+
 def test_stripe_sync_api_error_returns_gracefully(client, db_session, seed_plans, monkeypatch):
     import core.config as config
     monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "sk_test_fake", raising=False)
