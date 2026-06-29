@@ -455,6 +455,46 @@ def test_stripe_sync_reads_period_end_from_item_when_top_level_missing(client, d
     )
 
 
+def test_stripe_sync_propagates_cancel_at_period_end_flag(client, db_session, seed_plans, monkeypatch):
+    """After the 2026-06-29 "stop auto-recharge" cleanup, Stripe subs are
+    flagged `cancel_at_period_end=True`. The endpoint must pass that flag
+    through to each `manual_overrides_stripe[].stripe_subs[]` entry so
+    the trainer screen can distinguish the date as "ends" (sub
+    terminates, no further charge) instead of "renews" (still charging
+    next cycle)."""
+    _add_user(db_session, 1, "ending@x.com")
+    _add_sub(db_session, 1, "bronze", status="cancelled", source="stripe",
+             external_id="sub_ending", stripe_customer_id="cus_e")
+    _add_sub(db_session, 1, "vip", source="manual_admin", billing_period="trial")
+    db_session.commit()
+
+    import core.config as config
+    monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "sk_test_fake", raising=False)
+
+    class _FakeIter:
+        def __init__(self, items): self._items = items
+        def auto_paging_iter(self): return iter(self._items)
+
+    fake_stripe = MagicMock()
+    fake_stripe.Subscription.list = lambda **_kw: _FakeIter([{
+        "id": "sub_ending",
+        "customer": {"id": "cus_e", "email": "ending@x.com"},
+        "items": {"data": [{"current_period_end": 1740000000}]},
+        "cancel_at_period_end": True,
+    }])
+    monkeypatch.setattr(
+        "services.billing.stripe_client.stripe_lib",
+        lambda: fake_stripe,
+    )
+
+    r = client.get("/api/v1/trainer/subscriptions?check_stripe=true")
+    ov = r.json()["stripe_sync"]["manual_overrides_stripe"]
+    assert len(ov) == 1
+    sub = ov[0]["stripe_subs"][0]
+    assert sub["stripe_cancel_at_period_end"] is True
+    assert sub["stripe_current_period_end"] == 1740000000
+
+
 def test_stripe_sync_email_match_recognises_renamed_external_id(client, db_session, seed_plans, monkeypatch):
     """If the DB stripe row has a different external_id than Stripe's
     current sub (e.g., a renewed subscription got a new id), the email

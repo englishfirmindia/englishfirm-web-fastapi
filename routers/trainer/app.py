@@ -809,10 +809,15 @@ def list_subscriptions(
                 period_end = None
         if period_end is None:
             period_end = _sf(s, "current_period_end")
+        # Whether the sub will auto-renew at period_end. Drives whether
+        # the trainer screen labels the date as "renews" (still charging
+        # next cycle) vs "ends" (last day, no further charge).
+        cancel_at_period_end = bool(_sf(s, "cancel_at_period_end"))
         stripe_by_sub_id[sub_id] = {
             "email": email,
             "customer_id": cust_id,
             "current_period_end": period_end,
+            "cancel_at_period_end": cancel_at_period_end,
         }
         if email:
             stripe_emails.add(email)
@@ -906,6 +911,7 @@ def list_subscriptions(
                     "stripe_subscription_id": sid,
                     "stripe_customer_id": meta["customer_id"],
                     "stripe_current_period_end": meta["current_period_end"],
+                    "stripe_cancel_at_period_end": meta["cancel_at_period_end"],
                 })
 
         manual_rows = (
