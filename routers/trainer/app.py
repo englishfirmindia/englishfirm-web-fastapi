@@ -746,10 +746,25 @@ def list_subscriptions(
         sub_id = _sf(s, "id")
         if not sub_id:
             continue
+        # Stripe API v2024-09-30+ moved current_period_end from the
+        # subscription root to each item (since a sub can have items on
+        # different billing cycles). Prefer the item-level value, fall
+        # back to top-level for older API versions.
+        period_end = None
+        items_container = _sf(s, "items")
+        items_data = _sf(items_container, "data") if items_container is not None else None
+        if items_data:
+            try:
+                first_item = items_data[0]
+                period_end = _sf(first_item, "current_period_end")
+            except (IndexError, TypeError):
+                period_end = None
+        if period_end is None:
+            period_end = _sf(s, "current_period_end")
         stripe_by_sub_id[sub_id] = {
             "email": email,
             "customer_id": cust_id,
-            "current_period_end": _sf(s, "current_period_end"),
+            "current_period_end": period_end,
         }
         if email:
             stripe_emails.add(email)

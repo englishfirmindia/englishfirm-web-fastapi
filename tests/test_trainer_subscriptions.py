@@ -409,6 +409,52 @@ def test_stripe_sync_cancelled_by_grant_vip_is_not_drift(client, db_session, see
     assert ov["stripe_subs"][0]["stripe_subscription_id"] == "sub_bronze_superseded"
 
 
+def test_stripe_sync_reads_period_end_from_item_when_top_level_missing(client, db_session, seed_plans, monkeypatch):
+    """Stripe API v2024-09-30+ moved current_period_end from the
+    subscription root onto each subscription item. The drift endpoint
+    must read item-level first and fall back to top-level so the
+    renewal date surfaces on `manual_overrides_stripe.stripe_subs`
+    regardless of which API version Stripe ships.
+    Regression: 2026-06-29 — first deploy attached every override row
+    with stripe_current_period_end=None because the new shape was
+    silently swallowed by `.get('current_period_end')` on the root."""
+    _add_user(db_session, 1, "u@x.com")
+    _add_sub(db_session, 1, "bronze", status="cancelled", source="stripe",
+             external_id="sub_item_shape", stripe_customer_id="cus_u")
+    _add_sub(db_session, 1, "vip", source="manual_admin", billing_period="trial")
+    db_session.commit()
+
+    import core.config as config
+    monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "sk_test_fake", raising=False)
+
+    class _FakeIter:
+        def __init__(self, items): self._items = items
+        def auto_paging_iter(self): return iter(self._items)
+
+    fake_stripe = MagicMock()
+    # New-shape sub: no top-level current_period_end, only item-level.
+    fake_stripe.Subscription.list = lambda **_kw: _FakeIter([{
+        "id": "sub_item_shape",
+        "customer": {"id": "cus_u", "email": "u@x.com"},
+        "items": {"data": [{"current_period_end": 1740000000}]},
+    }])
+    monkeypatch.setattr(
+        "services.billing.stripe_client.stripe_lib",
+        lambda: fake_stripe,
+    )
+
+    r = client.get("/api/v1/trainer/subscriptions?check_stripe=true")
+    sync = r.json()["stripe_sync"]
+    assert sync["checked"] is True
+    overrides = sync["manual_overrides_stripe"]
+    assert len(overrides) == 1
+    subs = overrides[0]["stripe_subs"]
+    assert len(subs) == 1
+    assert subs[0]["stripe_current_period_end"] == 1740000000, (
+        f"expected item-level period_end to surface; got {subs[0]}"
+    )
+
+
 def test_stripe_sync_email_match_recognises_renamed_external_id(client, db_session, seed_plans, monkeypatch):
     """If the DB stripe row has a different external_id than Stripe's
     current sub (e.g., a renewed subscription got a new id), the email
