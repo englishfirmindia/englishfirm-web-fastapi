@@ -11,15 +11,16 @@ already returns. Pure function — does not write to DB.
 
 Output dict shape:
     {
-      "question_id":    int,
-      "question_type":  str,
-      "score":          int | None,
-      "scoring_status": str,
+      "question_id":     int,
+      "question_type":   str,
+      "score":           int | None,
+      "scoring_status":  str,
       "user_answer_json": dict,
-      "result_json":    dict,
-      "content_json":   dict,   # passage / options / wordBank / contentBlocks
-      "correct":        dict,   # extracted correctAnswers per question type
-      "audio_url":      str | None,   # presigned, for listening / RA-like
+      "result_json":     dict,
+      "content_json":    dict,   # passage / options / wordBank / contentBlocks
+      "correct":         dict,   # extracted correctAnswers per question type
+      "audio_url":       str | None,   # presigned STIMULUS audio (lecture/sentence to repeat/short question prompt)
+      "user_audio_url":  str | None,   # presigned STUDENT recording — only set when the row has one
     }
 """
 import re
@@ -147,9 +148,14 @@ def _extract_correct(q) -> dict:
 
 
 def _maybe_presigned_audio(q) -> Optional[str]:
-    """Best-effort presign for any audio reference on the question. Listening
-    + speaking-style questions carry the audio under `audio_url` or
-    `audio_s3_key`; returns None silently if presigning fails."""
+    """Best-effort presign for the QUESTION's STIMULUS audio (lecture prompt
+    for RL/SGD, sentence to repeat for RS, short question prompt for ASQ,
+    etc.). Listening + speaking-style questions carry the audio under
+    `audio_url` or `audio_s3_key`; returns None silently if presigning fails.
+
+    This is the stimulus URL. For the student's OWN recording, use
+    `_maybe_presigned_user_audio(attempt_answer)`.
+    """
     content = q.content_json or {}
     raw = (
         content.get("audio_url")
@@ -164,8 +170,35 @@ def _maybe_presigned_audio(q) -> Optional[str]:
         return None
 
 
+def _maybe_presigned_user_audio(attempt_answer) -> Optional[str]:
+    """Best-effort presign for the STUDENT's OWN recorded audio, stored on
+    `attempt_answers.audio_url` at submit time (only present for speaking
+    tasks: RA/RS/ASQ/DI/RL/SGD/RTS). Returns None when the row has no
+    audio or presigning fails.
+
+    Regression 2026-07-03: without this, the sectional-review payload's
+    single `audio_url` field was the STIMULUS, which the frontend
+    `SpeakingAttemptCard.userAudioUrl` prop played back as if it were the
+    student's own recording — so students heard the lecturer's voice
+    instead of theirs. Splitting the two into distinct fields fixes it.
+    """
+    url = getattr(attempt_answer, "audio_url", None)
+    if not url:
+        return None
+    try:
+        return generate_presigned_url(url)
+    except Exception:
+        return None
+
+
 def enrich_answer_for_review(q, attempt_answer) -> dict:
-    """Build the rich per-question review payload."""
+    """Build the rich per-question review payload.
+
+    `audio_url` is the STIMULUS (what the app played to the student during
+    the exam). `user_audio_url` is what the STUDENT recorded (for speaking
+    tasks). Frontends showing a "play my recording" button must read from
+    `user_audio_url`.
+    """
     return {
         "question_id":      attempt_answer.question_id,
         "question_type":    attempt_answer.question_type,
@@ -176,6 +209,7 @@ def enrich_answer_for_review(q, attempt_answer) -> dict:
         "content_json":     enrich_content_json(q) if q else {},
         "correct":          _extract_correct(q) if q else {},
         "audio_url":        _maybe_presigned_audio(q) if q else None,
+        "user_audio_url":   _maybe_presigned_user_audio(attempt_answer),
     }
 
 
