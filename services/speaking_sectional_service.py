@@ -642,7 +642,14 @@ def get_speaking_sectional_results(session_id: str, user_id: int, db: Session) -
             "pronunciation_score": a.pronunciation_score,
             "result_json":     a.result_json or {},
             "scoring_status":  a.scoring_status,
-            "audio_url":       recording_url,
+            # 2026-07-10: matches the two-field convention added on 2026-07-03
+            # (see services/review_enrichment.py). `user_audio_url` is the
+            # STUDENT's recording; the stimulus (lecture/prompt audio) lives
+            # under content_json.audio_url — presigned above. Before this
+            # rename the payload shipped student audio as `audio_url`, but
+            # the frontend refuses to play that key on sectional surfaces
+            # (to prevent playing the stimulus as if it were the student).
+            "user_audio_url":  recording_url,
             "content_json":    content_json,
             "correct":         correct,
             "time_taken_seconds": time_map.get(a.id),

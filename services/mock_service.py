@@ -960,6 +960,15 @@ def get_mock_review(session_id: str, user_id: int, db: Session) -> dict:
             "correct_answer":      a.correct_answer_json or {},
             "result_detail":       a.result_json or {},
             "context":             context,
+            # 2026-07-10: adopt the two-field convention from
+            # services/review_enrichment.py (`user_audio_url` = student's
+            # recording, `audio_url` = question stimulus). The old shape
+            # shipped student audio as `audio_url`, which the sectional
+            # frontend correctly refuses to play. We emit BOTH keys here so
+            # the current mock frontend (still reading `audio_url`) keeps
+            # working until it ships the switch — remove the duplicate
+            # after mock_review_screen.dart migration is live.
+            "user_audio_url":      context.get("recording_url"),
             "audio_url":           context.get("recording_url"),
             "content_json":        full_content_json,
             "correct":             correct_payload,
