@@ -143,53 +143,73 @@ def fake_user():
     return u
 
 
-# ── Model 1: /checkout-session sets cancel_at_period_end=True ─────────────
+# ── Model 1: /checkout-session must NOT pass cancel_at_period_end here ────
 
-def test_checkout_session_passes_cancel_at_period_end_true(
+def _fake_stripe_with_shape_check():
+    """Return a fake stripe module whose `checkout.Session.create` raises
+    Stripe's real InvalidRequestError shape if it receives the invalid
+    `subscription_data.cancel_at_period_end` field. Mirrors the real API's
+    hard-reject behaviour so a regression can't slip through the mock
+    silently — the way it did between 2026-06-29 and 2026-07-17."""
+    fake_session = MagicMock()
+    fake_session.id = "cs_test_123"
+    fake_session.url = "https://stripe.com/cs_test_123"
+    fake_stripe = MagicMock()
+
+    class _FakeInvalidRequestError(Exception):
+        """Mimics stripe._error.InvalidRequestError."""
+        def __init__(self, msg): super().__init__(msg)
+
+    # Expose the fake exception on the stripe object so calling code
+    # doesn't have to import the real one.
+    fake_stripe.InvalidRequestError = _FakeInvalidRequestError
+
+    captured: dict = {}
+    def _create(**kw):
+        captured.update(kw)
+        sd = kw.get("subscription_data") or {}
+        # This is the exact shape-check Stripe's real API performs; our
+        # test must fail loudly if a future change re-introduces the
+        # invalid parameter here.
+        if "cancel_at_period_end" in sd:
+            raise _FakeInvalidRequestError(
+                "Received unknown parameter: "
+                "subscription_data[cancel_at_period_end]"
+            )
+        return fake_session
+    fake_stripe.checkout.Session.create = _create
+    return fake_stripe, captured
+
+
+def test_checkout_session_does_not_pass_cancel_at_period_end(
     db_session, seed_plans, fake_user, monkeypatch
 ):
-    """Every Stripe Checkout session our backend creates must include
-    `subscription_data.cancel_at_period_end=True` so the resulting
-    Subscription never auto-renews. Regression for the silent-recharge
-    pattern fixed on 2026-06-29."""
+    """Regression for the 2026-06-29 → 2026-07-17 incident:
+    `subscription_data.cancel_at_period_end` is NOT a valid Stripe Checkout
+    Session parameter. Passing it makes Stripe return InvalidRequestError,
+    which surfaces as 502 to the student and breaks acquisition entirely.
+
+    Auto-cancel intent is now enforced in the webhook path via
+    `Subscription.modify` (see test_checkout_webhook_flips_cancel_at_period_end
+    below). This test guards the boundary — the fake Stripe raises just
+    like real Stripe if the invalid param sneaks back into checkout.Session.create.
+    """
     import core.config as cfg_mod
     monkeypatch.setattr(cfg_mod, "STRIPE_SECRET_KEY", "sk_test_fake", raising=False)
     monkeypatch.setattr(cfg_mod, "STRIPE_CHECKOUT_SUCCESS_URL", "https://app/success", raising=False)
     monkeypatch.setattr(cfg_mod, "STRIPE_CHECKOUT_CANCEL_URL", "https://app/cancel", raising=False)
-    # /checkout-session calls `_require_configured()` which guards on
-    # `config.stripe_configured()` — patch the helper to return True so
-    # we don't have to wire every Stripe env var.
     monkeypatch.setattr(cfg_mod, "stripe_configured", lambda: True, raising=False)
 
-    # Add the real user (FK target) — endpoint uses get_current_user mock,
-    # but DB-level lookups still need a row.
     db_session.add(User(
         id=fake_user.id, username="buyer", email=fake_user.email,
         hashed_password="x", status="active",
     ))
     db_session.commit()
 
-    # Capture the kwargs Stripe Checkout was called with.
-    captured = {}
-    fake_session = MagicMock()
-    fake_session.id = "cs_test_123"
-    fake_session.url = "https://stripe.com/cs_test_123"
-    fake_stripe = MagicMock()
-    def _create(**kw):
-        captured.update(kw)
-        return fake_session
-    fake_stripe.checkout.Session.create = _create
-    # routers/billing.py does `from services.billing.stripe_client import
-    # stripe_lib` at module top — that binds the reference into
-    # routers.billing.stripe_lib. Patch BOTH so module-local + late-import
-    # call sites resolve to the fake.
-    monkeypatch.setattr(
-        "services.billing.stripe_client.stripe_lib",
-        lambda: fake_stripe,
-    )
-    monkeypatch.setattr(
-        "routers.billing.stripe_lib", lambda: fake_stripe,
-    )
+    fake_stripe, captured = _fake_stripe_with_shape_check()
+    monkeypatch.setattr("services.billing.stripe_client.stripe_lib",
+                        lambda: fake_stripe)
+    monkeypatch.setattr("routers.billing.stripe_lib", lambda: fake_stripe)
 
     def override_db(): yield db_session
     def override_user(): return fake_user
@@ -204,16 +224,182 @@ def test_checkout_session_passes_cancel_at_period_end_true(
     finally:
         app.dependency_overrides.clear()
 
-    assert r.status_code == 200, r.text
-    assert "subscription_data" in captured, "subscription_data must be passed"
-    sd = captured["subscription_data"]
-    # The critical assertion — every new sub auto-cancels after period 1.
-    assert sd.get("cancel_at_period_end") is True, (
-        f"checkout-session must set cancel_at_period_end=True (got {sd})"
+    # If checkout-session ever re-introduces the invalid param, the fake
+    # Stripe raises InvalidRequestError, our handler returns 502, and this
+    # test fails with a very clear diff — no more silent regressions.
+    assert r.status_code == 200, (
+        "checkout-session must succeed. If you see a 502 here, the request "
+        f"body likely included subscription_data.cancel_at_period_end. "
+        f"Real Stripe rejects it. Response: {r.text}"
+    )
+    sd = captured.get("subscription_data") or {}
+    assert "cancel_at_period_end" not in sd, (
+        f"cancel_at_period_end must NOT be inside subscription_data on "
+        f"checkout.Session.create — Stripe returns InvalidRequestError. "
+        f"Set it via Subscription.modify in the webhook instead. Got: {sd}"
     )
     # Metadata still preserved
     assert sd["metadata"]["user_id"] == "7"
     assert sd["metadata"]["plan_id"] == "bronze"
+
+
+def test_checkout_webhook_flips_cancel_at_period_end(
+    db_session, seed_plans, monkeypatch
+):
+    """When Stripe delivers `checkout.session.completed`, our handler
+    must call `Subscription.modify(sub_id, cancel_at_period_end=True)`
+    right after `_apply_subscription_state`. This is where the
+    no-auto-recharge policy is actually enforced now (see companion
+    test_checkout_session_does_not_pass_cancel_at_period_end).
+    """
+    import core.config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "STRIPE_SECRET_KEY", "sk_test_fake", raising=False)
+    monkeypatch.setattr(cfg_mod, "STRIPE_WEBHOOK_SECRET", "whsec_test", raising=False)
+    monkeypatch.setattr(cfg_mod, "stripe_configured", lambda: True, raising=False)
+
+    # Seed a user for the FK.
+    db_session.add(User(
+        id=7, username="buyer", email="buyer@test.com",
+        hashed_password="x", status="active",
+    ))
+    db_session.commit()
+
+    fake_stripe = MagicMock()
+    # Retrieve returns a plausible subscription dict for _apply_subscription_state.
+    stripe_sub_dict = {
+        "id": "sub_new_123",
+        "customer": "cus_x",
+        "status": "active",
+        "cancel_at_period_end": False,
+        "current_period_start": 1_800_000_000,
+        "current_period_end":   1_800_000_000 + 30 * 86400,
+        "items": {"data": [{
+            "id": "si_x",
+            "price": {"id": "price_test_bronze_monthly"},
+            "current_period_start": 1_800_000_000,
+            "current_period_end":   1_800_000_000 + 30 * 86400,
+        }]},
+    }
+    # Retrieve returns a StripeObject-lookalike (dict is fine — code uses
+    # `.to_dict()` fallback then `.get`).
+    fake_stripe.Subscription.retrieve = MagicMock(return_value=stripe_sub_dict)
+    modify_calls = []
+    fake_stripe.Subscription.modify = lambda sid, **kw: (
+        modify_calls.append((sid, kw)) or MagicMock()
+    )
+
+    # Force the webhook signature check to accept our synthetic event.
+    fake_event = {
+        "id":   "evt_checkout_1",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "id":                  "cs_test_1",
+            "subscription":        "sub_new_123",
+            "client_reference_id": "7",
+            "metadata":            {"user_id": "7"},
+        }},
+    }
+    monkeypatch.setattr(
+        "routers.billing.verify_webhook_signature",
+        lambda _payload, _sig: MagicMock(to_dict=lambda: fake_event),
+    )
+    monkeypatch.setattr("services.billing.stripe_client.stripe_lib",
+                        lambda: fake_stripe)
+    monkeypatch.setattr("routers.billing.stripe_lib", lambda: fake_stripe)
+
+    def override_db(): yield db_session
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        r = client.post(
+            "/api/v1/billing/webhooks/stripe",
+            data="{}",
+            headers={"stripe-signature": "t=0,v1=fake"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert r.status_code == 200, r.text
+    # Exactly one modify call with the fresh Stripe sub id and cancel flag.
+    assert len(modify_calls) == 1, f"expected 1 Subscription.modify, got {modify_calls}"
+    sid, kw = modify_calls[0]
+    assert sid == "sub_new_123"
+    assert kw.get("cancel_at_period_end") is True
+
+
+def test_checkout_webhook_raises_5xx_when_modify_fails(
+    db_session, seed_plans, monkeypatch
+):
+    """If Subscription.modify fails post-checkout (transient Stripe outage
+    etc.), the webhook must return 5xx so Stripe retries. Otherwise the
+    fresh subscription is left auto-renewing and the customer's card gets
+    charged monthly indefinitely.
+    """
+    import core.config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "STRIPE_SECRET_KEY", "sk_test_fake", raising=False)
+    monkeypatch.setattr(cfg_mod, "STRIPE_WEBHOOK_SECRET", "whsec_test", raising=False)
+    monkeypatch.setattr(cfg_mod, "stripe_configured", lambda: True, raising=False)
+
+    db_session.add(User(
+        id=7, username="buyer", email="buyer@test.com",
+        hashed_password="x", status="active",
+    ))
+    db_session.commit()
+
+    fake_stripe = MagicMock()
+    fake_stripe.Subscription.retrieve = MagicMock(return_value={
+        "id": "sub_new_456",
+        "customer": "cus_y",
+        "status": "active",
+        "cancel_at_period_end": False,
+        "current_period_start": 1_800_000_000,
+        "current_period_end":   1_800_000_000 + 30 * 86400,
+        "items": {"data": [{
+            "id": "si_y",
+            "price": {"id": "price_test_bronze_monthly"},
+            "current_period_start": 1_800_000_000,
+            "current_period_end":   1_800_000_000 + 30 * 86400,
+        }]},
+    })
+    def _boom(_sid, **_kw):
+        raise RuntimeError("simulated stripe outage")
+    fake_stripe.Subscription.modify = _boom
+
+    fake_event = {
+        "id":   "evt_checkout_2",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "id":                  "cs_test_2",
+            "subscription":        "sub_new_456",
+            "client_reference_id": "7",
+            "metadata":            {"user_id": "7"},
+        }},
+    }
+    monkeypatch.setattr(
+        "routers.billing.verify_webhook_signature",
+        lambda _payload, _sig: MagicMock(to_dict=lambda: fake_event),
+    )
+    monkeypatch.setattr("services.billing.stripe_client.stripe_lib",
+                        lambda: fake_stripe)
+    monkeypatch.setattr("routers.billing.stripe_lib", lambda: fake_stripe)
+
+    def override_db(): yield db_session
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        r = client.post(
+            "/api/v1/billing/webhooks/stripe",
+            data="{}",
+            headers={"stripe-signature": "t=0,v1=fake"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    # Handler re-raises → global handler emits 5xx → Stripe retries.
+    assert r.status_code >= 500, (
+        f"webhook must return 5xx when Subscription.modify fails so Stripe "
+        f"retries, otherwise the sub stays on auto-renew. Got: {r.status_code} {r.text}"
+    )
 
 
 # ── Model 4: grant_vip cancels prior Stripe sub ────────────────────────────

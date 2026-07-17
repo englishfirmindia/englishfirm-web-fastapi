@@ -380,14 +380,16 @@ def create_checkout_session(
                     "plan_id": plan_id,
                     "billing_period": billing_period,
                 },
-                # 2026-06-29: every new sub is one-shot. Stripe still creates
-                # a Subscription object (so the webhook → user_subscriptions
-                # sync stays unchanged), but `cancel_at_period_end=True` means
-                # Stripe won't auto-renew after the first paid period. To
-                # continue, the customer must start a new checkout. This
-                # prevents the silent-recharge-after-trainer-VIP-grant
-                # pattern we observed for 5 customers in May/June 2026.
-                "cancel_at_period_end": True,
+                # NOTE: `cancel_at_period_end` is NOT a valid field inside
+                # Stripe Checkout Session's `subscription_data` object.
+                # Stripe returns InvalidRequestError:
+                #   "Received unknown parameter: subscription_data[cancel_at_period_end]"
+                # …which we learned the hard way on 2026-06-29 → 2026-07-17
+                # when every checkout attempt 502'd for 18 days.
+                # The auto-cancel-after-first-period intent is enforced in
+                # `_handle_checkout_session_completed` below via
+                # `Subscription.modify(id, cancel_at_period_end=True)` — the
+                # API surface Stripe actually supports for this operation.
             },
             allow_promotion_codes=True,
         )
@@ -518,7 +520,17 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
 
 def _handle_checkout_session_completed(db: Session, event: dict) -> None:
     """User just completed Checkout. Pull the underlying subscription
-    from Stripe to get period bounds, then upsert our row + activate."""
+    from Stripe to get period bounds, then upsert our row + activate.
+
+    Also flips the fresh Stripe subscription to `cancel_at_period_end=True`
+    so it terminates after the first paid period rather than auto-renewing
+    forever. This is where the "one-shot / no auto-recharge" policy is
+    actually enforced — `subscription_data.cancel_at_period_end` on
+    Checkout Session creation is NOT a valid Stripe parameter and returns
+    InvalidRequestError (learned 2026-06-29 → 2026-07-17). Setting the
+    flag via `Subscription.modify` is the supported surface, mirrors what
+    `grant_vip` already does, and is naturally idempotent on retry.
+    """
     session = event["data"]["object"]
     stripe_sub_id = session.get("subscription")
     if not stripe_sub_id:
@@ -538,6 +550,30 @@ def _handle_checkout_session_completed(db: Session, event: dict) -> None:
         event_type="activated",
         event_id=event["id"],
     )
+
+    # Enforce the no-auto-recharge policy on the fresh Stripe subscription.
+    # Runs AFTER _apply_subscription_state so our DB row is already recorded
+    # and audited before we touch Stripe. Any failure here re-raises so the
+    # webhook returns 5xx → Stripe retries with backoff for up to 3 days,
+    # eventually landing the modify once the transient issue clears. On the
+    # rare permanent-failure path, a periodic reconciler (not implemented
+    # yet) would scan for source='stripe' rows with cancel_at_period_end=
+    # False and catch strays.
+    try:
+        stripe.Subscription.modify(
+            stripe_sub_id, cancel_at_period_end=True
+        )
+        log.info(
+            "[stripe] flagged sub=%s cancel_at_period_end=True after checkout "
+            "(user_id=%d)", stripe_sub_id, user_id,
+        )
+    except Exception:
+        log.exception(
+            "[stripe] Subscription.modify(cancel_at_period_end=True) failed "
+            "post-checkout for sub=%s user_id=%d — will return 5xx to trigger "
+            "Stripe webhook retry", stripe_sub_id, user_id,
+        )
+        raise
 
 
 def _handle_invoice_payment_succeeded(db: Session, event: dict) -> None:
