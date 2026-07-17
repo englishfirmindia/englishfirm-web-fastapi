@@ -15,6 +15,7 @@ from collections import Counter
 from typing import List
 
 from .base import ScoringResult, ScoringStrategy, to_pte_score
+from .spelling_variants import UK_TO_US
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +301,14 @@ def _normalise_word(w: str) -> str:
     return re.sub(r"[^a-z0-9']", "", w.lower().strip())
 
 
+def _normalise_word_wfd(w: str) -> str:
+    """WFD-only variant: after the base normalise, collapse UK spelling to US
+    so `colour` matches `color` in the multiset comparison. Scoped to WFD;
+    FIBScorer keeps using ``_normalise_word`` unchanged."""
+    stripped = _normalise_word(w)
+    return UK_TO_US.get(stripped, stripped)
+
+
 class WFDScorer(ScoringStrategy):
     """
     Write From Dictation scorer.
@@ -328,8 +337,8 @@ class WFDScorer(ScoringStrategy):
 
         transcript = evaluation_json.get('correctAnswers', {}).get('transcript', '')
 
-        correct_words = [w for w in (_normalise_word(t) for t in transcript.split()) if w]
-        user_words = [w for w in (_normalise_word(t) for t in user_text.split()) if w]
+        correct_words = [w for w in (_normalise_word_wfd(t) for t in transcript.split()) if w]
+        user_words = [w for w in (_normalise_word_wfd(t) for t in user_text.split()) if w]
 
         if not correct_words:
             return ScoringResult(
