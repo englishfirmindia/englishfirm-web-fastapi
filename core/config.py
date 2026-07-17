@@ -38,13 +38,18 @@ REFRESH_COOKIE_MAX_AGE_SECONDS = JWT_REFRESH_EXPIRY_DAYS * 24 * 60 * 60
 # for this many seconds, so two tabs racing /auth/refresh don't trigger a
 # spurious family revocation.
 #
-# Was 10s — too tight for flaky-network retries, where the browser auto-
-# retry typically lands 20-40s after the original successful-but-lost
-# response. 60s covers the realistic retry envelope without materially
-# widening the window in which a stolen token could co-exist with the
-# legitimate user (Postgres SELECT … FOR UPDATE on rotate_refresh_token
-# closes the same-token concurrent-rotation race regardless of grace).
-REFRESH_ROTATION_GRACE_SECONDS = int(os.getenv("REFRESH_ROTATION_GRACE_SECONDS", "60"))
+# Was 10s → 60s (2026-06) → 180s (2026-07). Each bump chased the same
+# false-positive category: multi-tab and multi-device users where one tab's
+# in-memory cached refresh token races the other tab's rotation write.
+# 60s wasn't enough for realistic tab-backgrounding + mobile-network delay
+# — CloudWatch showed ~10 replay revocations/week, all on multi-tab or
+# multi-UA users (u=40, u=108, u=175 in the audit). 180s covers the
+# realistic multi-tab / mobile-handoff envelope. The Postgres
+# SELECT … FOR UPDATE on rotate_refresh_token still closes the
+# same-token concurrent-rotation race regardless of grace, so widening
+# doesn't add a new theft window — only extends how long a *legitimate*
+# stale-cached token from another tab is tolerated.
+REFRESH_ROTATION_GRACE_SECONDS = int(os.getenv("REFRESH_ROTATION_GRACE_SECONDS", "180"))
 
 # ── Auth (web session cookie) ─────────────────────────────────────────────────
 # Web clients use an httpOnly cookie holding the same JWT, so the token is not
