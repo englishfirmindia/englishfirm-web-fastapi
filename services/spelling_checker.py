@@ -27,6 +27,8 @@ from typing import List, Tuple
 from anthropic import Anthropic
 from spellchecker import SpellChecker
 
+from services.scoring.spelling_variants import UK_TO_US
+
 log = logging.getLogger(__name__)
 
 _anth_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -114,7 +116,10 @@ def check_spelling(text: str, passage: str = "") -> dict:
         }
 
     words = _WORD_RE.findall(body)
-    word_set = set(w.lower() for w in words)
+    # Preprocess through UK -> US map so British variants (colour, organise,
+    # programme, ...) are never flagged as unknown by the US-only pyspell
+    # dictionary. Guards the pyspell-only fallback path when Claude is down.
+    word_set = set(UK_TO_US.get(w.lower(), w.lower()) for w in words)
     try:
         raw_unknown = sorted(_spell.unknown(word_set))
     except Exception as exc:  # extremely defensive — should never happen
