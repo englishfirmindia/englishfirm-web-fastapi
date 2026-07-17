@@ -131,6 +131,11 @@ class SignupRequest(BaseModel):
     device_class: Optional[str] = None   # mobile | tablet | desktop
     ads_keyword:  Optional[str] = None   # `utm_term` (Google's {keyword})
     ads_query:    Optional[str] = None   # `q` (Google's {query})
+    # Raw gclid string from the landing URL — persisted so we can look up
+    # this specific user's click in the Google Ads dashboard / upload
+    # offline conversions back to Ads. Nullable; only present for paid-
+    # search landings. Truncated to 200 chars defensively (schema limit).
+    gclid:        Optional[str] = None
 
     @field_validator("phone")
     @classmethod
@@ -147,6 +152,7 @@ class GoogleAuthRequest(BaseModel):
     device_class: Optional[str] = None
     ads_keyword:  Optional[str] = None
     ads_query:    Optional[str] = None
+    gclid:        Optional[str] = None
 
 
 class AppleAuthRequest(BaseModel):
@@ -294,6 +300,10 @@ def signup(request: Request, req: SignupRequest, background_tasks: BackgroundTas
         device_class=req.device_class,
         ads_keyword=req.ads_keyword,
         ads_query=req.ads_query,
+        # Truncate defensively to the VARCHAR(200) schema limit — Google's
+        # gclid is typically 100-120 chars, but the column is capped and
+        # a rogue payload shouldn't 500 the signup.
+        gclid=(req.gclid[:200] if req.gclid else None),
     )
     db.add(user)
     db.commit()
@@ -431,6 +441,7 @@ def google_auth(
             device_class=req.device_class,
             ads_keyword=req.ads_keyword,
             ads_query=req.ads_query,
+            gclid=(req.gclid[:200] if req.gclid else None),
         )
         db.add(user)
         db.commit()

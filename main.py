@@ -70,6 +70,13 @@ async def _startup_migrations():
             "signup_city     VARCHAR(128)",
             "ads_keyword     TEXT",
             "ads_query       TEXT",
+            # gclid = Google Click Identifier. Persisted so we can
+            # reconcile a specific paid-search click back to a specific
+            # user's downstream conversion via Google's Offline
+            # Conversions API. Nullable — only ~15% of signups will
+            # ever carry one, and NOT NULL would break every organic /
+            # direct / social signup path.
+            "gclid           VARCHAR(200)",
         ):
             col_name = col_ddl.split()[0]
             conn.execute(text(
@@ -81,6 +88,15 @@ async def _startup_migrations():
                 conn.execute(text(
                     "CREATE INDEX IF NOT EXISTS "
                     "ix_users_signup_country ON users (signup_country)"
+                ))
+            # Partial index on gclid — WHERE NOT NULL keeps the index
+            # tiny (only rows with a value pay the write cost). Speeds
+            # up the "find user by gclid" lookup we'll use to upload
+            # offline conversions.
+            if col_name == "gclid":
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS "
+                    "ix_users_gclid ON users (gclid) WHERE gclid IS NOT NULL"
                 ))
         conn.commit()
     # Start the pending-score reaper. Marks orphan scoring_status='pending'

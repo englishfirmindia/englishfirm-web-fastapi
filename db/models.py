@@ -62,6 +62,14 @@ class User(Base):
     # typed (`q`, from `{query}`). Both null for organic users.
     ads_keyword     = Column(Text, nullable=True)
     ads_query       = Column(Text, nullable=True)
+    # Google Click Identifier — the raw gclid string from the landing
+    # URL. Persisted so we can (a) look up "which ad click led to this
+    # user" via the Google Ads UI or search-terms API, and (b) upload
+    # downstream conversions (VIP upgrade, first payment, etc.) back to
+    # Google Ads' Offline Conversions API for bid optimisation.
+    # Nullable — only Google-Ads landings carry it; organic / direct /
+    # social signups stay NULL. First-touch only.
+    gclid           = Column(String(200), nullable=True)
 
     conversations = relationship(
         "Conversation",
