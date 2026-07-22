@@ -315,6 +315,72 @@ def test_scorer_skips_write_when_row_was_cleared_mid_scoring(db_session):
     assert aa2.score == 0
 
 
+def test_scorer_adopts_reaper_failed_row_when_score_lands_late(db_session):
+    """Race with the pending-score reaper: a slow Azure/Whisper tail keeps the
+    answer 'pending' past the reaper's 300s window, so the reaper flips it to
+    'failed' and stamps scoring_infrastructure_timeout. Scoring THEN completes
+    (e.g. via the cross-penalty pronunciation fallback). The late score must
+    OVERWRITE the reaper's failed/zero row rather than be silently discarded —
+    otherwise the student is stuck on "Scoring timed out" even though scoring
+    finished. Only the reaper ever writes 'failed' to attempt_answers, so
+    adopting a 'failed' row is always the right move here."""
+    user = _make_user(db_session)
+    q = _make_question(db_session)
+    attempt = _make_practice_attempt(db_session, user.id)
+    aa = AttemptAnswer(
+        attempt_id=attempt.id,
+        question_id=q.question_id,
+        question_type=q.question_type,
+        user_answer_json={"audio_url": "s3://bucket/x.aac"},
+        # Exactly what pending_score_reaper writes when it flips pending→failed.
+        result_json={
+            "scoring_warnings": ["scoring_infrastructure_timeout"],
+            "scoring_failed_at": "2026-07-20T07:10:17Z",
+        },
+        score=0,
+        audio_url="s3://bucket/x.aac",
+        scoring_status="failed",
+    )
+    db_session.add(aa)
+    db_session.commit()
+
+    # Scoring finally returns; update_speaking_score_in_db runs on a daemon
+    # thread — patch threading.Thread to run inline (same pattern as above).
+    import threading
+    real_thread = threading.Thread
+
+    class _InlineThread:
+        def __init__(self, target, daemon=True):
+            self._target = target
+        def start(self):
+            self._target()
+
+    threading.Thread = _InlineThread  # type: ignore
+    try:
+        session_service.update_speaking_score_in_db(
+            user_id=user.id, question_id=q.question_id,
+            content=60.0, pronunciation=45.0, fluency=33.3, total=42.0,
+            transcript="azure-late",
+            scoring_warnings=["pronunciation_fallback_azure"],
+        )
+    finally:
+        threading.Thread = real_thread  # type: ignore
+
+    db_session.expire_all()
+    aa2 = db_session.query(AttemptAnswer).filter_by(question_id=q.question_id).first()
+    assert aa2.scoring_status == "complete", (
+        "A score that lands after the reaper flipped the row to 'failed' must "
+        "be adopted, not discarded. If this fails, the reaper/writer "
+        "reconciliation in update_speaking_score_in_db has regressed."
+    )
+    assert aa2.score == 42  # floored total, >= PTE_FLOOR
+    assert aa2.content_score == 60.0
+    assert aa2.result_json.get("transcript") == "azure-late"
+    assert "scoring_infrastructure_timeout" not in (
+        aa2.result_json.get("scoring_warnings") or []
+    ), "The reaper's timeout stamp must be replaced by the real scoring result."
+
+
 # ── No-regression: Clear-then-Redo and filter exclusions ──────────────────
 
 

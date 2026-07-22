@@ -815,14 +815,23 @@ def update_speaking_score_in_db(
         for attempt in range(1, 4):
             db = SessionLocal()
             try:
-                # Find the most recent pending answer for this user+question
+                # Find the most recent pending-or-reaped answer for this
+                # user+question. We also adopt 'failed' rows so a score that
+                # completes AFTER the pending-score reaper already flipped the
+                # row to 'failed' (slow Azure/Whisper tail) still lands instead
+                # of being silently discarded — otherwise the student is left
+                # with the reaper's zero/"Scoring timed out" even though
+                # scoring finished. Only the reaper ever writes 'failed' to
+                # attempt_answers (the scorer's own error path writes
+                # 'complete' with warnings), so matching 'failed' targets
+                # exactly reaper-orphaned rows.
                 answer = (
                     db.query(AttemptAnswer)
                     .join(PracticeAttempt, AttemptAnswer.attempt_id == PracticeAttempt.id)
                     .filter(
                         PracticeAttempt.user_id == user_id,
                         AttemptAnswer.question_id == question_id,
-                        AttemptAnswer.scoring_status == "pending",
+                        AttemptAnswer.scoring_status.in_(["pending", "failed"]),
                     )
                     .order_by(AttemptAnswer.submitted_at.desc())
                     .first()

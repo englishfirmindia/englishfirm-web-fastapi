@@ -10,6 +10,20 @@ PRESIGNED_UPLOAD_EXPIRY_SECONDS = 300  # 5 minutes
 # ── Azure Speech ──────────────────────────────────────────────────────────────
 AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY", "")
 AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "australiaeast")
+# Per-attempt cap on a single Azure recognition call, and how many attempts
+# before we give up and fall back. Speaking recordings are short (RA ≤40s,
+# RS ≤15s) and Azure's initial-silence VAD window is 20s, so 90s per attempt
+# covers any legitimate recognition with margin. The old 3×180s (=540s) worst
+# case exceeded BOTH the pending-score reaper (300s) and the client poll
+# ceiling (360s): a hung Azure call kept the answer 'pending' long enough to be
+# reaped → the student saw "Scoring timed out" even though scoring later
+# completed via the cross-penalty fallback. 2×90s (=180s) keeps the whole
+# speaking-score path inside both windows.
+# NB: long-audio continuous transcription (transcribe_audio_full — RL/SGD)
+# keeps its own 180s per-attempt timeout in azure_speech_service.py, because
+# that path legitimately processes up to ~180s of audio.
+AZURE_RECOGNITION_TIMEOUT_SECONDS = int(os.getenv("AZURE_RECOGNITION_TIMEOUT_SECONDS", "90"))
+AZURE_RECOGNITION_MAX_ATTEMPTS = int(os.getenv("AZURE_RECOGNITION_MAX_ATTEMPTS", "2"))
 
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "")

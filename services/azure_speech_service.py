@@ -20,6 +20,7 @@ import urllib.parse
 from typing import Optional
 
 from core.logging_config import get_logger
+from core import config
 
 log = get_logger(__name__)
 
@@ -115,7 +116,7 @@ def assess_pronunciation(
     import azure.cognitiveservices.speech as speechsdk
 
     last_exc: Exception = RuntimeError("assess_pronunciation: no attempts made")
-    for attempt in range(1, 4):
+    for attempt in range(1, config.AZURE_RECOGNITION_MAX_ATTEMPTS + 1):
         try:
             wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
 
@@ -147,9 +148,12 @@ def assess_pronunciation(
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                 future = ex.submit(recognizer.recognize_once)
                 try:
-                    result = future.result(timeout=180)
+                    result = future.result(timeout=config.AZURE_RECOGNITION_TIMEOUT_SECONDS)
                 except concurrent.futures.TimeoutError:
-                    raise RuntimeError("Azure: recognize_once timed out after 180s")
+                    raise RuntimeError(
+                        f"Azure: recognize_once timed out after "
+                        f"{config.AZURE_RECOGNITION_TIMEOUT_SECONDS}s"
+                    )
 
             if result.reason == speechsdk.ResultReason.NoMatch:
                 raise RuntimeError("Azure: no speech recognised")
@@ -183,15 +187,17 @@ def assess_pronunciation(
         except Exception as exc:
             last_exc = exc
             logger.warning(
-                "[AZURE] assess_pronunciation attempt=%d/3 failed — %s: %s",
-                attempt, type(exc).__name__, exc,
+                "[AZURE] assess_pronunciation attempt=%d/%d failed — %s: %s",
+                attempt, config.AZURE_RECOGNITION_MAX_ATTEMPTS,
+                type(exc).__name__, exc,
             )
-            if attempt < 3:
+            if attempt < config.AZURE_RECOGNITION_MAX_ATTEMPTS:
                 time.sleep(2)
 
     logger.error(
-        "[AZURE] assess_pronunciation failed after 3 attempts — "
+        "[AZURE] assess_pronunciation failed after %d attempts — "
         "scoring_status remains pending. exception=%s: %s",
+        config.AZURE_RECOGNITION_MAX_ATTEMPTS,
         type(last_exc).__name__, last_exc,
     )
     raise last_exc
@@ -229,7 +235,7 @@ def assess_pronunciation_with_timestamps(
     import threading
 
     last_exc: Exception = RuntimeError("assess_pronunciation_with_timestamps: no attempts")
-    for attempt in range(1, 4):
+    for attempt in range(1, config.AZURE_RECOGNITION_MAX_ATTEMPTS + 1):
         try:
             wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
 
@@ -294,7 +300,7 @@ def assess_pronunciation_with_timestamps(
             audio_stream.close()
 
             recognizer.start_continuous_recognition()
-            done.wait(timeout=180)
+            done.wait(timeout=config.AZURE_RECOGNITION_TIMEOUT_SECONDS)
             recognizer.stop_continuous_recognition()
 
             if not agg["words"]:
@@ -312,14 +318,16 @@ def assess_pronunciation_with_timestamps(
         except Exception as exc:
             last_exc = exc
             logger.warning(
-                "[AZURE] assess_pronunciation_with_timestamps attempt=%d/3 failed — %s: %s",
-                attempt, type(exc).__name__, exc,
+                "[AZURE] assess_pronunciation_with_timestamps attempt=%d/%d failed — %s: %s",
+                attempt, config.AZURE_RECOGNITION_MAX_ATTEMPTS,
+                type(exc).__name__, exc,
             )
-            if attempt < 3:
+            if attempt < config.AZURE_RECOGNITION_MAX_ATTEMPTS:
                 time.sleep(2)
 
     logger.error(
-        "[AZURE] assess_pronunciation_with_timestamps failed after 3 attempts — %s: %s",
+        "[AZURE] assess_pronunciation_with_timestamps failed after %d attempts — %s: %s",
+        config.AZURE_RECOGNITION_MAX_ATTEMPTS,
         type(last_exc).__name__, last_exc,
     )
     raise last_exc
@@ -416,12 +424,13 @@ def transcribe_audio_short(audio_bytes: bytes) -> str:
     """
     Pure STT for short audio (< 30s, e.g. Repeat Sentence stimulus).
     Uses recognize_once() — stops on first silence.
-    Returns transcript string. Retries up to 3 times with 180s timeout.
+    Returns transcript string. Retries per AZURE_RECOGNITION_MAX_ATTEMPTS with
+    AZURE_RECOGNITION_TIMEOUT_SECONDS per attempt.
     """
     if not AZURE_SPEECH_KEY:
         return ""
     import azure.cognitiveservices.speech as speechsdk
-    for attempt in range(1, 4):
+    for attempt in range(1, config.AZURE_RECOGNITION_MAX_ATTEMPTS + 1):
         try:
             wav_bytes = _any_audio_to_wav_pcm(audio_bytes)
             speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
@@ -434,17 +443,26 @@ def transcribe_audio_short(audio_bytes: bytes) -> str:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                 future = ex.submit(recognizer.recognize_once)
                 try:
-                    result = future.result(timeout=180)
+                    result = future.result(timeout=config.AZURE_RECOGNITION_TIMEOUT_SECONDS)
                 except concurrent.futures.TimeoutError:
-                    raise RuntimeError("Azure: recognize_once timed out after 180s")
+                    raise RuntimeError(
+                        f"Azure: recognize_once timed out after "
+                        f"{config.AZURE_RECOGNITION_TIMEOUT_SECONDS}s"
+                    )
             if result.reason == speechsdk.ResultReason.RecognizedSpeech:
                 return result.text
             return ""
         except Exception as exc:
-            logger.warning("[AZURE] transcribe_audio_short attempt=%d/3 failed: %s", attempt, exc)
-            if attempt < 3:
+            logger.warning(
+                "[AZURE] transcribe_audio_short attempt=%d/%d failed: %s",
+                attempt, config.AZURE_RECOGNITION_MAX_ATTEMPTS, exc,
+            )
+            if attempt < config.AZURE_RECOGNITION_MAX_ATTEMPTS:
                 time.sleep(2)
-    logger.error("[AZURE] transcribe_audio_short failed after 3 attempts")
+    logger.error(
+        "[AZURE] transcribe_audio_short failed after %d attempts",
+        config.AZURE_RECOGNITION_MAX_ATTEMPTS,
+    )
     return ""
 
 
