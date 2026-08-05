@@ -798,6 +798,39 @@ def _score_speaking_v2(
     key_points = key_points or []
     expected_answers = expected_answers or []
 
+    # ── SGD latency optimization: overlap Azure free-form with Whisper ─────
+    # For summarize_group_discussion the Azure free-form call
+    # (transcribe_and_score_free) and the Whisper word-timestamp transcription
+    # (transcribe_with_whisper_words) are independent — both consume only
+    # `audio_bytes` and neither reads the other's result. In the default path
+    # they run back-to-back, so wall-clock ≈ Azure + Whisper. Here we start
+    # Whisper in a daemon thread *before* the Azure call so the two overlap;
+    # net latency becomes max(Azure, Whisper). Scoped to SGD only — every
+    # other task type keeps the original sequential path (see the `else` at
+    # the Whisper-join site below). The content LLM still runs afterwards
+    # because it depends on the resolved transcript.
+    #
+    # Semantics are preserved exactly: the worker stashes either the result
+    # or the exception, and the join site re-raises the exception so a Whisper
+    # failure propagates identically to the synchronous call it replaces. No
+    # extra join timeout — the Whisper client already caps itself (15s, no
+    # retries), so join() blocks no longer than the sync call would have.
+    _sgd_parallel = task_type == "summarize_group_discussion"
+    _whisper_holder: dict = {}
+    _whisper_thread = None
+    if _sgd_parallel:
+        def _whisper_words_worker():
+            try:
+                _whisper_holder["result"] = transcribe_with_whisper_words(audio_bytes)
+            except Exception as e:  # noqa: BLE001 — re-raised verbatim at join site
+                _whisper_holder["error"] = e
+        _whisper_thread = threading.Thread(
+            target=_whisper_words_worker,
+            name=f"sgd-whisper-q{question_id}",
+            daemon=True,
+        )
+        _whisper_thread.start()
+
     # Azure pronunciation + word timestamps. Strategy from cfg:
     #   azure_assessment → pronunciation_assessment + reference_text + miscue
     #     (used by ref-bound types: RA, RS — gives an AccuracyScore).
@@ -845,7 +878,16 @@ def _score_speaking_v2(
     # Whisper for transcript (preferred — handles accented PTE vocabulary
     # better than Azure on free-speech-like reads). On free-speech tasks
     # we fall back to the Azure free transcript if Whisper failed.
-    whisper = transcribe_with_whisper_words(audio_bytes)
+    if _sgd_parallel:
+        # Whisper was started before the Azure call above; collect it now.
+        # It has already overlapped Azure, so this usually returns instantly.
+        _whisper_thread.join()
+        _whisper_exc = _whisper_holder.get("error")
+        if _whisper_exc is not None:
+            raise _whisper_exc
+        whisper = _whisper_holder["result"]
+    else:
+        whisper = transcribe_with_whisper_words(audio_bytes)
     whisper_words = whisper.get("words", []) or []
     transcript = (whisper.get("transcript", "") or "").strip()
     whisper_fallback_used = False
