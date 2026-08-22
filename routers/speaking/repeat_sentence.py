@@ -136,7 +136,7 @@ def submit(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _gate=Depends(EnforceLimit("practice")),
+    _gate=Depends(EnforceLimit("practice", skip_if_in_exam=True)),
 ):
     logger.info("[RS submit] payload keys=%s session_id=%s question_id=%s",
                 list(payload.keys()), payload.get("session_id"), payload.get("question_id"))

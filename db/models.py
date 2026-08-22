@@ -71,6 +71,19 @@ class User(Base):
     # social signups stay NULL. First-touch only.
     gclid           = Column(String(200), nullable=True)
 
+    # Lifetime "first free X consumed" flags. Replaces per-month counter
+    # gating for the Free tier's sectional/mock allowance: a free user
+    # gets ONE fully-scored sectional and ONE fully-scored mock, ever.
+    # Flipped TRUE atomically on exam start
+    # (services/billing/free_trial_gate.enforce_free_sectional_or_paid).
+    # Paid users bypass entirely.
+    free_sectional_used = Column(
+        Boolean, nullable=False, server_default="false", default=False,
+    )
+    free_mock_used = Column(
+        Boolean, nullable=False, server_default="false", default=False,
+    )
+
     conversations = relationship(
         "Conversation",
         back_populates="user",

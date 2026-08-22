@@ -35,10 +35,12 @@ short and stable, while the plan-config JSON can rename freely.
 """
 from __future__ import annotations
 
+import json
 import logging
+from datetime import date
 from typing import Callable, Tuple
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from core.dependencies import get_subscription_context
@@ -126,12 +128,50 @@ def check_and_increment_or_raise(
     return ctx, result
 
 
-def EnforceLimit(feature_key: str) -> Callable:
+# Sentinel returned when a gate is skipped (e.g. practice submit inside an
+# exam). Same shape as a real IncrementResult so callers that pattern-match
+# on it don't need to special-case; `allowed=True` and `limit=None` mean
+# "not counted, no cap enforced here".
+_SKIPPED_RESULT = IncrementResult(
+    allowed=True, count_after=0, limit=None, period_start=date.today(),
+)
+
+
+async def _payload_session_id(request: Request) -> str | None:
+    """Peek at the JSON body without consuming it downstream.
+
+    Starlette caches `await request.body()` inside `request._body`, so
+    the route handler's own `Body(...)` binding still deserialises fine
+    after we've read the bytes here. Falls back to None on any parse /
+    IO error — caller treats None as "not-in-exam" (i.e. apply the gate).
+    """
+    try:
+        raw = await request.body()
+        if not raw:
+            return None
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        sid = data.get("session_id")
+        return sid if isinstance(sid, str) and sid else None
+    except Exception:
+        return None
+
+
+def EnforceLimit(feature_key: str, *, skip_if_in_exam: bool = False) -> Callable:
     """Build a FastAPI dependency that gates a route by `feature_key`.
 
     Returns a callable suitable for `Depends(...)`. On allow returns the
     tuple `(SubscriptionContext, IncrementResult)` so the route handler
     can log the usage or surface remaining quota in the response.
+
+    `skip_if_in_exam=True` — inspect the request body's `session_id`; if
+    it belongs to a sectional or mock `PracticeAttempt`, bypass the
+    counter entirely and return a synthetic "skipped" result. Fixes the
+    "sectional consumes practice quota" double-gating bug where a free
+    user's 3/day practice cap killed sectional/mock questions after Q3.
+    Only meaningful on `feature_key="practice"` today, but the parameter
+    is generic in case other gates want the same treatment.
     """
     if feature_key not in _FEATURE_MAP:
         raise ValueError(
@@ -140,10 +180,31 @@ def EnforceLimit(feature_key: str) -> Callable:
         )
     period_type, plan_field = _FEATURE_MAP[feature_key]
 
-    def _dep(
+    async def _dep(
+        request: Request,
         ctx: SubscriptionContext = Depends(get_subscription_context),
         db: Session = Depends(get_db),
     ) -> Tuple[SubscriptionContext, IncrementResult]:
+        # Exam-embedded submits are gated at exam START (either via
+        # `enforce_free_sectional_or_paid`/`_mock_` for free, or
+        # sectionals_per_month/mocks_per_month for paid). Ticking the
+        # per-question counter as well means a 32-question sectional
+        # consumes 32 practice slots — which caps free users at 3
+        # scored questions per sectional. Skip if this submit's
+        # session_id resolves to a sectional/mock attempt.
+        if skip_if_in_exam:
+            sid = await _payload_session_id(request)
+            if sid:
+                # Local import to avoid enforce_limit ↔ free_trial_gate cycle
+                from services.billing.free_trial_gate import submit_is_inside_exam
+                if submit_is_inside_exam(db, sid):
+                    log.info(
+                        "[enforce] SKIPPED user_id=%d feature=%s "
+                        "reason=in-exam sid=%s",
+                        ctx.user_id, feature_key, sid,
+                    )
+                    return ctx, _SKIPPED_RESULT
+
         # Pull limit from the plan's limits dict via the canonical field name.
         # Missing key = unknown to this plan = treat as 0 (blocked).
         limit = ctx.limits.get(plan_field, 0)

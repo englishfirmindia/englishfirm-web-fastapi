@@ -22,6 +22,7 @@ from db.database import get_db
 from db.models import PracticeAttempt, User
 from core.dependencies import get_current_user
 from services.billing.enforce_limit import EnforceLimit
+from services.billing.free_trial_gate import enforce_free_mock_or_paid
 from services.mock_service import (
 
     get_mock_info,
@@ -54,12 +55,15 @@ def mock_start(
     payload: dict = Body(default={}),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _gate=Depends(EnforceLimit("mocks")),
 ):
     """Picks 65 questions and creates a PracticeAttempt(module='mock').
 
     test_number identifies which of the 40 numbered mock slots the user
     chose; 0 is reserved for debug (re-uses already-submitted questions).
+
+    Gating: FREE users get one lifetime mock via the free_mock_used flag.
+    PAID users fall through to the mocks_per_month plan counter. See
+    services/billing/free_trial_gate.py for full semantics.
     """
     test_number = int(payload.get("test_number", 1))
     if test_number != 0 and not (1 <= test_number <= 40):
@@ -67,6 +71,7 @@ def mock_start(
             status_code=400,
             detail="test_number must be between 1 and 40",
         )
+    enforce_free_mock_or_paid(db, current_user)
     return start_mock_test(db=db, user_id=current_user.id, test_number=test_number)
 
 
@@ -106,7 +111,10 @@ def mock_finish(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _score_gate=Depends(EnforceLimit("mock_score")),
+    # Gating happens at mock START (enforce_free_mock_or_paid). Once
+    # started, scoring is unconditional — legacy mock_score counter
+    # (free plan: 0/month) removed so free users actually see their
+    # score for their one lifetime free mock.
 ):
     """Computes 4 section scores + overall."""
     session_id = payload.get("session_id", "")

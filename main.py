@@ -98,6 +98,17 @@ async def _startup_migrations():
                     "CREATE INDEX IF NOT EXISTS "
                     "ix_users_gclid ON users (gclid) WHERE gclid IS NOT NULL"
                 ))
+        # Lifetime "first free X consumed" flags. Replaces the monthly
+        # sectionals_per_month / mocks_per_month counter model for the Free
+        # tier: a free user gets ONE fully-scored sectional and ONE fully-
+        # scored mock, ever. Flipped to TRUE atomically on exam start
+        # (`enforce_free_sectional_or_paid` / `_mock_` helpers).
+        # Paid users bypass the flag entirely.
+        for flag_col in ("free_sectional_used", "free_mock_used"):
+            conn.execute(text(
+                f"ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+                f"{flag_col} BOOLEAN NOT NULL DEFAULT false"
+            ))
         conn.commit()
     # Start the pending-score reaper. Marks orphan scoring_status='pending'
     # rows as 'failed' after 5 min so the frontend can leave the "scoring

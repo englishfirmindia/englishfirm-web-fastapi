@@ -17,6 +17,7 @@ from db.database import get_db
 from db.models import User, PracticeAttempt
 from core.dependencies import get_current_user
 from services.billing.enforce_limit import EnforceLimit, check_and_increment_or_raise
+from services.billing.free_trial_gate import enforce_free_sectional_or_paid
 from services.session_service import ACTIVE_SESSIONS, persist_speaking_answer_pending
 from services.speaking_scorer import kick_off_scoring
 from core.security_helpers import safe_question_id, assert_audio_url_owned, resolve_question_with_retry
@@ -73,7 +74,10 @@ def start_exam(
                     "message": f"Test {test_number} is still in progress — resume it before starting a new attempt.",
                 },
             )
-    check_and_increment_or_raise(db, user_id=current_user.id, feature_key="sectionals")
+    # Free users: lifetime one-shot via free_sectional_used flag.
+    # Paid users: fall through to sectionals_per_month counter inside the
+    # helper. See services/billing/free_trial_gate.py for full semantics.
+    enforce_free_sectional_or_paid(db, current_user)
     return start_speaking_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
 
 
@@ -211,7 +215,10 @@ def finish_exam(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _score_gate=Depends(EnforceLimit("sectional_score")),
+    # Free users are gated at exam START via enforce_free_sectional_or_paid
+    # (lifetime flag). Paid users are gated at exam START via
+    # sectionals_per_month. Once started, the scoring is unconditional —
+    # `sectional_score` counter is no longer needed.
 ):
     session_id = payload["session_id"]
 

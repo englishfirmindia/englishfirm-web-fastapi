@@ -54,6 +54,13 @@ def get_my_subscription(
         # Perpetual Learn-resources flag — survives this subscription's
         # period_end. Set by trainer-granted VIP w/ lifetime-Learn checkbox.
         "unlimited_learn_access": ctx.unlimited_learn_access,
+        # Lifetime "first free sectional/mock consumed" flags — used by the
+        # sectional/mock entry screens to render "Start" vs "Upgrade to
+        # Bronze" button state without a preflight round-trip. Both are
+        # meaningful only for FREE users; paid tiers get unlimited via
+        # their plan limits.
+        "free_sectional_used":    ctx.free_sectional_used,
+        "free_mock_used":         ctx.free_mock_used,
     }
 
 

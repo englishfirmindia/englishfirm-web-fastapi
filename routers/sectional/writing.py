@@ -16,6 +16,7 @@ from db.database import get_db
 from db.models import User, AttemptAnswer, PracticeAttempt
 from core.dependencies import get_current_user
 from services.billing.enforce_limit import EnforceLimit, check_and_increment_or_raise
+from services.billing.free_trial_gate import enforce_free_sectional_or_paid
 from services.session_service import ACTIVE_SESSIONS
 from services.scoring import get_scorer
 from services.writing_sectional_service import (
@@ -111,7 +112,8 @@ def start_exam(
                     "message": f"Test {test_number} is still in progress — resume it before starting a new attempt.",
                 },
             )
-    check_and_increment_or_raise(db, user_id=current_user.id, feature_key="sectionals")
+    # Free tier: lifetime flag. Paid tier: sectionals_per_month counter.
+    enforce_free_sectional_or_paid(db, current_user)
     return start_writing_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
 
 
@@ -238,7 +240,7 @@ def finish_exam(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _score_gate=Depends(EnforceLimit("sectional_score")),
+    # Gating happens at exam START — see enforce_free_sectional_or_paid.
 ):
     session_id = payload["session_id"]
     return finish_writing_sectional(session_id=session_id, user_id=current_user.id, db=db)

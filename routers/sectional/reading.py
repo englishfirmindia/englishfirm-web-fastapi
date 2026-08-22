@@ -30,6 +30,7 @@ from db.database import get_db
 from db.models import User, AttemptAnswer, PracticeAttempt
 from core.dependencies import get_current_user
 from services.billing.enforce_limit import EnforceLimit, check_and_increment_or_raise
+from services.billing.free_trial_gate import enforce_free_sectional_or_paid
 from services.session_service import ACTIVE_SESSIONS
 from services.scoring import get_scorer
 from services.reading_sectional_service import (
@@ -121,9 +122,11 @@ def start_exam(
                     "message": f"Test {test_number} is still in progress — resume it before starting a new attempt.",
                 },
             )
-    # Counter ticks once per sectional started, AFTER the in-progress 409 check
-    # so resuming an existing attempt doesn't burn quota a second time.
-    check_and_increment_or_raise(db, user_id=current_user.id, feature_key="sectionals")
+    # Free users: lifetime one-shot via free_sectional_used flag.
+    # Paid users: fall through to sectionals_per_month counter inside the
+    # helper (unchanged semantics for bronze/silver/gold/vip).
+    # Runs AFTER the in-progress 409 check so resuming doesn't burn quota.
+    enforce_free_sectional_or_paid(db, current_user)
     return start_reading_sectional_exam(db=db, user_id=current_user.id, test_number=test_number)
 
 
@@ -241,7 +244,9 @@ def finish_exam(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _score_gate=Depends(EnforceLimit("sectional_score")),
+    # Gating moved to exam-start (enforce_free_sectional_or_paid). Once a
+    # sectional is started, its scoring is unconditional — the legacy
+    # sectional_score counter is redundant.
 ):
     session_id = payload["session_id"]
 

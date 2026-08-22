@@ -115,7 +115,7 @@ def submit(
     req: MultiOptionSubmitRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _gate=Depends(EnforceLimit("practice")),
+    _gate=Depends(EnforceLimit("practice", skip_if_in_exam=True)),
 ):
     session_id = req.session_id
     question_id = req.question_id

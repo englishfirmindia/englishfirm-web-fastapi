@@ -140,7 +140,7 @@ def submit(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    _gate=Depends(EnforceLimit("practice")),
+    _gate=Depends(EnforceLimit("practice", skip_if_in_exam=True)),
 ):
     session_id = payload["session_id"]
     question_id = safe_question_id(payload, db)

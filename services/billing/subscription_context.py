@@ -77,6 +77,14 @@ class SubscriptionContext:
     # Used by /subscription/me so the Flutter client knows to keep
     # Learn unlocked even when the live subscription has lapsed.
     unlimited_learn_access: bool = False
+    # Lifetime "first free sectional/mock consumed" flags. Mirrored from
+    # `users.free_sectional_used` / `users.free_mock_used`. Frontend uses
+    # these on the sectional/mock entry screens to render the button as
+    # "Start" (flag=false, or paid user) vs "Upgrade to Bronze"
+    # (flag=true, free user). Paid users conceptually don't need these,
+    # but we still expose them so the client rendering is uniform.
+    free_sectional_used: bool = False
+    free_mock_used: bool = False
 
     # ---- Convenience accessors used by EnforceLimit / client code ----
 
@@ -102,6 +110,8 @@ def _build_from_plan(
     plan: SubscriptionPlan,
     subscription: Optional[UserSubscription],
     unlimited_learn_access: bool = False,
+    free_sectional_used: bool = False,
+    free_mock_used: bool = False,
 ) -> SubscriptionContext:
     """Fold a SubscriptionPlan row + (optional) UserSubscription row into
     the immutable context dataclass. Centralises limits_json parsing so
@@ -128,6 +138,8 @@ def _build_from_plan(
             mock_review_days=mock_review_days,
             source=None,
             unlimited_learn_access=unlimited_learn_access,
+            free_sectional_used=free_sectional_used,
+            free_mock_used=free_mock_used,
         )
 
     return SubscriptionContext(
@@ -146,20 +158,31 @@ def _build_from_plan(
         mock_review_days=mock_review_days,
         source=subscription.source,
         unlimited_learn_access=unlimited_learn_access,
+        free_sectional_used=free_sectional_used,
+        free_mock_used=free_mock_used,
     )
 
 
-def _fetch_unlimited_learn_flag(db: Session, user_id: int) -> bool:
-    """Cheap PK lookup for `users.unlimited_learn_access`. Returns False on
-    any failure / missing row so the gate keeps its safe default."""
+def _fetch_user_flags(db: Session, user_id: int) -> tuple[bool, bool, bool]:
+    """Single PK lookup returning
+    `(unlimited_learn_access, free_sectional_used, free_mock_used)`.
+    Returns all-False on any failure / missing row so gates keep their
+    safe defaults. One query instead of three keeps the subscription-me
+    hot path cheap."""
     try:
         from db.models import User as _User
         row = db.execute(
-            select(_User.unlimited_learn_access).where(_User.id == user_id)
+            select(
+                _User.unlimited_learn_access,
+                _User.free_sectional_used,
+                _User.free_mock_used,
+            ).where(_User.id == user_id)
         ).first()
-        return bool(row[0]) if row else False
+        if not row:
+            return False, False, False
+        return bool(row[0]), bool(row[1]), bool(row[2])
     except Exception:
-        return False
+        return False, False, False
 
 
 def resolve_subscription_context(db: Session, user_id: int) -> SubscriptionContext:
@@ -169,7 +192,9 @@ def resolve_subscription_context(db: Session, user_id: int) -> SubscriptionConte
     in the worst case (paid user); one query for Free. Both hit
     primary-key / unique-index lookups.
     """
-    unlimited_learn = _fetch_unlimited_learn_flag(db, user_id)
+    unlimited_learn, free_sectional_used, free_mock_used = _fetch_user_flags(
+        db, user_id
+    )
     # Hot query 1: find a live subscription row. Partial unique index
     # `ix_user_subscriptions_one_live` makes this a single index hit.
     live = (
@@ -201,6 +226,8 @@ def resolve_subscription_context(db: Session, user_id: int) -> SubscriptionConte
             return _build_from_plan(
                 user_id=user_id, plan=plan, subscription=live,
                 unlimited_learn_access=unlimited_learn,
+                free_sectional_used=free_sectional_used,
+                free_mock_used=free_mock_used,
             )
 
     # Free path — synthesize from the free plan row. If even that row is
@@ -228,9 +255,13 @@ def resolve_subscription_context(db: Session, user_id: int) -> SubscriptionConte
             mock_review_days=7,
             source=None,
             unlimited_learn_access=unlimited_learn,
+            free_sectional_used=free_sectional_used,
+            free_mock_used=free_mock_used,
         )
 
     return _build_from_plan(
         user_id=user_id, plan=free_plan, subscription=None,
         unlimited_learn_access=unlimited_learn,
+        free_sectional_used=free_sectional_used,
+        free_mock_used=free_mock_used,
     )
