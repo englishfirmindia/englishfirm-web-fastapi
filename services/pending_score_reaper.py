@@ -35,7 +35,13 @@ from db.database import SessionLocal
 
 log = get_logger(__name__)
 
-_STALE_AFTER_SECONDS = 300  # 5 minutes
+# 15 min (was 300s/5min). A full speaking sectional finishes all ~32 questions
+# at once; the AI/transcription-scored types (ASQ/RL/SGD/RTS) each need
+# sequential Azure→Whisper→GPT round-trips and contend on one task, so a 5-min
+# window flipped still-scoring answers to `failed` mid-flight (e.g. Hasini
+# attempt 15698, 2026-08-22 — 11 rows reaped at finish+300s). 900s gives the
+# burst room to drain before anything is declared orphaned.
+_STALE_AFTER_SECONDS = 900  # 15 minutes
 _REAP_INTERVAL_SECONDS = 60
 
 _thread: Optional[threading.Thread] = None
