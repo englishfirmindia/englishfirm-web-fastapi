@@ -14,7 +14,11 @@ python-multipart>=0.0.9
 slowapi>=0.1.9
 requests>=2.31.0
 openai>=1.40.0
-anthropic>=0.40.0
+# Pinned to the last-known-good production version (was running in image
+# 3125ce3 / task def 199). An unpinned rebuild on 2026-08-22 pulled a newer
+# SDK whose messages.create() rejects the `temperature` kwarg, silently
+# breaking all SWT/SST Claude grammar scoring. Keep pinned to avoid a repeat.
+anthropic==0.117.0
 azure-cognitiveservices-speech>=1.40.0
 pydub>=0.25.0
 pyspellchecker>=0.8.0
