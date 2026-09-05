@@ -274,8 +274,16 @@ Recent scores:
 Exam history:
 {hist_lines}
 
-Weak areas (from practice data, worst first):
+Weak areas (from practice data, worst first — percentage is
+"% of the earnable PTE range above the floor", so 0% = floor-level
+non-response, 100% = ceiling):
 {weak_lines}
+
+PTE SCALE NOTE: All raw scores in this system are on PTE's 10-90 scale
+(10 = FLOOR / unusable/silent submission, 90 = ceiling). NEVER interpret
+a score of 10 as "10 out of 100" — it means the response couldn't be
+scored. Frame floor-level scores as "unusable submissions" or "needs
+valid response", not as "0%".
 {speaking_tasks_block}{contributions_block}{pre_retrieved_block}{pre_retrieved_student_block}{summary_block}{proactive_block}
 {phase_block}
 {gaps_block}

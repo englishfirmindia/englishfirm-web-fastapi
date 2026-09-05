@@ -77,7 +77,65 @@ def get_recent_scores(user_id: int, db: Session, limit: int = 5) -> list[dict]:
 # ── Tool: get_weak_areas ──────────────────────────────────────────────────────
 
 def get_weak_areas(user_id: int, db: Session, threshold_pct: float = 0.55) -> list[dict]:
+    """Return task types where the user's average is below `threshold_pct`
+    of the earnable PTE range.
+
+    Rewritten 2026-09-05 after a stack of bugs was surfaced by Kaspin's
+    "critical, 0%" Coach response (u=75):
+
+      Old code kept a hand-maintained `_MAX_PTS` dict mapping each
+      question_type to a "max points" value. That dict was silently
+      out-of-date on two axes:
+        1. Question-type NAMES had been renamed in the DB (`reorder_paragraphs`,
+           `reading_fib_drop_down`, `listening_wfd`, `mcq_multiple`, etc.)
+           but the dict still had the pre-rename keys (`re_order_paragraph`,
+           `reading_and_writing_fib`, `write_from_dictation`, …). Every
+           real type fell through to the default `max_pts=10`.
+        2. The dict assumed some types (`answer_short_question`,
+           `listening_fib`, `highlight_incorrect_words`, …) still stored
+           raw rubric points (max=1) — but the 2026-05 migration
+           canonicalised `attempt_answers.score` to the PTE 10-90 scale
+           for ALL live types. Result: pct = avg_score / 1 → 1400%+.
+
+      Net effect on real users:
+        • Kaspin: only `write_essay: 50%` reached the LLM. Everything
+          else (SST 60%, MCQ multi ~7%, listening WFD ~14% of earnable)
+          hidden by the buggy max_pts.
+        • Nimisha (real active student, 96 RS + 42 RA + 54 reading FIB):
+          weak_areas was EMPTY. LLM was told "no significant weak areas"
+          for a student whose MCQ / listening MCQ average is 18-31% of
+          earnable — clearly weak.
+
+    New formula (verified against a whole-DB score-range diagnostic —
+    every non-deprecated question_type stores PTE 10-90 today):
+
+        pct_of_earnable = max(0.0, (avg_score - 10) / 80.0)
+
+    10 is the PTE floor (no scoreable response). 90 is the ceiling.
+    Subtracting the floor before dividing by the earnable range (80)
+    gives an honest 0-100% "how far did they get above the floor" —
+    the same shape as the client-side progress bar in the results
+    screens (see `AppConfig.pteBase / pteScale` in the web app).
+
+    Deprecated raw-rubric legacy types (<20 rows total across the whole
+    DB) are skipped rather than special-cased — they're too rare to
+    matter for weak-area detection, and mis-classifying them would
+    reintroduce the exact bug we just fixed.
+    """
     from db.models import AttemptAnswer, PracticeAttempt
+
+    # Deprecated / near-dead question_types where `score` still stores
+    # raw rubric points. Confirmed via a whole-DB max(score) scan on
+    # 2026-09-05: each has <20 rows total AND max(score) <= 15.
+    _DEPRECATED_RAW = {
+        "fill_in_the_blanks",
+        "highlight_correct_summary",
+        "multiple_choice_multiple",
+        "multiple_choice_single",
+        "reading_fib",
+        "select_missing_word",
+        "write_from_dictation",
+    }
 
     rows = (
         db.query(
@@ -95,28 +153,25 @@ def get_weak_areas(user_id: int, db: Session, threshold_pct: float = 0.55) -> li
         .all()
     )
 
-    _MAX_PTS = {
-        "read_aloud": 15, "repeat_sentence": 13, "describe_image": 16,
-        "retell_lecture": 16, "respond_to_situation": 16,
-        "summarize_group_discussion": 16, "answer_short_question": 1,
-        "summarize_written_text": 10, "write_essay": 15,
-        "reading_and_writing_fib": 1, "reading_mcm": 1, "reading_mcs": 1,
-        "re_order_paragraph": 1, "listening_fib": 1, "write_from_dictation": 1,
-        "highlight_correct_summary": 1, "highlight_incorrect_words": 1,
-        "select_missing_word": 1, "summarize_spoken_text": 10,
-    }
-
     weak = []
     for qt, avg_score, count in rows:
         if count < 2:
             continue
-        max_pts = _MAX_PTS.get(qt, 10)
-        pct = (avg_score or 0) / max_pts
+        if qt in _DEPRECATED_RAW:
+            continue
+
+        avg = float(avg_score or 0)
+        # PTE 10-90 scale. Anything below 10 is floor / no-response;
+        # clamp to 0 so the pct never goes negative on abandoned rows.
+        pct = max(0.0, (avg - 10.0) / 80.0)
+
         if pct < threshold_pct:
             weak.append({
                 "task_type":     qt,
-                "avg_score":     round(float(avg_score or 0), 2),
-                "max_score":     max_pts,
+                "avg_score":     round(avg, 2),
+                "max_score":     90,   # PTE ceiling — kept in payload for
+                                       # backwards compat with any caller
+                                       # that reads max_score.
                 "pct":           round(pct, 3),
                 "attempt_count": count,
             })

@@ -150,8 +150,32 @@ def _fmt_recent_scores(recent: list) -> str:
         return "  No recent scores yet."
     lines = []
     for r in recent:
-        lines.append(f"  • {r['module'].title()}: {r['score']} pts ({r.get('completed_at', '')[:10]})")
+        # Include total_questions so the LLM knows this was e.g. a 66-q
+        # mock vs a 33-q sectional — helps it reason about the score
+        # meaningfully. `score` is on PTE's 10-90 scale (see the PTE-scale
+        # hint block in the system prompts below).
+        qcount = r.get("total_questions")
+        qcount_str = f", {qcount}q" if qcount else ""
+        lines.append(
+            f"  • {r['module'].title()}: {r['score']} PTE ({r.get('completed_at', '')[:10]}{qcount_str})"
+        )
     return "\n".join(lines)
+
+
+# Reusable clarifier block for every Coach prompt. Without this, Claude
+# reads "10 pts" in the recent-scores block and (correctly, from a
+# generic-scoring perspective) infers "essentially 0" — leading to the
+# 2026-09 "Kaspin scored 0%" false-alarm. Explicitly telling it the
+# scale kills that misreading.
+_PTE_SCALE_HINT = """
+IMPORTANT: PTE Academic scores range from 10 (the FLOOR — a
+non-response, silent mic, or unusable submission) to 90 (perfect). A
+score of 10 does NOT mean "10 out of 100" — it means the response
+couldn't be scored at all. Frame floor-level scores (10-20) as
+"unusable submissions" or "needs valid response", not as "0%".
+Weak-area percentages below are already normalised to the earnable
+range: 0% = at the floor, 100% = at the ceiling.
+"""
 
 
 def _fmt_new_practice(new_practice: list) -> str:
@@ -191,6 +215,7 @@ Student data:
 - Weak areas (worst first):
 {weak_text}
 
+{_PTE_SCALE_HINT}
 Rules:
 - Be specific and actionable. Reference the actual weak areas above.
 - Structure: Priority tasks this week → Daily routine → Quick wins
@@ -349,6 +374,7 @@ Student data:
 - Weak areas (worst first):
 {weak_text}
 
+{_PTE_SCALE_HINT}
 Rules:
 - Be specific and actionable. Reference the actual weak areas above.
 - Structure: Priority tasks this week → Daily routine → Quick wins
