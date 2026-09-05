@@ -109,6 +109,15 @@ async def _startup_migrations():
                 f"ALTER TABLE users ADD COLUMN IF NOT EXISTS "
                 f"{flag_col} BOOLEAN NOT NULL DEFAULT false"
             ))
+        # Apple Sign In "Hide My Email" flag — populated by /auth/apple
+        # when the incoming email ends in @privaterelay.appleid.com.
+        # Consumed by mobile Settings to surface the "Merge with desktop
+        # account" CTA. NOT NULL because we always know the answer at
+        # signup — every user is either using relay or a real address.
+        conn.execute(text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS apple_relay_email "
+            "BOOLEAN NOT NULL DEFAULT false"
+        ))
         conn.commit()
     # Start the pending-score reaper. Marks orphan scoring_status='pending'
     # rows as 'failed' after 5 min so the frontend can leave the "scoring

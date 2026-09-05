@@ -17,7 +17,14 @@ from core.rate_limit import limiter
 from db.database import SessionLocal, get_db
 from db.models import User
 from services.email import send_password_reset
+from services.email_normaliser import normalise_email
 from services.zapier import send_signup_webhook
+
+# Apple's Sign-In-With-Apple "Hide My Email" relay host. Emails ending in
+# this domain are Apple-generated forwarding addresses, not the user's
+# real email. We tag them so mobile Settings can offer a "merge with your
+# desktop account" flow.
+_APPLE_RELAY_HOST = "@privaterelay.appleid.com"
 from services.auth_token_service import (
     issue_access_token,
     issue_token_pair,
@@ -286,12 +293,16 @@ def _parse_exam_date(exam_date_str: Optional[str]) -> Optional[date]:
 @router.post("/signup", status_code=201)
 @limiter.limit("5/minute")
 def signup(request: Request, req: SignupRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.email == req.email).first():
+    # Canonicalise before lookup / insert so `Foo@Gmail.com`, `foo@gmail.com`,
+    # and `foo+work@gmail.com` all resolve to the same account row. See
+    # services/email_normaliser.py for the full rule set.
+    email = normalise_email(req.email)
+    if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
     parsed_exam_date = _parse_exam_date(req.exam_date)
     user = User(
         username=req.username,
-        email=req.email,
+        email=email,
         hashed_password=_pwd.hash(req.password),
         phone=req.phone,
         score_requirement=req.score_requirement,
@@ -334,7 +345,7 @@ def login(
     form: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
-    user = db.query(User).filter(User.email == form.username).first()
+    user = db.query(User).filter(User.email == normalise_email(form.username)).first()
     if not user or not _pwd.verify(form.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -359,7 +370,7 @@ def forgot_password(
         "message": "If that email is registered, a reset link is on its way.",
         "expires_in_minutes": config.PASSWORD_RESET_TOKEN_EXPIRY_MINUTES,
     }
-    email = (req.email or "").strip().lower()
+    email = normalise_email(req.email or "")
     if "@" not in email:
         return generic_response
 
@@ -429,6 +440,9 @@ def google_auth(
     if not token_info.get("email_verified", False):
         raise HTTPException(status_code=401, detail="Google email not verified")
 
+    # Canonicalise before lookup so `Foo@Gmail.com` + `foo+work@gmail.com`
+    # both land on the same account row.
+    email = normalise_email(email)
     user = db.query(User).filter(User.email == email).first()
     is_new_user = False
     if not user:
@@ -522,6 +536,13 @@ def apple_auth(
     if not email:
         raise HTTPException(status_code=401, detail="Apple token missing email")
 
+    # Detect Apple "Hide My Email" relay BEFORE normalising — the domain
+    # check is exact and case-insensitive; normalising just lowercases so
+    # order doesn't strictly matter, but keeping the check on the raw
+    # email is more obvious to a future reader.
+    is_relay = email.lower().endswith(_APPLE_RELAY_HOST)
+    email = normalise_email(email)
+
     user = db.query(User).filter(User.email == email).first()
     if not user:
         name = email.split("@")[0]
@@ -530,10 +551,22 @@ def apple_auth(
             username=name,
             email=email,
             hashed_password=_pwd.hash(claims.get("sub", "")),
+            apple_relay_email=is_relay,
         )
         db.add(user)
         db.commit()
         db.refresh(user)
+    else:
+        # Existing user signing in via Apple — if they were previously
+        # tagged as relay and are now signing in with the same relay
+        # address (or vice versa), keep the flag current. Upgrade-only:
+        # never overwrite an existing True with False for a user whose
+        # email happens to look real but was in fact a relay we tagged
+        # historically.
+        if is_relay and not user.apple_relay_email:
+            user.apple_relay_email = True
+            db.add(user)
+            db.commit()
 
     return _issue_pair_and_set_cookies(db, user.id, request, response)
 
@@ -548,7 +581,121 @@ def me(user: User = Depends(get_current_user)):
         "id": user.id,
         "email": user.email,
         "username": user.username,
+        # Mobile Settings reads this to surface the "Merge with your
+        # desktop account" CTA when the user signed up via Apple's
+        # Hide-My-Email relay and might already have a real-email
+        # account from the web signup path.
+        "apple_relay_email": bool(user.apple_relay_email),
     }
+
+
+class MergeWithDesktopRequest(BaseModel):
+    """Body of POST /auth/merge-with-desktop.
+
+    Called from mobile Settings when a user who signed up via Apple's
+    Hide-My-Email relay wants to link their mobile session to their
+    existing desktop (email+password) account.
+    """
+    target_email:    str   # the desktop account's email
+    target_password: str   # proves ownership of the desktop account
+
+
+@router.post("/merge-with-desktop")
+@limiter.limit("5/minute")
+def merge_with_desktop(
+    request: Request,
+    response: Response,
+    body: MergeWithDesktopRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Merge the caller's (relay-email / mobile-only) account into an
+    existing desktop account whose credentials the caller can prove they
+    own. Reassigns primary progress tables (practice_attempts,
+    user_question_attempts, conversations) from caller → target, then
+    deletes the caller row and issues fresh tokens for the target
+    account. Client should replace its stored tokens with the returned
+    pair.
+
+    Safety guards
+    -------------
+    - Caller must be authenticated (Depends(get_current_user)).
+    - Target credentials must verify. 401 on any mismatch — never leak
+      whether the target email exists (uniform response like /login).
+    - Refuse if caller has significant payment/subscription history on
+      the caller-side account — those tables need manual reconciliation
+      (a user shouldn't be able to silently transfer a paid subscription
+      onto a different account row). Direct them to support instead.
+    - Refuse if caller is already the target (self-merge is a no-op that
+      would delete the very account we're returning tokens for).
+
+    All DB writes in one transaction — a mid-merge failure rolls back
+    fully; user is never left with half-migrated data.
+    """
+    target_email = normalise_email(body.target_email or "")
+    if "@" not in target_email:
+        raise HTTPException(status_code=400, detail="target_email invalid")
+
+    target = db.query(User).filter(User.email == target_email).first()
+    if not target or not _pwd.verify(body.target_password, target.hashed_password):
+        # Uniform 401 — don't leak whether the target exists.
+        raise HTTPException(status_code=401, detail="Target credentials invalid")
+
+    if target.id == current_user.id:
+        # Merging into yourself is a no-op that would still trigger the
+        # DELETE below. Cheap early return.
+        raise HTTPException(status_code=400, detail="Already signed in as target account")
+
+    # Refuse if the caller (relay) side has a paid subscription — merging
+    # would either drop it (bad for user) or double-count on target (bad
+    # for us). Direct to support for manual reconciliation.
+    from db.models import UserSubscription, PaymentTransaction
+    caller_has_subs = (
+        db.query(UserSubscription)
+        .filter(UserSubscription.user_id == current_user.id)
+        .first()
+        is not None
+    )
+    caller_has_payments = (
+        db.query(PaymentTransaction)
+        .filter(PaymentTransaction.user_id == current_user.id)
+        .first()
+        is not None
+    )
+    if caller_has_subs or caller_has_payments:
+        raise HTTPException(
+            status_code=409,
+            detail="This account has payment history. Contact support to merge.",
+        )
+
+    # ── Reassign primary progress tables ─────────────────────────────
+    # Only tables where merging is unambiguous. `student_trainer_profiles`,
+    # `milestones`, `usage_counters` are per-user rollups where merging
+    # semantics are ambiguous — leaving them attached to the deleted
+    # caller means they get CASCADE-deleted, which is the safe default
+    # (target user's rollups stay authoritative).
+    from db.models import PracticeAttempt, UserQuestionAttempt, Conversation
+
+    for model in (PracticeAttempt, UserQuestionAttempt, Conversation):
+        db.query(model).filter(model.user_id == current_user.id).update(
+            {model.user_id: target.id}, synchronize_session=False,
+        )
+
+    # Delete the caller row — CASCADE handles the leftover per-user
+    # rollups (usage_counters, milestones, refresh tokens, etc.).
+    caller_id = current_user.id
+    db.delete(current_user)
+    db.commit()
+
+    _log.info(
+        "[MERGE_WITH_DESKTOP] caller=%s merged into target=%s (%s)",
+        caller_id, target.id, target.email,
+    )
+
+    # Return fresh tokens for the TARGET account so the mobile client
+    # can replace its stored pair. Frontend must call this to update
+    # localStorage / SharedPreferences before any subsequent request.
+    return _issue_pair_and_set_cookies(db, target.id, request, response)
 
 
 class RefreshRequest(BaseModel):

@@ -84,6 +84,17 @@ class User(Base):
         Boolean, nullable=False, server_default="false", default=False,
     )
 
+    # TRUE when this user's email is an Apple "Hide My Email" relay
+    # address (`*@privaterelay.appleid.com`). Set by routers/auth.py
+    # apple_auth on first signup via Apple. Consumed by Settings on the
+    # mobile app to surface a "Merge with your desktop account" CTA —
+    # relay users often already have a real-email account from the web
+    # signup path, and without merging, their mobile progress lives on a
+    # separate row from their desktop progress.
+    apple_relay_email = Column(
+        Boolean, nullable=False, server_default="false", default=False,
+    )
+
     conversations = relationship(
         "Conversation",
         back_populates="user",
