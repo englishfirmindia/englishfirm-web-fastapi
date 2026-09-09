@@ -17,6 +17,17 @@ from core.dependencies import get_current_user
 router = APIRouter(prefix="/user", tags=["User"])
 
 
+# Internal allowlist for the EF Coach floating-bubble rollout — engineers
+# + trainers who need to see the widget regardless of acquisition source
+# so they can dogfood + demo it. Google-Ads-acquired users are the real
+# target audience; this list is temporary and can be dropped once the
+# widget graduates from eval.
+_COACH_BUBBLE_ALLOWLIST = {
+    "kaspin.tonus@gmail.com",
+    "nimishaelizabethjames99@gmail.com",
+}
+
+
 @router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
     return {
@@ -25,9 +36,13 @@ def get_me(current_user: User = Depends(get_current_user)):
         "email": current_user.email,
         "score_requirement": current_user.score_requirement,
         "exam_date": str(current_user.exam_date) if current_user.exam_date else None,
-        # Consumed by the web frontend to gate the EF Coach floating-bubble
-        # first-visit prompt to Google-Ads-acquired users only.
+        # Raw acquisition flag — kept for other consumers that already read it.
         "from_google_ads": bool(current_user.from_google_ads),
+        # Computed gate for the EF Coach floating-bubble prompt on the web
+        # app. Google-Ads-acquired users, plus a small allowlist of
+        # engineers + trainers who need to see it for dogfooding.
+        "coach_bubble_enabled": bool(current_user.from_google_ads)
+            or (current_user.email or "").lower() in _COACH_BUBBLE_ALLOWLIST,
     }
 
 
