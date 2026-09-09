@@ -25,6 +25,9 @@ def get_me(current_user: User = Depends(get_current_user)):
         "email": current_user.email,
         "score_requirement": current_user.score_requirement,
         "exam_date": str(current_user.exam_date) if current_user.exam_date else None,
+        # Consumed by the web frontend to gate the EF Coach floating-bubble
+        # first-visit prompt to Google-Ads-acquired users only.
+        "from_google_ads": bool(current_user.from_google_ads),
     }
 
 
