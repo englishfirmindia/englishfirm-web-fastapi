@@ -820,3 +820,24 @@ class RefundRequest(Base):
             name="ck_refund_status",
         ),
     )
+
+
+class NudgeEvent(Base):
+    """Append-only funnel log for in-app Coach nudges (bubble greeting, per-
+    question-type post-submit feedback modal, etc.). One row per fired event
+    so we can measure conversion: shown → clicked → booked. Nudge sources
+    are identified by string `nudge_id` (e.g. 'gads_first_visit',
+    'post_submit_ra', 'post_submit_rs', 'post_submit_fib_dd')."""
+    __tablename__ = "nudge_events"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    user_id      = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                          nullable=False, index=True)
+    nudge_id     = Column(String(64), nullable=False, index=True)
+    event_type   = Column(String(32), nullable=False, index=True)
+    # feedback_shown | feedback_dismissed | feedback_clicked_book |
+    # booking_started | booking_confirmed | booking_cancelled |
+    # (bubble) shown | yes | no | dismissed | chat_started | maximised | jumped_full
+    meta         = Column(JSONB, nullable=True)
+    created_at   = Column(DateTime(timezone=True), server_default=func.now(),
+                          index=True)
