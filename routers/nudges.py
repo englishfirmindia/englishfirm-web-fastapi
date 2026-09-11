@@ -41,6 +41,8 @@ def log_event(
         # post-submit feedback modal
         "feedback_shown", "feedback_dismissed", "feedback_clicked_book",
         "booking_started", "booking_confirmed", "booking_cancelled",
+        # exit-intent (dialog × intercept + mouseleave from top)
+        "exit_intent_shown", "exit_intent_booked", "exit_intent_left",
     }
     if req.event_type not in ALLOWED:
         raise HTTPException(status_code=400,
