@@ -319,19 +319,17 @@ def signup(request: Request, req: SignupRequest, background_tasks: BackgroundTas
     db.add(user)
     db.commit()
     db.refresh(user)
-    # Zapier signup webhook — DISABLED 2026-09-11 for Google-Ads desktop
-    # cohort. Reason: the in-app EF Coach funnel (post-submit modal +
-    # Calendly embed + exit-intent) now runs in parallel and the CRM
-    # entry was creating duplicate outreach. Re-enable by uncommenting
-    # the block below when the funnel comparison is finished.
-    #
-    # if req.from_google_ads:
-    #     background_tasks.add_task(
-    #         send_signup_webhook,
-    #         student_name=req.username,
-    #         phone_number=req.phone,
-    #         exam_date=parsed_exam_date,
-    #     )
+    # Zapier signup webhook — RE-ENABLED 2026-09-17 after killing the
+    # in-app EF Coach funnel (post-submit modal + mouseleave exit-intent)
+    # on the same day. Duplicate-outreach concern that motivated the
+    # 2026-09-11 disable is now neutralised.
+    if req.from_google_ads:
+        background_tasks.add_task(
+            send_signup_webhook,
+            student_name=req.username,
+            phone_number=req.phone,
+            exam_date=parsed_exam_date,
+        )
     # Server-side GeoIP enrichment after response is sent — signup latency
     # unaffected. Best-effort; columns stay NULL if ipapi.co is slow/down.
     background_tasks.add_task(_enrich_user_geoip, user.id, _client_ip(request))
