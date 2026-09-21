@@ -84,6 +84,13 @@ def _is_trivial_greeting(message: str) -> bool:
 
 class ChatRequest(BaseModel):
     message: str
+    # Optional caller-supplied phase override. Used by the coach-bubble
+    # frontend to pin the conversation to a specialised system prompt
+    # (`coach_bubble_deviation` for free-text answers in the rules-based
+    # question flow, `coach_bubble_booking` for the day/time-collection
+    # step that ends in a schedule_demo tool call). When null, the server
+    # computes the phase from trainer/session state as normal.
+    phase: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -338,6 +345,15 @@ async def chat_stream(
     phase              = compute_phase(trainer_profile, new_practice)
     completeness_flags = compute_completeness_flags(trainer_profile)
     t = ms("db:new_practice+phase", t)
+
+    # Caller override — coach-bubble uses this to pin to a specialised
+    # system prompt (deviation answer / booking-time collection). We
+    # accept the override only for the whitelisted coach_bubble_* phases
+    # so a rogue client can't force us into e.g. "planning" and skip the
+    # profile-gap intake logic.
+    if request.phase in {"coach_bubble_deviation", "coach_bubble_booking"}:
+        phase = request.phase
+        log.info("[COACH_BUBBLE] phase override → %s", phase)
 
     recent_messages = (
         db.query(Message)

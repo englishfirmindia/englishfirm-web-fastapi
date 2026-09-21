@@ -43,6 +43,7 @@ TOOL_CALL_LIMITS: dict[str, int] = {
     "save_student_info":         1,
     "get_attempt_detail":        1,
     "get_recent_task_answers":   1,
+    "schedule_demo":             1,
 }
 
 
@@ -238,6 +239,45 @@ TOOL_REGISTRY: dict[str, dict] = {
                 },
                 "required": [],
                 "additionalProperties": False,
+            },
+        },
+    },
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # schedule_demo — books a free 30-min demo with Nimisha via Zapier.
+    # Ported 2026-09-21 from englishfirm-app-fastapi. Called from the coach
+    # bubble booking flow after the user's clicked "Yes, book demo".
+    # Phone is auto-injected server-side from users.phone; system prompt
+    # instructs Claude not to ask again.
+    # ─────────────────────────────────────────────────────────────────────────
+    "schedule_demo": {
+        "schema": {
+            "name": "schedule_demo",
+            "description": (
+                "Book a free 30-minute demo with Nimisha (our head PTE coach). "
+                "ONLY call after collecting these fields in natural conversation "
+                "AND after the student explicitly confirms ('yes, book that'):\n"
+                "  - preferred_day (human phrase, e.g. 'Tuesday')\n"
+                "  - preferred_time (human phrase, e.g. '2pm', 'morning')\n"
+                "  - phone (Australian mobile)\n"
+                "  - scheduled_date (YYYY-MM-DD, the actual next matching date in "
+                "Australia/Sydney — compute from today's date given in the system prompt)\n"
+                "  - scheduled_time (HH:MM 24-hour in Australia/Sydney — e.g. '14:00' for 2pm)\n"
+                "Do not call if the student is a paying subscriber or already has "
+                "a booking — the system will block those anyway."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "preferred_day":  {"type": "string", "description": "Human phrase, e.g. 'Tuesday', 'this Friday'"},
+                    "preferred_time": {"type": "string", "description": "Human phrase, e.g. '2pm', 'morning'"},
+                    "phone":          {"type": "string", "description": "Australian mobile, e.g. '0432 269 874'"},
+                    "scheduled_date": {"type": "string", "description": "Concrete date in YYYY-MM-DD (Australia/Sydney)"},
+                    "scheduled_time": {"type": "string", "description": "Concrete time in HH:MM 24h (Australia/Sydney)"},
+                    "notes":          {"type": "string", "description": "Optional context about the student's goal"},
+                },
+                "required": ["preferred_day", "preferred_time", "phone",
+                             "scheduled_date", "scheduled_time"],
             },
         },
     },
@@ -462,6 +502,107 @@ def _handle_save_student_info(args: dict, ctx: ToolContext) -> str:
         return "Could not save student info."
 
 
+def _handle_schedule_demo(args: dict, ctx: ToolContext) -> str:
+    """Sends demo booking to Zapier. Idempotency via conversation.pinned_summary.
+
+    Ported 2026-09-21 from englishfirm-app-fastapi. Uses the same Zapier
+    destination URL (ZAPIER_DEMO_BOOKING_URL) so Nimisha's existing Zap
+    chain handles both apps' bookings — payload carries `source='web_coach'`
+    for downstream filtering if needed.
+    """
+    from sqlalchemy import text as sql_text
+    from services.zapier import send_demo_booking
+
+    day            = str(args.get("preferred_day", "")).strip()
+    time_pref      = str(args.get("preferred_time", "")).strip()
+    phone          = str(args.get("phone", "")).strip()
+    notes          = str(args.get("notes", "")).strip()
+    scheduled_date = str(args.get("scheduled_date", "")).strip()
+    scheduled_time = str(args.get("scheduled_time", "")).strip()
+
+    if not (day and time_pref and phone):
+        return "Missing preferred_day / preferred_time / phone. Please re-collect from user."
+    if not (scheduled_date and scheduled_time):
+        return (
+            "Missing scheduled_date (YYYY-MM-DD) or scheduled_time (HH:MM). "
+            "Compute the next matching date/time in Australia/Sydney from today's "
+            "date and the user's preferences, then re-call this tool."
+        )
+    if len(phone.replace(" ", "").replace("-", "")) < 8:
+        return "Phone number looks too short. Please re-ask."
+
+    # Subscriber + double-booking safety net (system prompt should have blocked
+    # earlier, but never trust the LLM to enforce business rules).
+    subs = ctx.db.execute(sql_text(
+        "SELECT COUNT(*) FROM user_subscriptions WHERE user_id=:uid AND status='active'"
+    ), {"uid": ctx.user_id}).scalar() or 0
+    if subs > 0:
+        return "User is a paying subscriber. Do not book a demo — tell user support handles their account."
+
+    booked = ctx.db.execute(sql_text(
+        "SELECT COUNT(*) FROM conversations WHERE user_id=:uid AND pinned_summary LIKE 'DEMO_BOOKED:%'"
+    ), {"uid": ctx.user_id}).scalar() or 0
+    if booked > 0:
+        return "User already has an existing demo booking. Do NOT re-book — refer them to their email."
+
+    # Look up email + target score for the Zapier email body
+    email = None
+    target_score = None
+    try:
+        from db.models import User
+        u = ctx.db.query(User).filter(User.id == ctx.user_id).first()
+        if u:
+            email = getattr(u, "email", None)
+            target_score = getattr(u, "score_requirement", None)
+    except Exception as e:
+        log.warning("[TOOL] schedule_demo user lookup failed: %s", e)
+
+    ok = send_demo_booking(
+        user_id=ctx.user_id,
+        username=ctx.username,
+        email=email,
+        target_score=target_score,
+        preferred_day=day,
+        preferred_time=time_pref,
+        phone=phone,
+        notes=notes,
+        scheduled_date=scheduled_date,
+        scheduled_time=scheduled_time,
+    )
+    if not ok:
+        return (
+            "Booking submission failed. Apologise to user and suggest they "
+            "email support@englishfirm.com mentioning the preferred slot."
+        )
+
+    # Mark active conversation as booked (idempotency + precheck signal)
+    try:
+        from db.models import Conversation
+        conv = (
+            ctx.db.query(Conversation)
+            .filter(Conversation.user_id == ctx.user_id, Conversation.status == "active")
+            .first()
+        )
+        if conv is not None:
+            conv.pinned_summary = f"DEMO_BOOKED:{scheduled_date} {scheduled_time} @ {phone}"
+            ctx.db.commit()
+    except Exception as e:
+        # Booking already sent to Zapier — don't undo it if the marker fails.
+        log.warning("[TOOL] schedule_demo pinned_summary update failed: %s", e)
+
+    log.info(
+        "[TOOL] schedule_demo booked user_id=%s date=%s time=%s (Sydney)",
+        ctx.user_id, scheduled_date, scheduled_time,
+    )
+    # Marker consumed by the coach-bubble stream reader on the frontend —
+    # do NOT change the shape or wording. Everything before/after can shift.
+    return (
+        f"<<BOOKING_CONFIRMED>> "
+        f"Booking submitted for {scheduled_date} at {scheduled_time} (Sydney) "
+        f"on {phone}. Confirm to user: Nimisha will call them {day} at {time_pref}."
+    )
+
+
 # ── Handler dispatch map ──────────────────────────────────────────────────────
 
 _HANDLERS: dict[str, Any] = {
@@ -471,6 +612,7 @@ _HANDLERS: dict[str, Any] = {
     "get_attempt_detail":         _handle_get_attempt_detail,
     "get_recent_task_answers":    _handle_get_recent_task_answers,
     "save_student_info":          _handle_save_student_info,
+    "schedule_demo":              _handle_schedule_demo,
 }
 
 

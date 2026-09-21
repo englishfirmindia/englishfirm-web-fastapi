@@ -463,6 +463,27 @@ async def stream_ai_reply(
         if not user_message.strip():
             raise ValueError("Empty message")
 
+        # ── Coach-bubble fast paths ───────────────────────────────────────────
+        # Skip small-talk router, rich context, task routing and the full
+        # coaching system prompt — these phases have their own minimal
+        # prompts + tool sets defined in services.coach_bubble_stream.
+        if phase == "coach_bubble_deviation":
+            from services.coach_bubble_stream import stream_deviation
+            async for chunk in stream_deviation(user_message):
+                yield chunk
+            return
+        if phase == "coach_bubble_booking":
+            from services.coach_bubble_stream import stream_booking
+            async for chunk in stream_booking(
+                user_message=user_message,
+                user=user,
+                user_id=user_id,
+                db=db,
+                conversation_messages=conversation_messages or [],
+            ):
+                yield chunk
+            return
+
         # ── Small talk filter ─────────────────────────────────────────────────
         intent = SmallTalkRouter.classify(user_message)
         if intent not in (ChatIntent.OTHER, ChatIntent.EMPTY):
