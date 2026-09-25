@@ -1,7 +1,9 @@
+from datetime import date as date_cls
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func
+from sqlalchemy import func, text as sql_text
 
 from db.database import get_db
 from db.models import (
@@ -66,6 +68,101 @@ def get_dashboard(
         "total_questions_answered": total_answered,
         "practice_days": practice_days,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Journey progress — feeds the v2 practice hub milestone timeline + goal/date
+# info card. One endpoint reads three counts + the user's goal/date; one
+# endpoint patches goal/date. Kept out of /user/me so unrelated callers don't
+# pay for the extra COUNT queries on every /me hit.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Static totals — 22 question types (7 speaking + 2 writing + 5 reading + 8
+# listening), 4 sectional slots (one per module), 2 full mock tests currently
+# seeded in mock_test_questions.
+_JOURNEY_PRACTICE_TOTAL = 22
+_JOURNEY_SECTIONAL_TOTAL = 4
+
+
+class JourneyPatchBody(BaseModel):
+    exam_goal: Optional[int] = None
+    exam_date: Optional[date_cls] = None   # accepts YYYY-MM-DD strings
+
+    @field_validator("exam_goal")
+    @classmethod
+    def _goal_in_range(cls, v):
+        if v is None:
+            return v
+        if v not in (50, 65, 79):
+            raise ValueError("exam_goal must be 50, 65, or 79")
+        return v
+
+    @field_validator("exam_date")
+    @classmethod
+    def _date_not_past(cls, v):
+        if v is None:
+            return v
+        if v < date_cls.today():
+            raise ValueError("exam_date cannot be in the past")
+        return v
+
+
+@router.get("/journey-progress")
+def get_journey_progress(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    uid = current_user.id
+
+    practice_done = db.execute(sql_text(
+        "SELECT COUNT(DISTINCT question_type) FROM user_question_attempts "
+        "WHERE user_id = :uid"
+    ), {"uid": uid}).scalar() or 0
+
+    sectional_done = db.execute(sql_text(
+        "SELECT COUNT(DISTINCT module) FROM practice_attempts "
+        "WHERE user_id = :uid AND filter_type = 'sectional' "
+        "AND status = 'complete'"
+    ), {"uid": uid}).scalar() or 0
+
+    mock_done = db.execute(sql_text(
+        "SELECT COUNT(DISTINCT session_id) FROM practice_attempts "
+        "WHERE user_id = :uid AND filter_type = 'mock' "
+        "AND status = 'complete'"
+    ), {"uid": uid}).scalar() or 0
+
+    # Mock total is dynamic — matches however many test_number rows are
+    # seeded in mock_test_questions. Falls back to 2 if the count query
+    # returns 0 (freshly-provisioned DB with no seeds).
+    mock_total = db.execute(sql_text(
+        "SELECT COUNT(*) FROM mock_test_questions"
+    )).scalar() or 2
+
+    return {
+        "practice":  {"completed": int(practice_done),  "total": _JOURNEY_PRACTICE_TOTAL},
+        "sectional": {"completed": int(sectional_done), "total": _JOURNEY_SECTIONAL_TOTAL},
+        "mock":      {"completed": int(mock_done),      "total": int(mock_total)},
+        "exam_goal": current_user.score_requirement,
+        "exam_date": str(current_user.exam_date) if current_user.exam_date else None,
+    }
+
+
+@router.patch("/journey-progress")
+def patch_journey_progress(
+    body: JourneyPatchBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    touched = False
+    if body.exam_goal is not None:
+        current_user.score_requirement = body.exam_goal
+        touched = True
+    if body.exam_date is not None:
+        current_user.exam_date = body.exam_date
+        touched = True
+    if touched:
+        db.commit()
+    return Response(status_code=204)
 
 
 # Question-type aliases — historical drift between submit-side and
