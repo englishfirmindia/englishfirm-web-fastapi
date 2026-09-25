@@ -78,10 +78,12 @@ def get_dashboard(
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Static totals — 22 question types (7 speaking + 2 writing + 5 reading + 8
-# listening), 4 sectional slots (one per module), 2 full mock tests currently
-# seeded in mock_test_questions.
+# listening), 4 sectional slots (one per module), 1 full mock test milestone.
+# All three are hard-coded constants; numerators are capped at these values
+# so a power user never sees "25 / 22 completed".
 _JOURNEY_PRACTICE_TOTAL = 22
 _JOURNEY_SECTIONAL_TOTAL = 4
+_JOURNEY_MOCK_TOTAL = 1
 
 
 class JourneyPatchBody(BaseModel):
@@ -131,17 +133,19 @@ def get_journey_progress(
         "AND status = 'complete'"
     ), {"uid": uid}).scalar() or 0
 
-    # Mock total is dynamic — matches however many test_number rows are
-    # seeded in mock_test_questions. Falls back to 2 if the count query
-    # returns 0 (freshly-provisioned DB with no seeds).
-    mock_total = db.execute(sql_text(
-        "SELECT COUNT(*) FROM mock_test_questions"
-    )).scalar() or 2
-
     return {
-        "practice":  {"completed": int(practice_done),  "total": _JOURNEY_PRACTICE_TOTAL},
-        "sectional": {"completed": int(sectional_done), "total": _JOURNEY_SECTIONAL_TOTAL},
-        "mock":      {"completed": int(mock_done),      "total": int(mock_total)},
+        "practice":  {
+            "completed": min(int(practice_done),  _JOURNEY_PRACTICE_TOTAL),
+            "total":     _JOURNEY_PRACTICE_TOTAL,
+        },
+        "sectional": {
+            "completed": min(int(sectional_done), _JOURNEY_SECTIONAL_TOTAL),
+            "total":     _JOURNEY_SECTIONAL_TOTAL,
+        },
+        "mock":      {
+            "completed": min(int(mock_done),      _JOURNEY_MOCK_TOTAL),
+            "total":     _JOURNEY_MOCK_TOTAL,
+        },
         "exam_goal": current_user.score_requirement,
         "exam_date": str(current_user.exam_date) if current_user.exam_date else None,
     }
